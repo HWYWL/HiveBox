@@ -4,6 +4,7 @@
 //! - Taps and double taps with slop filtering
 //! - Continuous pan/drag gestures with delta and velocity tracking
 //! - Directional swipe gestures (Left, Right, Up, Down)
+//! - Edge-origin swipes: a direction may be required to start at a named edge of the detector
 //! - Gesture disambiguation (suppressing child clicks when a drag is recognized)
 
 use std::time::Instant;
@@ -25,6 +26,59 @@ pub enum SwipeDirection {
     Right,
     Up,
     Down,
+}
+
+/// The edge of the detector a gesture has to start at.
+///
+/// A phone's back gesture begins at the side of the screen and its "home" gesture at the foot, and
+/// which edge a drag started on is the whole of what tells that gesture apart from the same drag
+/// made in the middle of a page — where the drag belongs to whatever is scrolling. See
+/// [`GestureDetector::swipe_origin`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edge {
+    Left,
+    Right,
+    Bottom,
+}
+
+impl Edge {
+    /// Whether `point` lies within `depth` pixels of this edge of `bounds`.
+    pub fn contains(self, point: Point, bounds: Rectangle, depth: f32) -> bool {
+        let depth = depth.max(0.0);
+
+        match self {
+            Self::Left => point.x <= bounds.x + depth,
+            Self::Right => point.x >= bounds.x + bounds.width - depth,
+            Self::Bottom => point.y >= bounds.y + bounds.height - depth,
+        }
+    }
+}
+
+impl SwipeDirection {
+    /// The slot this direction's origin is kept in.
+    fn index(self) -> usize {
+        match self {
+            Self::Left => 0,
+            Self::Right => 1,
+            Self::Up => 2,
+            Self::Down => 3,
+        }
+    }
+}
+
+/// Which way a drag of `delta` points: whichever axis it travelled furthest along.
+fn swipe_direction(delta: Vector) -> SwipeDirection {
+    if delta.x.abs() >= delta.y.abs() {
+        if delta.x < 0.0 {
+            SwipeDirection::Left
+        } else {
+            SwipeDirection::Right
+        }
+    } else if delta.y < 0.0 {
+        SwipeDirection::Up
+    } else {
+        SwipeDirection::Down
+    }
 }
 
 /// Details provided when a pan/drag gesture begins.
@@ -78,6 +132,11 @@ pub struct GestureDetector<
     on_pan_cancel: Option<Message>,
     touch_slop: f32,
     swipe_threshold: f32,
+    /// Where a swipe in each direction has to *begin*, by [`SwipeDirection::index`].
+    ///
+    /// `None` — what every direction starts as — means anywhere in the detector's bounds, which is
+    /// what a swipe meant before this existed. See [`GestureDetector::swipe_origin`].
+    swipe_origins: [Option<(Edge, f32)>; 4],
     double_tap_timeout: std::time::Duration,
     intercept_events: bool,
 }
@@ -103,8 +162,62 @@ impl<'a, Message, Theme, Renderer> GestureDetector<'a, Message, Theme, Renderer>
             on_pan_cancel: None,
             touch_slop: 18.0,
             swipe_threshold: 40.0,
+            swipe_origins: [None; 4],
             double_tap_timeout: std::time::Duration::from_millis(300),
             intercept_events: true,
+        }
+    }
+
+    /// Requires a swipe in `direction` to begin within `depth` pixels of `edge`.
+    ///
+    /// This is what lets one detector sit over a whole screen without being a layer that swallows
+    /// every drag: a drag that starts anywhere else is left to the widgets underneath, which is what
+    /// a page that scrolls is made of. The question is asked the moment a drag passes `touch_slop`
+    /// — not when it ends — because by then the widget underneath has already had its drag taken
+    /// away, and a scroll that was interrupted to no purpose is worse than no gesture layer at all.
+    ///
+    /// The edges are the *start*, not the direction: a phone's back gesture is a rightward drag that
+    /// starts at the **left** edge, and a leftward one that starts at the right. Nothing here assumes
+    /// the two are the same side.
+    pub fn swipe_origin(mut self, direction: SwipeDirection, edge: Edge, depth: f32) -> Self {
+        self.swipe_origins[direction.index()] = Some((edge, depth));
+        self
+    }
+
+    /// Whether this detector has anything to say about a swipe in `direction`.
+    fn handles(&self, direction: SwipeDirection) -> bool {
+        let specific = match direction {
+            SwipeDirection::Left => self.on_swipe_left.is_some(),
+            SwipeDirection::Right => self.on_swipe_right.is_some(),
+            SwipeDirection::Up => self.on_swipe_up.is_some(),
+            SwipeDirection::Down => self.on_swipe_down.is_some(),
+        };
+
+        specific || self.on_swipe.is_some()
+    }
+
+    /// Where a swipe in `direction` has to begin, as it was configured — `None` for anywhere.
+    ///
+    /// Exported for the tests of whoever wires a screen up. The pins are the whole of what separates
+    /// a gesture layer from a layer that eats scrolls, and a wiring that lost one would still build,
+    /// still look right, and still be wrong in the hand.
+    pub fn origin(&self, direction: SwipeDirection) -> Option<(Edge, f32)> {
+        self.swipe_origins[direction.index()]
+    }
+
+    /// Whether a drag in `direction` that started at `start` is this detector's to act on.
+    ///
+    /// Both halves matter. A direction with no handler is not this detector's, whoever's it is —
+    /// taking it would mean cancelling a drag in order to do nothing with it. And a direction with
+    /// an origin is only this detector's when the drag began there.
+    fn claims(&self, direction: SwipeDirection, start: Point, bounds: Rectangle) -> bool {
+        if !self.handles(direction) {
+            return false;
+        }
+
+        match self.swipe_origins[direction.index()] {
+            Some((edge, depth)) => edge.contains(start, bounds, depth),
+            None => true,
         }
     }
 
@@ -255,6 +368,12 @@ struct State {
     last_time: Option<Instant>,
     is_dragging: bool,
     has_dragged: bool,
+    /// Whether this drag is the detector's to act on, decided the moment it became a drag.
+    ///
+    /// A drag that is not the detector's is left entirely to the widget underneath — its moves are
+    /// forwarded and nothing is captured — which is what keeps a swipe filter from being a scroll
+    /// filter. See [`GestureDetector::claims`].
+    owns: bool,
     last_tap_time: Option<Instant>,
     last_tap_pos: Option<Point>,
 }
@@ -347,6 +466,7 @@ where
                     state.last_time = Some(now);
                     state.is_dragging = false;
                     state.has_dragged = false;
+                    state.owns = false;
 
                     if let Some(on_press) = &self.on_press {
                         shell.publish(on_press(pos));
@@ -363,6 +483,7 @@ where
                     state.last_time = Some(now);
                     state.is_dragging = false;
                     state.has_dragged = false;
+                    state.owns = false;
 
                     if let Some(on_press) = &self.on_press {
                         shell.publish(on_press(*position));
@@ -386,6 +507,14 @@ where
                         state.is_dragging = true;
                         state.has_dragged = true;
                         just_started_dragging = true;
+                        // The drag becomes the detector's (or does not) here, where the origin and
+                        // the direction are both known and the widget underneath has not yet been
+                        // interrupted. See `claims`.
+                        state.owns = self.claims(
+                            swipe_direction(Vector::new(delta_x, delta_y)),
+                            state.start_pos,
+                            bounds,
+                        );
                         if let Some(on_pan_start) = &self.on_pan_start {
                             shell.publish(on_pan_start(PanStartDetails {
                                 point: state.start_pos,
@@ -424,6 +553,14 @@ where
                         state.is_dragging = true;
                         state.has_dragged = true;
                         just_started_dragging = true;
+                        // The drag becomes the detector's (or does not) here, where the origin and
+                        // the direction are both known and the widget underneath has not yet been
+                        // interrupted. See `claims`.
+                        state.owns = self.claims(
+                            swipe_direction(Vector::new(delta_x, delta_y)),
+                            state.start_pos,
+                            bounds,
+                        );
                         if let Some(on_pan_start) = &self.on_pan_start {
                             shell.publish(on_pan_start(PanStartDetails {
                                 point: state.start_pos,
@@ -470,45 +607,34 @@ where
                             }));
                         }
 
-                        // Determine swipe
+                        // The swipe, if this is one and if it is the detector's to report.
+                        //
+                        // Asked again here rather than trusted from the moment the drag began: a
+                        // drag that begins downwards in a side strip can end up leftwards, and the
+                        // direction it *ends* in is the message that would be sent. The origin is
+                        // the same question as it was then, so a gesture that changed its mind
+                        // about its direction gets nothing rather than something surprising.
+                        let direction = swipe_direction(total_delta);
                         let is_swipe = total_delta.x.abs() >= self.swipe_threshold
                             || total_delta.y.abs() >= self.swipe_threshold
                             || velocity.x.abs() >= 250.0
                             || velocity.y.abs() >= 250.0;
 
-                        if is_swipe {
-                            if total_delta.x.abs() >= total_delta.y.abs() {
-                                if total_delta.x < 0.0 {
-                                    if let Some(msg) = &self.on_swipe_left {
-                                        shell.publish(msg.clone());
-                                    }
-                                    if let Some(cb) = &self.on_swipe {
-                                        shell.publish(cb(SwipeDirection::Left));
-                                    }
-                                } else {
-                                    if let Some(msg) = &self.on_swipe_right {
-                                        shell.publish(msg.clone());
-                                    }
-                                    if let Some(cb) = &self.on_swipe {
-                                        shell.publish(cb(SwipeDirection::Right));
-                                    }
-                                }
-                            } else {
-                                if total_delta.y < 0.0 {
-                                    if let Some(msg) = &self.on_swipe_up {
-                                        shell.publish(msg.clone());
-                                    }
-                                    if let Some(cb) = &self.on_swipe {
-                                        shell.publish(cb(SwipeDirection::Up));
-                                    }
-                                } else {
-                                    if let Some(msg) = &self.on_swipe_down {
-                                        shell.publish(msg.clone());
-                                    }
-                                    if let Some(cb) = &self.on_swipe {
-                                        shell.publish(cb(SwipeDirection::Down));
-                                    }
-                                }
+                        if is_swipe && state.owns && self.claims(direction, state.start_pos, bounds)
+                        {
+                            let specific = match direction {
+                                SwipeDirection::Left => &self.on_swipe_left,
+                                SwipeDirection::Right => &self.on_swipe_right,
+                                SwipeDirection::Up => &self.on_swipe_up,
+                                SwipeDirection::Down => &self.on_swipe_down,
+                            };
+
+                            if let Some(message) = specific {
+                                shell.publish(message.clone());
+                            }
+
+                            if let Some(on_swipe) = &self.on_swipe {
+                                shell.publish(on_swipe(direction));
                             }
                         }
                     } else if bounds.contains(pos) {
@@ -569,60 +695,39 @@ where
                 | Event::Touch(touch::Event::FingerLifted { .. })
         );
 
-        if just_started_dragging {
-            if self.intercept_events {
-                let cancel = Event::Touch(touch::Event::FingerLost {
-                    id: touch::Finger(0),
-                    position: touch_pos.unwrap_or(state.last_pos),
-                });
-                self.content.as_widget_mut().update(
-                    &mut tree.children[0],
-                    &cancel,
-                    layout,
-                    cursor,
-                    renderer,
-                    clipboard,
-                    shell,
-                    viewport,
-                );
-                shell.capture_event();
-            }
-        } else if state.is_dragging {
-            if self.intercept_events {
-                shell.capture_event();
-            }
-        } else if is_release {
-            if state.has_dragged {
-                if self.intercept_events {
-                    let cancel = Event::Touch(touch::Event::FingerLost {
-                        id: touch::Finger(0),
-                        position: touch_pos.unwrap_or(state.last_pos),
-                    });
-                    self.content.as_widget_mut().update(
-                        &mut tree.children[0],
-                        &cancel,
-                        layout,
-                        cursor,
-                        renderer,
-                        clipboard,
-                        shell,
-                        viewport,
-                    );
-                    shell.capture_event();
-                }
-                state.has_dragged = false;
-            } else {
-                self.content.as_widget_mut().update(
-                    &mut tree.children[0],
-                    event,
-                    layout,
-                    cursor,
-                    renderer,
-                    clipboard,
-                    shell,
-                    viewport,
-                );
-            }
+        let was_dragged = state.has_dragged;
+
+        if is_release && was_dragged {
+            state.has_dragged = false;
+        }
+
+        // Who the drag belongs to is what decides whether the widget underneath hears about it at
+        // all, and the answer is the one `claims` gave when the drag began. A drag this detector
+        // does not own is forwarded exactly as it always was — the filter is on the *gesture*, and
+        // a page that scrolls has to keep scrolling wherever a corner of it does not claim.
+        let consuming = state.owns && self.intercept_events;
+
+        if consuming && (just_started_dragging || (is_release && was_dragged)) {
+            // The finger is the detector's now, and the widget underneath is told so: a button
+            // under it stops being pressed, a scrollable stops scrolling. Told once at each end of
+            // the drag and not once a frame — the cancel walks the whole subtree.
+            let cancel = Event::Touch(touch::Event::FingerLost {
+                id: touch::Finger(0),
+                position: touch_pos.unwrap_or(state.last_pos),
+            });
+            self.content.as_widget_mut().update(
+                &mut tree.children[0],
+                &cancel,
+                layout,
+                cursor,
+                renderer,
+                clipboard,
+                shell,
+                viewport,
+            );
+            shell.capture_event();
+        } else if consuming && state.is_dragging {
+            shell.capture_event();
         } else {
             self.content.as_widget_mut().update(
                 &mut tree.children[0],
@@ -734,6 +839,92 @@ mod tests {
     fn swipe_directions() {
         assert_eq!(SwipeDirection::Left, SwipeDirection::Left);
         assert_ne!(SwipeDirection::Left, SwipeDirection::Right);
+    }
+
+    /// An edge is a band along one side of the bounds, and nothing else.
+    #[test]
+    fn an_edge_is_a_band_along_one_side_of_the_bounds() {
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(480.0, 480.0));
+
+        assert!(Edge::Left.contains(Point::new(0.0, 300.0), bounds, 24.0));
+        assert!(Edge::Left.contains(Point::new(24.0, 300.0), bounds, 24.0));
+        assert!(!Edge::Left.contains(Point::new(24.1, 300.0), bounds, 24.0));
+
+        assert!(Edge::Right.contains(Point::new(456.0, 300.0), bounds, 24.0));
+        assert!(!Edge::Right.contains(Point::new(455.9, 300.0), bounds, 24.0));
+
+        // The bottom band is the foot of the panel and nothing above it, which is what keeps a
+        // swipe up in the middle of a page from reading as a swipe up from its edge.
+        assert!(Edge::Bottom.contains(Point::new(200.0, 470.0), bounds, 24.0));
+        assert!(!Edge::Bottom.contains(Point::new(200.0, 450.0), bounds, 24.0));
+    }
+
+    /// The band is measured from the detector's own bounds, wherever they happen to be.
+    #[test]
+    fn an_edge_follows_the_bounds_it_is_measured_in() {
+        let bounds = Rectangle::new(Point::new(100.0, 50.0), Size::new(200.0, 300.0));
+
+        assert!(Edge::Left.contains(Point::new(110.0, 200.0), bounds, 24.0));
+        assert!(!Edge::Left.contains(Point::new(130.0, 200.0), bounds, 24.0));
+
+        assert!(Edge::Bottom.contains(Point::new(200.0, 340.0), bounds, 24.0));
+        assert!(!Edge::Bottom.contains(Point::new(200.0, 320.0), bounds, 24.0));
+    }
+
+    /// A drag points along whichever axis it travelled furthest.
+    #[test]
+    fn a_drag_points_along_the_axis_it_travelled() {
+        assert_eq!(swipe_direction(Vector::new(-60.0, 5.0)), SwipeDirection::Left);
+        assert_eq!(swipe_direction(Vector::new(60.0, -5.0)), SwipeDirection::Right);
+        assert_eq!(swipe_direction(Vector::new(5.0, -60.0)), SwipeDirection::Up);
+        assert_eq!(swipe_direction(Vector::new(-5.0, 60.0)), SwipeDirection::Down);
+
+        // Exactly diagonal is a tie, and the tie goes to the horizontal: a thumb crossing the panel
+        // is a side gesture far more often than it is a vertical one.
+        assert_eq!(
+            swipe_direction(Vector::new(30.0, -30.0)),
+            SwipeDirection::Right
+        );
+    }
+
+    /// A swipe is claimed when the detector can answer it *and* the drag began where that direction
+    /// says it has to.
+    #[test]
+    fn a_swipe_is_claimed_only_where_it_began() {
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(480.0, 480.0));
+        let content: Element<'_, (), iced::Theme> = text("x").into();
+
+        let detector = gesture_detector(content)
+            .on_swipe_up(())
+            .on_swipe_right(())
+            .swipe_origin(SwipeDirection::Up, Edge::Bottom, 24.0)
+            .swipe_origin(SwipeDirection::Right, Edge::Left, 24.0);
+
+        // Claimed: up from the foot of the panel, right from its left side.
+        assert!(detector.claims(SwipeDirection::Up, Point::new(200.0, 470.0), bounds));
+        assert!(detector.claims(SwipeDirection::Right, Point::new(4.0, 200.0), bounds));
+
+        // Not claimed: the same directions, started anywhere else. This is the half that keeps a
+        // page scrolling — the drag is left to the widget underneath rather than taken and dropped.
+        assert!(!detector.claims(SwipeDirection::Up, Point::new(200.0, 240.0), bounds));
+        assert!(!detector.claims(SwipeDirection::Right, Point::new(240.0, 200.0), bounds));
+
+        // Not claimed: directions with no handler at all, wherever they began. Intercepting a drag
+        // in order to do nothing with it is the one thing this filter exists to prevent.
+        assert!(!detector.claims(SwipeDirection::Down, Point::new(4.0, 470.0), bounds));
+        assert!(!detector.claims(SwipeDirection::Left, Point::new(4.0, 200.0), bounds));
+    }
+
+    /// With no origin set, a direction is claimed anywhere — what a swipe meant before origins.
+    #[test]
+    fn a_swipe_with_no_origin_is_claimed_anywhere() {
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(480.0, 480.0));
+        let content: Element<'_, (), iced::Theme> = text("x").into();
+
+        let detector = gesture_detector(content).on_swipe_left(());
+
+        assert!(detector.claims(SwipeDirection::Left, Point::new(240.0, 240.0), bounds));
+        assert!(detector.claims(SwipeDirection::Left, Point::new(2.0, 478.0), bounds));
     }
 }
 

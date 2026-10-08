@@ -116,6 +116,22 @@ pub const SLOP: f32 = 18.0;
 /// the page with only a brief swipe.
 pub const SWIPE_COMMIT: f32 = 216.0;
 
+/// How far from an edge of the panel a gesture has to *begin* to be that edge's gesture.
+///
+/// This is the band that tells a "go back" drag apart from a page scrolling, and it is the reason
+/// the gesture layer can cover the whole screen at all: the swipe in the middle of a page is not
+/// claimed, so it stays the page's. 24 px of a 480 px panel — a thumb's margin, and narrow enough
+/// that the back button the settings pages put at the top left still gets its own presses.
+pub const EDGE_ZONE: f32 = 24.0;
+
+/// How far an edge swipe has to travel to count, rather than be a slip of the finger.
+///
+/// Roughly half of [`SWIPE_COMMIT`], and for a reason: turning a page is a deliberate move across
+/// the screen, while going back is the shortest gesture a phone has and has to read as one. The
+/// detector's own flick escape — 250 px/s — is what covers the quick flick that never travels this
+/// far.
+pub const EDGE_SWIPE: f32 = 96.0;
+
 /// The page dots: one per page, the page that is up lit.
 ///
 /// Exported, like [`SCREEN`], because the panel tests find what is on screen by its colour.

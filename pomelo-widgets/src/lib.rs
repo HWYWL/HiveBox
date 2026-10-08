@@ -36,7 +36,7 @@ pub mod touch_keyboard;
 pub use animation::{AnimationController, Curve};
 pub use app::{AppIcon, AppMeta, BitmapIcon};
 pub use gesture::{
-    gesture_detector, GestureDetector, PanEndDetails, PanStartDetails, PanUpdateDetails,
+    gesture_detector, Edge, GestureDetector, PanEndDetails, PanStartDetails, PanUpdateDetails,
     SwipeDirection,
 };
 pub use pager::{pager, Pager};

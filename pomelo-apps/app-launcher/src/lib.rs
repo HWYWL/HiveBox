@@ -136,6 +136,12 @@ pub enum Message {
     PageChanged(usize),
     /// The back button, or hardware button 1 (moves to background).
     Back,
+    /// The bottom edge was swiped up: back to the desktop, leaving the app running.
+    ///
+    /// Its own message and not [`Message::Back`], because the two differ exactly where it matters:
+    /// back asks the app first — the settings list takes it to leave a sub-page — while a swipe up
+    /// from the foot of the panel says which of the two things the finger meant.
+    Home,
     /// The exit / kill button, or hardware button 2 (kills app and frees memory).
     Exit,
     /// The status bar's readings, driven by the [`Subscription`].
@@ -836,6 +842,7 @@ impl Launcher {
                 self.page = page;
             }
             Message::Back => return self.go_back(),
+            Message::Home => self.go_home(),
             Message::Exit => match self.screen {
                 Screen::App(index) => {
                     self.kill_app(index);
@@ -935,9 +942,24 @@ impl Launcher {
         task
     }
 
+    /// Returns to the desktop, leaving the running app where it is.
+    ///
+    /// What the swipe up from the foot of the panel does, and what it means on a phone: the app is
+    /// not closed, it is put aside. It stays in `running_apps` and in the status bar, and its tile
+    /// brings it back with the page it was on still up. On the grid there is nothing to do, because
+    /// the grid *is* home.
+    fn go_home(&mut self) {
+        self.screen = Screen::Grid;
+    }
+
     /// Describes the interface for the current state.
+    ///
+    /// The screen is wrapped in the panel's edge gestures (see [`Launcher::edge_gestures`]), and
+    /// this is the only place they can be put: the platform draws *this* program, so a gesture
+    /// around this view is a gesture over every app the launcher hosts. One put inside an app would
+    /// be a gesture that app had to know about.
     pub fn view(&self) -> Element<'_, Message> {
-        match self.screen {
+        let screen = match self.screen {
             Screen::Grid => self.launcher(),
             Screen::App(TERMINAL) => self.terminal_screen(),
             Screen::App(CALCULATOR) => self.calculator_screen(),
@@ -948,7 +970,42 @@ impl Launcher {
             // An index the catalogue does not have. The grid cannot produce one, but `usize` is not
             // exhaustible, so the arm exists and shows the only screen that is always there.
             Screen::App(_) => self.launcher(),
-        }
+        };
+
+        self.edge_gestures(screen).into()
+    }
+
+    /// The screen, with the panel's edge gestures around it.
+    ///
+    /// Two gestures, and both are the ones a phone has: a swipe up from the foot of the panel goes
+    /// back to the desktop, and a swipe in from either side goes back a page.
+    ///
+    /// Every one of them is pinned to the edge it *starts* at, and that pin is the whole of what
+    /// makes this layer possible: an unpinned swipe would take every drag there is, and a page that
+    /// scrolls is a page of drags. The origin is asked the moment a drag passes [`style::SLOP`], so
+    /// a scroll in the middle of a page is never interrupted in the first place — see
+    /// `GestureDetector::swipe_origin`.
+    ///
+    /// Downwards is given no handler and no origin on purpose: the detector does not claim what it
+    /// cannot act on, and a scroll that goes up has to stay a scroll.
+    ///
+    /// The two horizontal pins are opposite sides of the same idea: a phone's back gesture is a
+    /// rightward drag that began at the **left** edge, and a leftward one that began at the right.
+    fn edge_gestures<'b>(
+        &self,
+        screen: Element<'b, Message>,
+    ) -> pomelo_widgets::GestureDetector<'b, Message> {
+        use pomelo_widgets::{gesture_detector, Edge, SwipeDirection};
+
+        gesture_detector(screen)
+            .touch_slop(style::SLOP)
+            .swipe_threshold(style::EDGE_SWIPE)
+            .on_swipe_up(Message::Home)
+            .on_swipe_left(Message::Back)
+            .on_swipe_right(Message::Back)
+            .swipe_origin(SwipeDirection::Up, Edge::Bottom, style::EDGE_ZONE)
+            .swipe_origin(SwipeDirection::Left, Edge::Right, style::EDGE_ZONE)
+            .swipe_origin(SwipeDirection::Right, Edge::Left, style::EDGE_ZONE)
     }
 }
 
@@ -1410,6 +1467,76 @@ mod tests {
         assert_eq!(launcher.wifi, 3);
         assert_eq!(launcher.settings().battery().percent, 85);
         assert!(launcher.settings().battery().charging);
+    }
+
+    /// The swipe up from the foot of the panel: home, with the app put aside rather than closed.
+    ///
+    /// Its own message and not `Message::Back` is the point of the test. Back asks the app first, so
+    /// on a settings sub-page it turns the page; a swipe up says which of the two things the finger
+    /// meant, and the app comes back from the desktop on the page it was on.
+    #[test]
+    fn a_swipe_up_goes_home_and_leaves_the_app_running() {
+        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
+
+        launcher.update(Message::Open(SETTINGS));
+        launcher.update(Message::Settings(settings::Message::Open(
+            settings::SettingsSection::Battery,
+        )));
+        assert_eq!(launcher.screen, Screen::App(SETTINGS));
+
+        launcher.update(Message::Home);
+
+        assert_eq!(launcher.screen, Screen::Grid, "the desktop is back");
+        assert!(
+            launcher.is_app_running(SETTINGS),
+            "and the app is put aside, not closed"
+        );
+        assert_eq!(
+            launcher.settings().section(),
+            settings::SettingsSection::Battery,
+            "with the page it was on still up"
+        );
+
+        // On the desktop there is nowhere further to go: the grid is what home is.
+        launcher.update(Message::Home);
+        assert_eq!(launcher.screen, Screen::Grid);
+    }
+
+    /// Every edge gesture is pinned to the edge it starts at, and the downward one is not a gesture.
+    ///
+    /// The wiring, and not the dragging: a finger's path through the widget tree is the panel
+    /// tests' business. What matters here — and what would still build if it went missing — is that
+    /// each swipe is tied to a band of the panel. Without the pins the layer over the whole screen
+    /// would take every drag on it, and a page that scrolls is a page of drags.
+    #[test]
+    fn the_gestures_are_pinned_to_the_edges_they_start_at() {
+        use pomelo_widgets::{Edge, SwipeDirection};
+
+        let launcher = Launcher::new(Arc::new(Board::simulated()));
+        let detector = launcher.edge_gestures(Space::new().into());
+
+        assert_eq!(
+            detector.origin(SwipeDirection::Up),
+            Some((Edge::Bottom, style::EDGE_ZONE)),
+            "a swipe up is a swipe up from the foot of the panel"
+        );
+
+        // The back gesture starts at the edge opposite the way it travels: a rightward drag from
+        // the left side, a leftward one from the right.
+        assert_eq!(
+            detector.origin(SwipeDirection::Right),
+            Some((Edge::Left, style::EDGE_ZONE))
+        );
+        assert_eq!(
+            detector.origin(SwipeDirection::Left),
+            Some((Edge::Right, style::EDGE_ZONE))
+        );
+
+        assert_eq!(
+            detector.origin(SwipeDirection::Down),
+            None,
+            "a downward drag is nobody's gesture here: it is a page scrolling"
+        );
     }
 
     #[test]
