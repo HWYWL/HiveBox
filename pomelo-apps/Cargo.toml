@@ -1,0 +1,36 @@
+# The seven applications, as one project.
+#
+# Each app is its own crate — its own `main.rs`, its own test suite, its own `desktop` feature — and
+# this table is what makes them one project: one `Cargo.lock`, `cargo test --workspace` in one
+# command, and `cargo run -p <app>` from here.
+#
+# There is deliberately **no `[patch]` table**. A root's patches decide which iced and which renderer
+# the whole graph gets, and in this repository that answer is "the real one, from crates.io, with a
+# window" — that is what an app is when nobody is building it for the board. The firmware's roots
+# have their own tables and depend on these crates by path: the same manifests, a different graph.
+#
+# The three crates the apps share (`pomelo-hal`, `pomelo-widgets`, `pomelo-material-symbols`) come
+# from GitHub, pinned by revision in the manifests that need them, because this project builds on
+# its own: only the applications are here.
+[workspace]
+resolver = "2"
+
+members = [
+    "app-launcher",
+    "calculator",
+    "demo-counter",
+    "hello",
+    "music-player",
+    "settings",
+    "terminal",
+]
+
+[patch."https://github.com/pomelos-on-sale/pomelo-widgets.git"]
+pomelo-widgets = { path = "../pomelo-widgets" }
+
+[patch."https://github.com/pomelos-on-sale/pomelo-hal.git"]
+pomelo-hal = { path = "../pomelo-hal" }
+
+[patch."https://github.com/pomelos-on-sale/pomelo-material-symbols.git"]
+pomelo-material-symbols = { path = "../ui-framework/pomelo-material-symbols" }
+

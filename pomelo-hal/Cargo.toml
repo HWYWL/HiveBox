@@ -1,0 +1,27 @@
+[package]
+name = "pomelo-hal"
+version = "0.1.0"
+edition = "2021"
+description = "The Pomelo OS hardware interface: board-level traits (power, Wi-Fi, audio, mic, IMU), the Board facade, and a desktop simulator. The ESP32-S3 implementation lives in the firmware, not here."
+license = "GPL-3.0-only"
+repository = "https://github.com/pomelos-on-sale/pomelo-hal"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# The configuration files. A board's settings are typed structs that round-trip to TOML, so the
+# reader, the writer and the type check are all one `derive` rather than a parser per file — see
+# `wifi_credentials`.
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[target.'cfg(not(target_os = "espidf"))'.dependencies]
+# Real desktop playback for the simulator audio backend. Optional so the
+# silent (position-tracking only) simulator works without any audio device.
+rodio = { version = "0.20", optional = true }
+
+[features]
+default = []
+# Enables real desktop audio output (rodio) in the simulator backend.
+simulator = ["dep:rodio"]

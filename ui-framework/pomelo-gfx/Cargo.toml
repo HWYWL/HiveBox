@@ -1,0 +1,13 @@
+[package]
+name = "pomelo-gfx"
+version = "0.1.0"
+edition = "2021"
+description = "A hand-written, dependency-free 2D rasterizer that draws straight into an RGB565 frame buffer"
+license = "GPL-3.0-only"
+repository = "https://github.com/pomelos-on-sale/pomelo-gfx"
+readme = "README.md"
+keywords = ["graphics", "rasterizer", "rgb565", "embedded"]
+categories = ["graphics", "embedded"]
+
+[dependencies]
+kurbo = { version = "0.10", default-features = false, features = ["std"] }

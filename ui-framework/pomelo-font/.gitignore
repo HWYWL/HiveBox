@@ -1,0 +1,9 @@
+# source/ — 源字体（不进 git）
+source/*.otf
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+.venv

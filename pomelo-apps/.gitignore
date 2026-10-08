@@ -1,0 +1,3 @@
+# Build output. One target directory for the whole workspace, at this root: a member never gets its
+# own, because `cargo` puts it where the *root* manifest is.
+**/target/

@@ -1,0 +1,5 @@
+/target
+
+# The upstream Material Symbols files (10.7 MB of variable font, its code point table and the
+# licence). One command reproduces them: the exact `curl`s are in `tools/bake_icons.py`'s header.
+/fonts/source/

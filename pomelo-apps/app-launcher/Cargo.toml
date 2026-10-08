@@ -1,0 +1,63 @@
+[package]
+name = "app-launcher"
+version = "0.1.0"
+edition = "2021"
+description = "A standard iced program: the launcher, hosting the other apps as widgets"
+license = "GPL-3.0-only"
+
+# A member of the workspace at the root of this repository (`Cargo.toml`): that is what lets
+# `cargo test --workspace` run all seven apps against one lock while each stays its own crate, with
+# its own `main.rs` and its own `desktop` feature. Nothing in this graph patches anything, so
+# `cargo run` here builds against iced from crates.io, exactly like any other iced program.
+#
+# That is also why the firmware cannot list this as a *member* — the apps are a project of their
+# own — so `rust_main` and `firmware/panel-tests` depend on it by path. Patches and features are
+# the root's business, and the firmware's root is the one that has them.
+
+[dependencies]
+# The facade, like any other iced program. No platform layer, and the renderer is `desktop`'s
+# business: iced's features are unified across the whole graph, so the apps hosted below agree with
+# this one about which renderer an `Element` belongs to because they are built in the same graph.
+#
+# Both display servers, because which one exists is the machine's business and not the app's (and
+# iced `compile_error!`s without at least one of them on unix).
+iced = { version = "0.14", default-features = false, features = ["thread-pool", "x11", "wayland", "advanced"] }
+
+# The board the hosted apps are handed. The launcher only passes it on (`program` takes one), but
+# that makes the interface crate part of its public API — the same way the firmware's call does.
+# From GitHub by revision: a sibling repository, and this project builds on its own.
+pomelo-hal = { git = "https://github.com/pomelos-on-sale/pomelo-hal.git", rev = "20eaa910f0a05cd68684d6aa868fd78457c51be9" }
+
+# The apps it hosts, as widgets. `default-features = false` everywhere so that the *renderer* is this
+# project's or the firmware's choice and never a child's: their `desktop` default would otherwise
+# decide it from inside a dependency.
+calculator = { path = "../calculator", default-features = false }
+demo-counter = { path = "../demo-counter", default-features = false }
+hello = { path = "../hello", default-features = false }
+music-player = { path = "../music-player", default-features = false }
+settings = { path = "../settings", default-features = false }
+terminal = { path = "../terminal", default-features = false }
+
+# The icons the grid draws. A crate of its own -- a font and a table of `Icon` constants, with no
+# widgets in it -- so that this app does not have to depend on `pomelo-widgets` to draw a picture:
+# the launcher draws no keyboard. It carries no renderer, so `desktop` below is the only switch
+# here.
+#
+# From GitHub, pinned by revision: the crate is finished and this checkout keeps no copy of it (see
+# `vendor/README.md`). The revision is the whole pin.
+pomelo-material-symbols = { git = "https://github.com/pomelos-on-sale/pomelo-material-symbols.git", rev = "7dc390fb1924dc69b375e5ae77806857f798cc58" }
+
+# System preferences and theme tokens
+pomelo-widgets = { git = "https://github.com/pomelos-on-sale/pomelo-widgets.git", rev = "f499da5cc17ef16ced6e6b1e62286bb020837a0b" }
+
+[features]
+# On by default, because a project of its own is a desktop program. The board is the other way
+# round: `rust_main` and `firmware/panel-tests` depend on this crate with `default-features = false`,
+# and the platform layer turns `pomelo` on instead — the two are mutually exclusive inside
+# `iced_renderer`, so it has to be one or the other.
+desktop = ["iced/tiny-skia", "iced/image"]
+default = ["desktop"]
+
+[build-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+

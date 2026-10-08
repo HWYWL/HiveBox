@@ -1,0 +1,57 @@
+[package]
+name = "iced_renderer"
+description = "The official renderer for iced"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+categories.workspace = true
+keywords.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+wgpu = ["iced_wgpu/default"]
+wgpu-bare = ["iced_wgpu"]
+tiny-skia = ["iced_tiny_skia", "iced_tiny_skia/softbuffer"]
+# The integrator brings its own surface and compositor, but `iced_widget`'s defaults still need
+# a concrete renderer: `()` only implements the renderer traits under `debug_assertions`, so a
+# release build cannot leave this crate without one. Ours is `iced_tiny_skia`'s.
+# The integrator brings its own surface and compositor, but `iced_widget`'s defaults still need
+# a concrete renderer: `()` only implements the renderer traits under `debug_assertions`, so a
+# release build cannot leave this crate without one. Ours is `iced_tiny_skia`'s.
+custom = ["iced_tiny_skia"]
+# Our renderer: `iced-pomelo-gfx`, which records a frame's commands instead of rasterising it so
+# that the platform can replay them into the panel's own buffer. Like `custom`, the surface and the
+# compositor stay with the integrator -- the difference is that this one also says *which* renderer
+# the name above points at, which is what lets an app write `type Renderer = iced::Renderer` and
+# still be drawn by us. It wins over `custom` when both are on, because that is the combination a
+# real build has: `custom` names a renderer for the defaults, `pomelo` says the renderer is ours.
+pomelo = ["dep:iced_pomelo_gfx"]
+image = ["iced_tiny_skia?/image", "iced_wgpu?/image"]
+svg = ["iced_tiny_skia?/svg", "iced_wgpu?/svg"]
+geometry = ["iced_graphics/geometry", "iced_tiny_skia?/geometry", "iced_wgpu?/geometry"]
+web-colors = ["iced_wgpu?/web-colors"]
+webgl = ["iced_wgpu?/webgl"]
+fira-sans = ["iced_graphics/fira-sans"]
+strict-assertions = ["iced_wgpu?/strict-assertions"]
+x11 = ["iced_tiny_skia?/x11"]
+wayland = ["iced_tiny_skia?/wayland"]
+
+[dependencies]
+iced_graphics.workspace = true
+
+iced_tiny_skia.workspace = true
+iced_tiny_skia.optional = true
+
+iced_pomelo_gfx.workspace = true
+iced_pomelo_gfx.optional = true
+
+iced_wgpu.workspace = true
+iced_wgpu.optional = true
+
+log.workspace = true
+thiserror.workspace = true

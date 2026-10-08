@@ -1,0 +1,48 @@
+[package]
+name = "iced_tiny_skia"
+description = "A software renderer for iced on top of tiny-skia"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+categories.workspace = true
+keywords.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# `softbuffer` is named explicitly rather than pulled in by `x11`/`wayland`, because a target that
+# has no display server at all still has to be able to *say* `x11` — iced's facade refuses to build
+# on unix without one of them (`src/lib.rs`), and `xtensa-esp32s3-espidf` is `unix`. With the
+# implicit form, saying it dragged softbuffer in, which does not build for ESP-IDF: the only way
+# out of the guard would have been a second patch to the guard itself.
+#
+# Desktop is unchanged: softbuffer is on by default, and `x11`/`wayland` still turn their half of it
+# on whenever it is.
+default = ["x11", "wayland", "softbuffer"]
+image = ["iced_graphics/image"]
+svg = ["iced_graphics/svg", "resvg"]
+geometry = ["iced_graphics/geometry"]
+x11 = ["softbuffer?/x11", "softbuffer?/x11-dlopen"]
+wayland = ["softbuffer?/wayland", "softbuffer?/wayland-dlopen"]
+
+[dependencies]
+iced_debug.workspace = true
+iced_graphics.workspace = true
+
+bytemuck.workspace = true
+cosmic-text.workspace = true
+kurbo.workspace = true
+log.workspace = true
+rustc-hash.workspace = true
+# Only the window compositor needs this, and it is desktop-only: softbuffer has no
+# ESP-IDF backend (its "unsupported platform" fallback does not even compile).
+# `x11`/`wayland` still enable it implicitly, so desktop builds are unchanged.
+softbuffer = { workspace = true, optional = true }
+tiny-skia.workspace = true
+
+resvg.workspace = true
+resvg.optional = true

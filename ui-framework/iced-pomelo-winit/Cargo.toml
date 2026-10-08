@@ -1,0 +1,84 @@
+[package]
+name = "iced_winit"
+version = "0.14.0"
+edition = "2021"
+description = "The Pomelo OS host for iced, under the name iced's facade asks for: the event loop, the panel's buffers and fonts — the place iced_winit occupies on a desktop"
+license = "GPL-3.0-only"
+repository = "https://github.com/pomelos-on-sale/iced-pomelo-winit"
+
+[features]
+# The recorded renderer: `iced-pomelo-gfx` draws straight into the panel's RGB565 buffer in place
+# of `tiny-skia`. Off by default while it is being written, so the workspace and the firmware keep
+# building without it; `Surface` picks the path at compile time. Running an iced `Program` needs
+# it, because a `Program`'s renderer has to be a headless one that can name a compositor -- the
+# `run` that a build without it gets is the compatibility stub in `lib.rs`.
+default = []
+renderer = ["dep:iced-pomelo-gfx", "iced_renderer/pomelo"]
+# One timing line per painted frame, split by phase: the recorded renderer's `profile` module is
+# the counters, so this implies `renderer`. A split of a frame that something else drew would not
+# be a split of anything.
+profile = ["renderer", "iced-pomelo-gfx/profile"]
+
+# The facade forwards all of these to `iced_winit`, and on a desktop they select winit features
+# (accessibility, system info, X11/Wayland, ...). There is no window here, so none of them can mean
+# anything -- but they have to *exist*, because `iced = { features = ["x11"] }` is a resolve error
+# if the feature is missing from the crate it forwards to.
+debug = []
+sysinfo = []
+unconditional-rendering = []
+linux-theme-detection = []
+x11 = []
+wayland = []
+
+[dependencies]
+# Both of these are repositories of their own, so they arrive over git like any other
+# third-party crate: a path dependency only resolves where the directories happen to lie next to
+# each other, which is true inside `pomelo-os` and nowhere else. `pomelo-os` patches both git
+# sources back to its submodules, so a build there uses the checkouts that are open.
+#
+# The panel's RGB565 frame buffer and its pack functions, and -- with `renderer` on -- the renderer
+# itself, over the same rasteriser.
+pomelo-gfx = { git = "ssh://git@github.com/pomelos-on-sale/pomelo-gfx.git" }
+iced-pomelo-gfx = { git = "ssh://git@github.com/pomelos-on-sale/iced-pomelo-gfx.git", optional = true }
+
+# iced. We take the individual crates instead of the `iced` facade, which pulls in `iced_winit` —
+# winit does not build for ESP-IDF. This crate answers to that name; see the crate docs.
+#
+# `iced_runtime` is where the widget tree and its event handling live (`UserInterface`), which is
+# the half of iced's loop that is not windowing. `iced_program` is iced's `Program` — the entry
+# point an app written for iced already has, which `program.rs` hosts. We do *not* use
+# `iced_program::Settings`: it is sized for a windowing backend (window settings, window ids, an
+# async executor, subscriptions) and cannot even construct a renderer without a compositor.
+iced_runtime = "0.14"
+iced_core = "0.14"
+iced_graphics = "0.14"
+iced_program = "0.14"
+iced_futures = "0.14"
+
+# Re-exported under the names the facade imports them by (`iced_winit::core`, `::program`,
+# `::runtime`), which is how `iced::Element` and friends are reached on a desktop.
+#
+# `custom` is how this host says "we bring the surface and the compositor; use `iced_tiny_skia`'s
+# renderer for the defaults". The `renderer` feature turns on `pomelo` as well, which is the same
+# arrangement with a different name at the end: it makes `iced_renderer::Renderer` -- and therefore
+# `iced::Renderer`, and therefore an app's `type Renderer` -- ours. That is the whole point of the
+# feature pair: without it an app drawn by us would be written against another renderer.
+iced_renderer = { version = "0.14", default-features = false, features = ["custom"] }
+
+# We build the `PixmapMut` the `tiny-skia` path draws into ourselves, so the buffer layout is ours
+# to state rather than something inherited from a windowing backend.
+#
+# Same features as iced's own workspace selects, deliberately: with the default features on,
+# `png-format` would pull `png` + `flate2` + `miniz_oxide` into the dependency graph of a firmware
+# that never saves a PNG. (`simd` is x86-only and degrades to scalar everywhere else.)
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
+
+# iced's own software renderer — its renderer traits, its retained layers, its cosmic-text
+# paragraph. `default-features = false` drops only its softbuffer-based window compositor (no
+# ESP-IDF backend); we drive `Renderer::draw` into our own buffer and present the damaged regions
+# ourselves.
+iced_tiny_skia = { version = "0.14", default-features = false }
+
+[dev-dependencies]
+# The tests build widget trees; the crate itself only drives them.
+iced_widget = { version = "0.14", default-features = false }

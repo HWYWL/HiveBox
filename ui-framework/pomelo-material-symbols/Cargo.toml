@@ -1,0 +1,24 @@
+[package]
+name = "pomelo-material-symbols"
+version = "0.1.0"
+edition = "2021"
+description = "Google's Material Symbols as one Rust `Icon` per icon: the pinned, instanced subset Pomelo OS draws with, and the `Font` to draw it through."
+license = "GPL-3.0-only"
+repository = "https://github.com/pomelos-on-sale/pomelo-material-symbols"
+readme = "README.md"
+keywords = ["icons", "font", "material-symbols", "embedded"]
+categories = ["embedded", "graphics"]
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# For `Font` and nothing else: `Font::with_name` is how a caller says "draw this
+# with the icon font", and `Font` lives here.
+#
+# Not the `iced` facade, which would drag a platform layer and a renderer into
+# every graph that wants an icon -- and iced's facade needs a display-server
+# feature on unix, which is a negotiation this crate has no business being part
+# of. `iced_core` is the same crate the facade re-exports, so `Font` from here
+# *is* `iced::Font` in a program that names the facade.
+iced_core = "0.14"

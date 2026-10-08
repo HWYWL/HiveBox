@@ -1,0 +1,49 @@
+[package]
+name = "calculator"
+version = "0.1.0"
+edition = "2021"
+description = "A standard iced program: calculator state, update and view"
+license = "GPL-3.0-only"
+
+# A member of the workspace at the root of this repository (`Cargo.toml`): that is what lets
+# `cargo test --workspace` run all seven apps against one lock while each stays its own crate, with
+# its own `main.rs` and its own `desktop` feature. Nothing in this graph patches anything, so
+# `cargo run` here builds against iced from crates.io, exactly like any other iced program.
+#
+# That is also why the firmware cannot list this as a *member* — the apps are a project of their
+# own — so `rust_main` and `firmware/panel-tests` depend on it by path. Patches and features are
+# the root's business, and the firmware's root is the one that has them.
+
+[dependencies]
+# The facade, like any other iced program. `default-features = false` because the defaults select
+# `wgpu`, which this board has none of. `thread-pool` is iced's executor — the facade refuses to
+# compile without one of tokio/smol/thread-pool, and none of them run here, because the platform
+# layer names its own. `x11` + `wayland` satisfy the facade's display-server guard, which fires for
+# ESP-IDF too (`xtensa-esp32s3-espidf` reports `target_family = "unix"`).
+#
+# Both display servers, because which one exists is the machine's business and not the app's: on
+# this WSLg box it is Wayland (`libxkbcommon-x11.so` is not installed, and winit's X11 backend dies
+# loading it), on a plain X11 desktop it is X11. iced `compile_error!`s without at least one of them
+# on unix, so this is the floor rather than a preference.
+#
+# There is deliberately no dependency on the platform layer here. Inside pomelo-os the firmware's
+# root patches iced's `iced_winit` to `vendor/iced-pomelo-winit`, so this same manifest builds for
+# the board; a project of its own gets iced's real `iced_winit` and a window.
+iced = { version = "0.14", default-features = false, features = ["thread-pool", "x11", "wayland"] }
+pomelo-widgets = { git = "https://github.com/pomelos-on-sale/pomelo-widgets.git", rev = "f499da5cc17ef16ced6e6b1e62286bb020837a0b" }
+
+[features]
+# On by default, because a project of its own is a desktop program: iced needs *a* renderer, and this
+# is the one that needs no GPU. `cargo run` here would otherwise select iced's null renderer, which
+# draws nothing (and fails to compile in release).
+#
+# The board is the other way round: `rust_main` and `firmware/panel-tests` depend on this crate with
+# `default-features = false`, and the platform layer turns `pomelo` on instead. The two are mutually
+# exclusive inside `iced_renderer`, so it has to be one or the other rather than both.
+desktop = ["iced/tiny-skia"]
+default = ["desktop"]
+
+[dev-dependencies]
+# The widget-tree tester: it drives the real widget tree with no host, no window and no pixels.
+# This is what an iced program's own tests look like (see iced's `examples/counter`).
+iced_test = "0.14"

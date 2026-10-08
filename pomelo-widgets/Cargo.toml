@@ -1,0 +1,35 @@
+[package]
+name = "pomelo-widgets"
+version = "0.1.0"
+edition = "2021"
+description = "The widgets our apps share: one key table, one palette and one geometry for all of them"
+license = "GPL-3.0-only"
+
+# A member of the workspace one directory up (`vendor/Cargo.toml`), not a project of its own: the
+# libraries we own are built and tested together there, against the same fork of iced the firmware
+# is built with. There is deliberately no `[workspace]` here -- a member that declares one is
+# "multiple workspace roots found in the same workspace".
+#
+# Its consumers are the apps in `pomelos-on-sale/pomelo-apps` — which take it by git, pinned to a
+# revision, because that project builds on its own — and `firmware/panel-tests`, which takes it by
+# path; the root of each of *their* graphs decides which renderer draws.
+
+[dependencies]
+# The facade, like any other iced program. `default-features = false` because the defaults select
+# `wgpu`, which this board has none of; `thread-pool` is one of iced's executors and the facade
+# refuses to compile without one of them; `x11` + `wayland` satisfy its display-server guard, which
+# fires for ESP-IDF too (`xtensa-esp32s3-espidf` reports `target_family = "unix"`).
+#
+# No renderer, and no `desktop` feature to pick one: a widget crate builds `Element`s and never
+# draws them, so which renderer does is the graph root's business. That is also the only thing that
+# works *here*: this crate is a member of the libraries' workspace, where `iced_winit` is
+# `iced-pomelo-winit`, and turning iced's software renderer on from this manifest would ask
+# `iced_renderer` for `iced_tiny_skia::window` -- which the fork only compiles behind `softbuffer`,
+# a feature no edge in that graph enables (`iced_renderer/tiny-skia` on its own reaches it only
+# through `iced_tiny_skia`'s defaults, and the fork's workspace sets those off).
+#
+# The apps keep their own `desktop = ["iced/tiny-skia"]`; features are per package, so the facade
+# is still built with it there, and the board's roots turn it off.
+iced = { version = "0.14", default-features = false, features = ["thread-pool", "x11", "wayland", "advanced"] }
+pomelo-material-symbols = { git = "https://github.com/pomelos-on-sale/pomelo-material-symbols.git", rev = "7dc390fb1924dc69b375e5ae77806857f798cc58" }
+
