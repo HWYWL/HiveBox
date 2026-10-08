@@ -45,6 +45,13 @@ idf_component_register(
         # from the LittleFS component that owns it.
         fatfs
         joltwallet__littlefs
+    # The flash map: how big the chip is (`esp_flash_get_size`) and what it holds
+    # (`esp_partition_find`, `esp_partition_get`). Private and not a `REQUIRES`: nothing outside this
+    # component names either header, because `board_hal.h` describes the map in plain C types that
+    # both the Rust side and the C side can read.
+    PRIV_REQUIRES
+        spi_flash
+        esp_partition
 )
 
 # Intercept POSIX settimeofday and clock_settime so they automatically persist to hardware RTC

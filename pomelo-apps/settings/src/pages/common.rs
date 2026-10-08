@@ -285,6 +285,67 @@ pub(crate) fn usage_bar<'a>(
     )
 }
 
+/// A bar divided into one segment per region of a flash map.
+///
+/// The same rule as [`usage_bar`]'s two halves holds for every segment, which is why the shares are
+/// computed here rather than handed in: this layout engine reads a share of zero as *no* share — a
+/// `FillPortion(0)` child is laid out as a non-fluid one and handed every pixel there is — so a
+/// region too small to earn a share still has to be given one. A 4 KB partition beside a 12 MB one
+/// is invisible either way; what the share decides is whether the bar is a picture of the chip or a
+/// picture of its largest partition.
+///
+/// The ends are rounded and the joins are not, so the segments read as one bar divided rather than
+/// as beads on a string. `total` is the chip: the segments are the whole of it, so there is no track
+/// behind them and no theme to draw one from.
+pub(crate) fn segmented_bar<'a>(segments: Vec<(u32, Color)>, total: u32) -> UI<'a> {
+    let sizes: Vec<u32> = segments.iter().map(|(size, _)| *size).collect();
+    let shares = segment_shares(&sizes, total);
+    let last = segments.len().saturating_sub(1);
+
+    let children: Vec<UI<'a>> = segments
+        .into_iter()
+        .zip(shares)
+        .enumerate()
+        .map(|(index, ((_, color), share))| {
+            container(Space::new().width(Length::Fill))
+                .width(Length::FillPortion(share))
+                .height(Length::Fixed(style::BAR_HEIGHT))
+                .style(move |_theme| container::Style {
+                    background: Some(color.into()),
+                    border: Border {
+                        radius: if index == 0 || index == last {
+                            style::BAR_RADIUS.into()
+                        } else {
+                            0.0.into()
+                        },
+                        ..Border::default()
+                    },
+                    ..container::Style::default()
+                })
+                .into()
+        })
+        .collect();
+
+    Row::with_children(children)
+        .width(Length::Fill)
+        .height(Length::Fixed(style::BAR_HEIGHT))
+        .into()
+}
+
+/// The shares a segmented bar draws its regions at: proportional to their sizes, and never zero.
+///
+/// Its own function for the same reason [`shares`] is one — the "never zero" rule is the whole of
+/// what it is for, and a rule worth stating is worth being able to test.
+fn segment_shares(sizes: &[u32], total: u32) -> Vec<u16> {
+    /// The whole bar. A hundredth of a percent is the finest anything is drawn to.
+    const WHOLE: u64 = 10_000;
+
+    sizes
+        .iter()
+        .map(|size| (*size as u64 * WHOLE / total.max(1) as u64).clamp(1, WHOLE) as u16)
+        .collect()
+}
+
 /// An iOS switch: a 52x28 track with a 24px knob, drawn from containers.
 ///
 /// The whole track is the button. The knob is positioned by a fill on the side it is moving
@@ -530,8 +591,16 @@ fn capsule(fill: Color, ink: Color) -> button::Style {
 }
 
 /// Whether a status is a finger on the button.
+///
+/// `Pressed` and only `Pressed`. [`button::Status::Hovered`] is *not* a finger: a touchscreen has no
+/// hover, and this platform leaves the pointer where the finger lifted so the release reaches the
+/// widget under it — so a button that had been touched stays hovered until something else moves the
+/// pointer. Treating that as a press is a button that stays lit after it is let go: the storage
+/// page's "check again" filled with [`style::muted_for`] and stayed filled until the screen was
+/// touched again. It is also why [`row_style`] — the other press wash on this page — never looked at
+/// `Hovered` in the first place.
 fn is_pressed(status: button::Status) -> bool {
-    matches!(status, button::Status::Pressed | button::Status::Hovered)
+    matches!(status, button::Status::Pressed)
 }
 
 /// Back, on the page: the card's own colour.
@@ -646,5 +715,44 @@ mod tests {
             let (filled, remaining) = shares(percent);
             assert!(filled > 0 && remaining > 0, "{percent}% gave {filled}/{remaining}");
         }
+    }
+
+    /// Every segment of a divided bar gets a share, however small the region behind it is.
+    ///
+    /// The rule beside `shares`' test, one row down: a 4 KB region next to a 12 MB one is invisible
+    /// at any share, but at a share of *zero* it is worse than invisible — the layout engine reads
+    /// that as no share at all and hands the segment the whole bar.
+    #[test]
+    fn every_segment_of_a_bar_gets_a_share() {
+        // The board's own chip: bootloader, nvs, phy_init, firmware, filesystem, and the tail.
+        let sizes = [0x9000, 0x6000, 0x1000, 0xC0_0000, 0x30_0000, 0xF_0000];
+
+        let shares = segment_shares(&sizes, 16 * 1024 * 1024);
+
+        assert_eq!(shares.len(), sizes.len());
+        assert!(shares.iter().all(|share| *share > 0), "{shares:?}");
+
+        // Proportional and in order: the firmware partition is four times the filesystem under it,
+        // and the shares have to say so.
+        assert_eq!(shares[3], 4 * shares[4], "{shares:?}");
+
+        // One region is the whole bar whatever the total says, and no regions is not a panic.
+        assert_eq!(segment_shares(&[3], 3), vec![10_000]);
+        assert_eq!(segment_shares(&[3], 0), vec![10_000]);
+        assert!(segment_shares(&[], 0).is_empty());
+    }
+
+    /// A finger is `Pressed`, and only `Pressed`.
+    ///
+    /// `Hovered` is where the stuck button came from: a touchscreen has no hover, and this platform
+    /// leaves the pointer where the finger lifted so the release lands on the widget under it — so a
+    /// button that has been touched stays hovered until something else moves the pointer, and a
+    /// `Hovered` counted as a press is a button that stayed lit after it was let go.
+    #[test]
+    fn a_button_is_pressed_only_while_the_finger_is_on_it() {
+        assert!(is_pressed(button::Status::Pressed));
+        assert!(!is_pressed(button::Status::Hovered));
+        assert!(!is_pressed(button::Status::Active));
+        assert!(!is_pressed(button::Status::Disabled));
     }
 }

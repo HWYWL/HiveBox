@@ -23,10 +23,13 @@
 
 #include <inttypes.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "bsp/esp32_s3_touch_amoled_2_16.h"
+#include "esp_flash.h"
 #include "esp_littlefs.h"
 #include "esp_log.h"
+#include "esp_partition.h"
 #include "esp_timer.h"
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
@@ -183,6 +186,137 @@ esp_err_t hal_storage_get_card(hal_storage_volume_t *out)
     set_field(out->filesystem, sizeof(out->filesystem), "FATFS");
     out->total_bytes = total;
     out->free_bytes = free_bytes;
+
+    return ESP_OK;
+}
+
+/* ---------------------------------------------------------------------------
+ * The flash chip: what every region of it is for.
+ *
+ * The sizes above answer "how full is what the box can write". This answers the question under it,
+ * and the two numbers are not close: the built-in LittleFS partition is 3 MB of a 16 MB chip, and
+ * the rest is the firmware and the reservations around it — none of which is a filesystem, which is
+ * why none of it can come from `esp_littlefs_info`.
+ *
+ * The chip is described by tiling, not by listing partitions: the bootloader and the partition table
+ * sit below the first partition and the trailing space sits past the last, neither has a row in the
+ * table, and a map that dropped them would not add up to the flash it claims to describe.
+ * ------------------------------------------------------------------------- */
+
+/** What a partition is for, in the four kinds the UI draws.
+ *
+ * An app partition is the firmware. A data partition with a filesystem on it is writable. Everything
+ * else — NVS, the PHY calibration blob, and whatever a future table puts there — is system: real,
+ * owned by something other than the user, and not to be shown as free space. */
+static uint8_t classify(const esp_partition_t *part)
+{
+    if (part->type == ESP_PARTITION_TYPE_APP) {
+        return HAL_FLASH_REGION_FIRMWARE;
+    }
+
+    switch (part->subtype) {
+    case ESP_PARTITION_SUBTYPE_DATA_SPIFFS:
+    case ESP_PARTITION_SUBTYPE_DATA_LITTLEFS:
+    case ESP_PARTITION_SUBTYPE_DATA_FAT:
+        return HAL_FLASH_REGION_DATA;
+    default:
+        return HAL_FLASH_REGION_SYSTEM;
+    }
+}
+
+/** Append a region. False once the layout is full, which a table this small will not fill. */
+static bool add_region(hal_flash_layout_t *out, const char *label, uint8_t kind, uint32_t size)
+{
+    if (size == 0 || out->count >= HAL_FLASH_MAX_REGIONS) {
+        return false;
+    }
+
+    hal_flash_region_t *region = &out->regions[out->count++];
+    set_field(region->label, sizeof(region->label), label);
+    region->kind = kind;
+    region->size = size;
+
+    return true;
+}
+
+esp_err_t hal_storage_get_flash(hal_flash_layout_t *out)
+{
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    memset(out, 0, sizeof(*out));
+
+    uint32_t chip = 0;
+    esp_err_t ret = esp_flash_get_size(NULL, &chip);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "the flash size could not be read: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    out->total_bytes = chip;
+
+    /* The partitions, collected and then put in address order.
+     *
+     * `esp_partition_find` walks the table in the order it was written, which is not promised to be
+     * sorted; everything below reads the list as a run of addresses, so the order is established
+     * here rather than assumed. An insertion sort over at most HAL_FLASH_MAX_REGIONS entries is
+     * cheaper than a map with a region out of place. */
+    const esp_partition_t *parts[HAL_FLASH_MAX_REGIONS];
+    size_t count = 0;
+
+    esp_partition_iterator_t it =
+        esp_partition_find(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, NULL);
+
+    while (it != NULL && count < HAL_FLASH_MAX_REGIONS) {
+        const esp_partition_t *part = esp_partition_get(it);
+
+        size_t at = count;
+        while (at > 0 && parts[at - 1]->address > part->address) {
+            parts[at] = parts[at - 1];
+            at--;
+        }
+        parts[at] = part;
+        count++;
+
+        it = esp_partition_next(it);
+    }
+
+    /* A loop that filled up still owns its iterator; the one that ran out has released its own.
+     * Releasing NULL is explicitly allowed, so there is one call and not two paths. */
+    esp_partition_iterator_release(it);
+
+    if (count == 0) {
+        /* No table at all. Everything below would be one region called "unallocated" covering the
+         * whole chip, which is a drawing of a board that was never flashed — say so instead. */
+        ESP_LOGW(TAG, "no partition table to read; the flash map is not drawn");
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    /* Below the first partition: the second-stage bootloader and the partition table itself. */
+    uint32_t cursor = 0;
+
+    if (parts[0]->address > 0) {
+        add_region(out, "bootloader", HAL_FLASH_REGION_SYSTEM, parts[0]->address);
+        cursor = parts[0]->address;
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        const esp_partition_t *part = parts[i];
+
+        if (part->address > cursor) {
+            add_region(out, "unallocated", HAL_FLASH_REGION_UNALLOCATED, part->address - cursor);
+        }
+
+        add_region(out, part->label, classify(part), part->size);
+        cursor = part->address + part->size;
+    }
+
+    /* Past the last partition. The table does not have to reach the end of the chip, and on this
+     * board it does not: the flash is 16 MB and the last partition ends 960 KB before it. */
+    if (chip > cursor) {
+        add_region(out, "unallocated", HAL_FLASH_REGION_UNALLOCATED, chip - cursor);
+    }
 
     return ESP_OK;
 }

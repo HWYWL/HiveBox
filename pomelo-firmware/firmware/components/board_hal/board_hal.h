@@ -267,6 +267,50 @@ esp_err_t hal_storage_get_internal(hal_storage_volume_t *out);
  */
 esp_err_t hal_storage_get_card(hal_storage_volume_t *out);
 
+/* The flash chip itself: how much of it there is, and what every region of it is for.
+ *
+ * hal_storage_get_internal() answers "how full is the filesystem the box can write" — on this board
+ * 3 MB of a 16 MB chip. This answers the question under it: where the other 13 MB went. A page that
+ * draws only the first is drawing a third of the answer.
+ *
+ * The regions tile the whole chip: the bootloader and the partition table below the first partition,
+ * and the stretch past the last one, are reported rather than left out, so a bar drawn from this adds
+ * up to the flash. */
+
+#define HAL_FLASH_MAX_REGIONS   16
+#define HAL_FLASH_LABEL_MAX_LEN 16
+
+typedef enum {
+    HAL_FLASH_REGION_SYSTEM = 0,  /* the bootloader, the partition table, NVS, PHY: reserved */
+    HAL_FLASH_REGION_FIRMWARE,    /* an app partition: read-only while the box is running */
+    HAL_FLASH_REGION_DATA,        /* a partition with a filesystem on it: writable */
+    HAL_FLASH_REGION_UNALLOCATED, /* no partition claims it */
+} hal_flash_region_kind_t;
+
+typedef struct {
+    char     label[HAL_FLASH_LABEL_MAX_LEN];
+    uint8_t  kind; /* hal_flash_region_kind_t */
+    uint8_t  _reserved[3];
+    uint32_t size;
+} hal_flash_region_t;
+
+typedef struct {
+    uint32_t           total_bytes;
+    uint32_t           count;
+    hal_flash_region_t regions[HAL_FLASH_MAX_REGIONS];
+} hal_flash_layout_t;
+
+/**
+ * @brief Read the flash chip's layout: its total size, and every region of it in address order.
+ *
+ * @return
+ *      - ESP_OK on success
+ *      - ESP_ERR_INVALID_ARG if out is NULL
+ *      - ESP_ERR_NOT_FOUND when the chip has no partition table to read
+ *      - other error codes from the flash driver
+ */
+esp_err_t hal_storage_get_flash(hal_flash_layout_t *out);
+
 /* ---------------------------------------------------------------------------
  * ES8311 audio codec and I2S speaker interface (Audio Sink).
  * ------------------------------------------------------------------------- */

@@ -5,6 +5,7 @@
 //! measurement of the design, and a wider screen gets wider boxes, never bigger text.
 
 use iced::Color;
+use pomelo_hal::FlashRegionKind;
 
 use crate::SettingsSection;
 
@@ -155,6 +156,15 @@ pub const USAGE_PADDING: f32 = 16.0;
 pub const BAR_GAP: f32 = 10.0;
 pub const BAR_HEIGHT: f32 = 10.0;
 pub const BAR_RADIUS: f32 = 5.0;
+
+/// The flash map's key: the square beside a region's name, and how far the name stands from it.
+///
+/// The same height as the bar it is a key to, so a row and its segment are recognisably the same
+/// thing — and four pixels of corner, because a square at this size with a sharper one reads as a
+/// bullet rather than as a swatch of colour.
+pub const FLASH_CHIP: f32 = 10.0;
+pub const FLASH_CHIP_RADIUS: f32 = 3.0;
+pub const FLASH_CHIP_GAP: f32 = 10.0;
 
 /// The palette chips of the theme page.
 pub const CHIP_W: f32 = 60.0;
@@ -398,6 +408,30 @@ pub fn memory_bar() -> Color {
 /// The storage bar, and its badge.
 pub fn storage_bar() -> Color {
     rgb((255, 149, 0))
+}
+
+/// The colour a region of the flash map is drawn in: its segment of the bar, and its key below.
+///
+/// One function rather than four colours at the call site, because the two must agree: a row whose
+/// square and segment disagreed is a legend for a chart that is not the one on screen.
+///
+/// A region's kind and not its label: the four colours say what a stretch of flash *is*, which is
+/// the whole point of the bar. One colour per partition would be one colour per row, and a picture
+/// that is a list is not a picture.
+pub fn flash_region_for(kind: FlashRegionKind, theme: ThemeMode) -> Color {
+    match kind {
+        FlashRegionKind::System => match theme {
+            ThemeMode::Dark => rgb((110, 110, 118)),
+            ThemeMode::Light => rgb((174, 174, 178)),
+        },
+        // The memory bar's purple: firmware is space spoken for and not the user's to fill, which is
+        // the same thing that bar says about the heap.
+        FlashRegionKind::Firmware => memory_bar(),
+        // The orange the volumes above are drawn in: this region *is* that filesystem.
+        FlashRegionKind::Data => storage_bar(),
+        // The empty part of a bar, because that is what it is.
+        FlashRegionKind::Unallocated => bar_track_for(theme),
+    }
 }
 
 /// The hairline around a palette chip.

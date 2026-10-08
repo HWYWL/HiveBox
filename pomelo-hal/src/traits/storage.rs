@@ -1,7 +1,7 @@
 //! Storage interface — the board's filesystems.
 
 use crate::error::HalError;
-use crate::types::VolumeInfo;
+use crate::types::{FlashLayout, VolumeInfo};
 
 /// The volumes the board has mounted: the built-in partition, and the card in the slot.
 ///
@@ -41,4 +41,14 @@ pub trait StorageBackend: Send + Sync {
     /// Call it when the answer matters — a page opening, a finger on "check again" — and not once a
     /// frame. Finding nothing is not an error: it is what an empty slot looks like.
     fn refresh(&mut self) -> Result<(), HalError>;
+
+    /// The flash chip those filesystems live on, and what every part of it is for.
+    ///
+    /// The chip and not a filesystem. `volumes` answers "how full is what I can write"; a board whose
+    /// built-in volume is 3 MB of a 16 MB chip has 13 MB that answer says nothing about, and the
+    /// person looking at a storage page is asking where it went. See [`FlashLayout`].
+    ///
+    /// Unlike the two above this does not change while the box runs — a partition table is written
+    /// once, by whoever flashed the board — so a page may read it once and keep it.
+    fn flash(&self) -> Result<FlashLayout, HalError>;
 }

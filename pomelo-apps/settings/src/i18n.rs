@@ -118,6 +118,14 @@ pub enum Key {
     CheckAgain,
     Filesystem,
     MountPoint,
+    // The flash map. The four statuses are the four kinds of region the HAL reports, and the page
+    // draws one per row; `InternalFlash` heads the card and is *not* `Flash`, which is the chip's
+    // model number on the system page.
+    InternalFlash,
+    Reserved,
+    ReadOnly,
+    Writable,
+    Unallocated,
 
     // The battery page.
     Power,
@@ -221,6 +229,11 @@ impl Key {
             Self::CheckAgain => "重新检测",
             Self::Filesystem => "文件系统",
             Self::MountPoint => "挂载点",
+            Self::InternalFlash => "内部闪存",
+            Self::Reserved => "保留",
+            Self::ReadOnly => "只读",
+            Self::Writable => "可写",
+            Self::Unallocated => "未分配",
 
             Self::Charging => "充电中",
             Self::NotCharging => "未充电",
@@ -319,6 +332,11 @@ impl Key {
             Self::CheckAgain => "Check again",
             Self::Filesystem => "Filesystem",
             Self::MountPoint => "Mount point",
+            Self::InternalFlash => "Internal flash",
+            Self::Reserved => "Reserved",
+            Self::ReadOnly => "Read-only",
+            Self::Writable => "Writable",
+            Self::Unallocated => "Unallocated",
 
             Self::Charging => "Charging",
             Self::NotCharging => "Not charging",
@@ -408,7 +426,7 @@ mod tests {
 
     /// Every key, for the tests above. Kept beside them so a new variant is a compile error here
     /// too.
-    const ALL: [Key; 84] = [
+    const ALL: [Key; 89] = [
         Key::Settings,
         Key::Back,
         Key::Wifi,
@@ -463,6 +481,11 @@ mod tests {
         Key::CheckAgain,
         Key::Filesystem,
         Key::MountPoint,
+        Key::InternalFlash,
+        Key::Reserved,
+        Key::ReadOnly,
+        Key::Writable,
+        Key::Unallocated,
         Key::Charging,
         Key::NotCharging,
         Key::Power,

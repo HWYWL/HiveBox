@@ -479,6 +479,58 @@ fn the_storage_page_shows_the_built_in_volume_and_the_card() -> Result<(), iced_
     Ok(())
 }
 
+/// A screen tall enough for the whole storage page: the flash map and both volume cards together.
+///
+/// Its own number and not [`TALL`]: the page grew a card when the flash map landed, and [`TALL`] was
+/// sized for the main list. The simulator has no scroll, so anything below the fold is not found —
+/// and a test that only ever found the first three rows would pass whatever the rows below them said.
+const STORAGE_PAGE: f32 = 2400.0;
+
+/// The page says where the whole chip went, and not only the part of it a filesystem can use.
+///
+/// The built-in volume is 3 MB; the board's flash is 16 MB. A page of volumes alone answers "how much
+/// room is left" and never says what the other 13 MB are for, which is the question a person opening
+/// a storage page is asking.
+#[test]
+fn the_storage_page_maps_the_whole_flash_chip() -> Result<(), iced_test::Error> {
+    let mut settings = storage_app(true);
+
+    settings.update(Message::Open(SettingsSection::Storage));
+
+    let flash = settings
+        .storage()
+        .flash()
+        .expect("the board's flash is always readable");
+
+    // The chip, from the map's own numbers: 16 MB of NOR, and every byte of it claimed but the tail.
+    assert_eq!(flash.total_bytes, 16 * 1024 * 1024);
+    assert_eq!(flash.allocated_bytes(), 16 * 1024 * 1024 - 0xF_0000);
+
+    let mut ui = screen(&settings, STORAGE_PAGE);
+
+    assert!(ui.find("Internal flash").is_ok(), "the chip heads the page");
+
+    // Every region the board reported is a row: the four partitions of its table, and the two
+    // stretches that are not partitions at all. Drawn from the map, so a board with a different
+    // table draws a different list.
+    for region in &flash.regions {
+        assert!(
+            ui.find(region.label.as_str()).is_ok(),
+            "the map lists the {} region",
+            region.label
+        );
+    }
+
+    // And what may be done with each, in a word. Four answers, because the one thing the page has to
+    // make obvious is that most of this chip is not the user's to fill.
+    assert!(ui.find("Read-only").is_ok(), "the firmware cannot be written");
+    assert!(ui.find("Writable").is_ok(), "the built-in filesystem can");
+    assert!(ui.find("Reserved").is_ok(), "and the bootloader belongs to the system");
+    assert!(ui.find("Unallocated").is_ok(), "and the tail belongs to nobody");
+
+    Ok(())
+}
+
 /// An empty slot is a line, not a bar at zero: a card that is not there is not a card with nothing on
 /// it.
 #[test]

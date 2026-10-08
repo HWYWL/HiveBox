@@ -2,7 +2,7 @@
 
 use crate::error::HalError;
 use crate::traits::StorageBackend;
-use crate::types::{VolumeInfo, VolumeKind};
+use crate::types::{FlashLayout, FlashRegion, FlashRegionKind, VolumeInfo, VolumeKind};
 
 /// The built-in partition: the 3 MB `internal` partition of `partitions.csv`.
 const INTERNAL_TOTAL: u64 = 3 * 1024 * 1024;
@@ -88,6 +88,46 @@ fn card() -> VolumeInfo {
     }
 }
 
+/// The flash chip: 16 MB of NOR, as the board's `partitions.csv` divides it.
+///
+/// The table is written out here rather than read, because on a host there is no partition table to
+/// read — and it is written out *whole*, bootloader and trailing space included, because that is
+/// what makes the desktop's flash map the device's. A simulator that drew only the partitions would
+/// be drawing a page the board never shows, which is the one thing a simulator may not do.
+const FLASH_TOTAL: u32 = 16 * 1024 * 1024;
+
+/// Where the partition table's own entries begin. Everything below the first of them is the
+/// bootloader and the table itself.
+const BOOTLOADER_SIZE: u32 = 0x9000;
+
+/// The regions of the chip, in address order.
+///
+/// `nvs`, `phy_init`, `factory` and `internal` are the four rows of `partitions.csv`; `bootloader`
+/// and `unallocated` are the two stretches with no row at all. The kinds are the board's rule: an
+/// app partition is the firmware, a data partition with a filesystem on it is writable, and the rest
+/// is system — see `hal_storage_get_flash` in `board_storage.c`, which asks the same questions of
+/// the real table.
+fn flash_regions() -> Vec<FlashRegion> {
+    let region = |label: &str, kind, size: u32| FlashRegion {
+        label: String::from(label),
+        kind,
+        size,
+    };
+
+    vec![
+        region("bootloader", FlashRegionKind::System, BOOTLOADER_SIZE),
+        region("nvs", FlashRegionKind::System, 0x6000),
+        region("phy_init", FlashRegionKind::System, 0x1000),
+        region("factory", FlashRegionKind::Firmware, 0xC0_0000),
+        region("internal", FlashRegionKind::Data, INTERNAL_TOTAL as u32),
+        region(
+            "unallocated",
+            FlashRegionKind::Unallocated,
+            FLASH_TOTAL - 0xC10000 - INTERNAL_TOTAL as u32,
+        ),
+    ]
+}
+
 impl StorageBackend for SimStorage {
     /// Nothing to bring up: the simulator's filesystems are values, not drivers.
     fn init(&mut self) -> Result<(), HalError> {
@@ -109,5 +149,53 @@ impl StorageBackend for SimStorage {
     /// `volumes` already agrees with it.
     fn refresh(&mut self) -> Result<(), HalError> {
         Ok(())
+    }
+
+    /// The board's own 16 MB of NOR Flash, as `partitions.csv` divides it.
+    fn flash(&self) -> Result<FlashLayout, HalError> {
+        Ok(FlashLayout {
+            total_bytes: FLASH_TOTAL,
+            regions: flash_regions(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The map has to be the chip: regions that overlap, or leave a hole, are a bar the page draws
+    /// with a gap in it — and the gap would be a lie about where the flash went.
+    #[test]
+    fn the_simulated_flash_tiles_the_whole_chip() {
+        let layout = SimStorage::new().flash().expect("the simulator always answers");
+
+        let sum: u32 = layout.regions.iter().map(|region| region.size).sum();
+        assert_eq!(sum, layout.total_bytes, "the regions must be the chip");
+
+        assert_eq!(layout.allocated_bytes(), FLASH_TOTAL - 0xF_0000);
+    }
+
+    /// The built-in volume is one region of the chip, and the map says so.
+    ///
+    /// This is the mismatch the page exists to show: 3 MB of writable space on a 16 MB chip.
+    #[test]
+    fn the_built_in_volume_is_a_region_of_the_flash() {
+        let storage = SimStorage::new();
+        let volumes = storage.volumes().expect("the simulator always answers");
+        let layout = storage.flash().expect("the simulator always answers");
+
+        let internal = volumes
+            .first()
+            .expect("the built-in volume is always there");
+
+        let region = layout
+            .regions
+            .iter()
+            .find(|region| region.kind == FlashRegionKind::Data)
+            .expect("the filesystem region");
+
+        assert_eq!(region.label, "internal");
+        assert_eq!(region.size as u64, internal.total_bytes);
     }
 }

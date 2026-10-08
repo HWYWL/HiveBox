@@ -51,6 +51,64 @@ impl VolumeInfo {
     }
 }
 
+/// What a region of the board's flash holds.
+///
+/// The flash is one chip and one address space; what divides it is what a region is *for*. These are
+/// the four answers a person reading a storage page needs told apart: what the firmware owns and
+/// they cannot touch, what the box can write, and what nothing claims at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlashRegionKind {
+    /// Reserved or system: the bootloader, the partition table, NVS, the PHY calibration data.
+    System,
+    /// A firmware image partition — read-only while the box is running.
+    Firmware,
+    /// A filesystem the box can write: the built-in `internal` partition.
+    Data,
+    /// Not claimed by any partition.
+    Unallocated,
+}
+
+/// One region of the flash, in address order.
+///
+/// A region and not a partition: the bootloader and the space past the last partition are not
+/// partitions and have no entry in a partition table, and a map of the chip that left them out would
+/// be a map that did not add up to the chip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlashRegion {
+    /// How this machine spells it — a partition's own label (`nvs`, `factory`, `internal`), or the
+    /// name the platform gave a region that is not one. Data, not interface text, like a mount point.
+    pub label: String,
+    pub kind: FlashRegionKind,
+    pub size: u32,
+}
+
+/// The whole flash chip: how big it is, and what every part of it is for.
+///
+/// This is why a storage page needs more than [`VolumeInfo`]: the built-in volume is 3 MB of a 16 MB
+/// chip, and the other 13 MB are the firmware and the reservations around it. A page that draws only
+/// the filesystem answers "how much room is left" and not "where did the flash go".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlashLayout {
+    pub total_bytes: u32,
+    /// In address order, from the first byte of the bootloader to the end of the chip. The regions
+    /// tile the whole of it, which is what makes a bar drawn from them add up to the chip.
+    pub regions: Vec<FlashRegion>,
+}
+
+impl FlashLayout {
+    /// The bytes some partition claims: everything but what nothing does.
+    ///
+    /// Derived rather than carried: a total that disagreed with the parts drawn beside it would be a
+    /// second opinion on the same sum, and two numbers that must agree eventually will not.
+    pub fn allocated_bytes(&self) -> u32 {
+        self.regions
+            .iter()
+            .filter(|region| region.kind != FlashRegionKind::Unallocated)
+            .map(|region| region.size)
+            .sum()
+    }
+}
+
 /// Wi-Fi scan progress reported by [`crate::traits::WifiBackend`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScanState {
@@ -204,6 +262,34 @@ mod tests {
         let unknown = volume(0, 0);
         assert_eq!(unknown.used_bytes(), 0);
         assert_eq!(unknown.used_percent(), 0.0);
+    }
+
+    /// The one number a flash map is headed with: what is claimed, against the chip it is claimed
+    /// out of. Unallocated is the part that is *not* — the whole point of drawing it.
+    #[test]
+    fn a_flash_layout_says_how_much_of_the_chip_is_claimed() {
+        let region = |kind: FlashRegionKind, size: u32| FlashRegion {
+            label: String::from("region"),
+            kind,
+            size,
+        };
+
+        let layout = FlashLayout {
+            total_bytes: 16 * 1024 * 1024,
+            regions: vec![
+                region(FlashRegionKind::System, 0x9000),
+                region(FlashRegionKind::Firmware, 0xC0_0000),
+                region(FlashRegionKind::Data, 0x30_0000),
+                region(FlashRegionKind::Unallocated, 0xF_0000),
+            ],
+        };
+
+        assert_eq!(layout.allocated_bytes(), 16 * 1024 * 1024 - 0xF_0000);
+
+        // The regions are the chip: a map built from them has to add up to it, or the bar the page
+        // draws is a bar with a hole in it.
+        let sum: u32 = layout.regions.iter().map(|region| region.size).sum();
+        assert_eq!(sum, layout.total_bytes);
     }
 }
 

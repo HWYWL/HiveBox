@@ -40,8 +40,8 @@ pub use traits::{
     AudioBackend, ImuBackend, InputBackend, MicBackend, PowerBackend, StorageBackend, WifiBackend,
 };
 pub use types::{
-    ApInfo, AudioMeta, InputAction, ScanState, SystemEvent, Vec3, VolumeInfo, VolumeKind, WifiState,
-    WifiStatus,
+    ApInfo, AudioMeta, FlashLayout, FlashRegion, FlashRegionKind, InputAction, ScanState,
+    SystemEvent, Vec3, VolumeInfo, VolumeKind, WifiState, WifiStatus,
 };
 pub use wifi_credentials::WifiCredentials;
 
@@ -54,8 +54,8 @@ pub mod prelude {
         WifiBackend,
     };
     pub use crate::types::{
-        ApInfo, AudioMeta, InputAction, ScanState, SystemEvent, Vec3, VolumeInfo, VolumeKind,
-        WifiState, WifiStatus,
+        ApInfo, AudioMeta, FlashLayout, FlashRegion, FlashRegionKind, InputAction, ScanState,
+        SystemEvent, Vec3, VolumeInfo, VolumeKind, WifiState, WifiStatus,
     };
     pub use crate::wifi_credentials::WifiCredentials;
 }
