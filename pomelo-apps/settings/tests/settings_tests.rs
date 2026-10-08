@@ -10,6 +10,7 @@
 // not the state's. See `Settings::update`.
 #![allow(unused_must_use)]
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -225,6 +226,153 @@ fn the_language_row_switches_between_chinese_and_english() -> Result<(), iced_te
     Ok(())
 }
 
+/// The simulator's power backend, with a count of how often it was asked to restart.
+///
+/// The simulator's own `restart` is a no-op by necessity — a desktop process has no board to reset —
+/// so a test that wants to see the *call* has to be the thing that sees it. Everything else this
+/// backend reports is the simulator's, so the page drawn here is the page the desktop draws.
+struct CountingPower {
+    sim: pomelo_hal::sim::SimPower,
+    restarts: Arc<AtomicUsize>,
+}
+
+impl pomelo_hal::PowerBackend for CountingPower {
+    fn init(&mut self) -> Result<(), pomelo_hal::HalError> {
+        self.sim.init()
+    }
+
+    fn battery_percent(&self) -> Result<u8, pomelo_hal::HalError> {
+        self.sim.battery_percent()
+    }
+
+    fn is_charging(&self) -> Result<bool, pomelo_hal::HalError> {
+        self.sim.is_charging()
+    }
+
+    fn battery_voltage_mv(&self) -> Result<u32, pomelo_hal::HalError> {
+        self.sim.battery_voltage_mv()
+    }
+
+    fn chip_temperature_c(&self) -> Result<f32, pomelo_hal::HalError> {
+        self.sim.chip_temperature_c()
+    }
+
+    /// The one thing this backend does on its own: remember that it was asked.
+    fn restart(&self) -> Result<(), pomelo_hal::HalError> {
+        self.restarts.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// A board whose power backend is [`CountingPower`].
+fn board_that_counts_restarts(restarts: Arc<AtomicUsize>) -> Arc<Board> {
+    use pomelo_hal::sim::{SimAudio, SimImu, SimInput, SimMic, SimStorage, SimWifi};
+
+    Arc::new(Board::from_backends(
+        Box::new(CountingPower {
+            sim: pomelo_hal::sim::SimPower::new(),
+            restarts,
+        }),
+        Box::new(SimWifi::new()),
+        Box::new(SimAudio::new()),
+        Box::new(SimMic::new()),
+        Box::new(SimImu::new()),
+        Box::new(SimInput::new()),
+        Box::new(SimStorage::new()),
+    ))
+}
+
+/// The restart row asks before it acts, and only the tick acts.
+///
+/// A reset is the one thing on this list that pressing something else cannot undo, so the question
+/// is the feature — and a test that only pressed the row and found the app still running would pass
+/// both on one that had reset the board and on one that had not.
+#[test]
+fn the_restart_row_asks_before_it_restarts() -> Result<(), iced_test::Error> {
+    let restarts = Arc::new(AtomicUsize::new(0));
+    let mut settings = Settings::new(board_that_counts_restarts(Arc::clone(&restarts)));
+    settings.update(Message::SetLanguage(Language::English));
+
+    assert_eq!(
+        restarts.load(Ordering::SeqCst),
+        0,
+        "nothing has been asked yet"
+    );
+
+    // The row, pressed as a finger presses it.
+    press(&mut settings, "Restart")?;
+
+    assert!(settings.is_confirming_restart(), "the question is up");
+    assert_eq!(
+        restarts.load(Ordering::SeqCst),
+        0,
+        "and asking it resets nothing"
+    );
+
+    {
+        let mut ui = interface(&settings);
+        assert!(
+            ui.find("The device will restart now.").is_ok(),
+            "the question says what it is about to do"
+        );
+    }
+
+    // "No" puts it away and leaves the board alone.
+    settings.update(Message::RestartCancel);
+
+    assert!(!settings.is_confirming_restart(), "the question is closed");
+    assert_eq!(restarts.load(Ordering::SeqCst), 0, "a refusal resets nothing");
+
+    {
+        let mut ui = interface(&settings);
+        assert!(
+            ui.find("The device will restart now.").is_err(),
+            "and it is off the screen"
+        );
+    }
+
+    // "Yes" is the only answer that does anything.
+    settings.update(Message::Restart);
+    settings.update(Message::RestartConfirm);
+
+    assert!(!settings.is_confirming_restart());
+    assert_eq!(restarts.load(Ordering::SeqCst), 1, "and the board was reset");
+    assert_eq!(
+        settings.section(),
+        SettingsSection::Main,
+        "the question is answered where it was asked, over the list"
+    );
+
+    Ok(())
+}
+
+/// Back closes the question rather than the page behind it.
+///
+/// The launcher intercepts `Message::Back` and calls `Settings::go_back` directly — the hardware
+/// back key *is* that message — so a question that only `RestartCancel` closed would be one the back
+/// key could not dismiss, and the list under it would go back to itself behind the dimming.
+#[test]
+fn back_closes_the_restart_question() {
+    let restarts = Arc::new(AtomicUsize::new(0));
+    let mut settings = Settings::new(board_that_counts_restarts(Arc::clone(&restarts)));
+
+    settings.update(Message::Restart);
+    assert!(settings.is_confirming_restart());
+
+    assert!(
+        settings.go_back().is_some(),
+        "the press is consumed by the question"
+    );
+
+    assert!(!settings.is_confirming_restart(), "the question is closed");
+    assert_eq!(
+        settings.section(),
+        SettingsSection::Main,
+        "and the list is still the page"
+    );
+    assert_eq!(restarts.load(Ordering::SeqCst), 0, "and nothing was reset");
+}
+
 /// Switching the language is app-wide state, so a page that is open stays open.
 #[test]
 fn switching_the_language_keeps_the_page() {
@@ -386,12 +534,48 @@ fn the_battery_page_shows_the_reading_it_was_given() {
         percent: 42,
         charging: false,
         voltage_mv: 3_700,
+        temperature_c: Some(31.4),
     });
 
     let mut ui = interface(&settings);
 
     assert!(ui.find("42%").is_ok(), "the level it was given");
     assert!(ui.find("3700 mV").is_ok(), "and the voltage");
+
+    // The temperature is the last row of a page taller than the panel, so it needs a screen that
+    // shows it: the simulator has no scroll, and a row below the fold is a row `find` never sees.
+    let mut ui = screen(&settings, TALL);
+
+    assert!(
+        ui.find("31.4 C").is_ok(),
+        "and the die temperature, in the decimal the chip reports it to"
+    );
+}
+
+/// A platform that could not read a temperature says so rather than drawing a plausible one.
+///
+/// This is the bug the row was written to avoid: it used to be the literal `31.4 C`, so a board whose
+/// PMIC could not be asked drew a number that looked exactly like a reading.
+#[test]
+fn the_battery_page_admits_when_it_has_no_temperature() {
+    let mut settings = Settings::new(simulated());
+    settings.update(Message::SetLanguage(Language::English));
+    settings.update(Message::Open(SettingsSection::Battery));
+
+    settings.set_battery(settings::Battery {
+        percent: 42,
+        charging: false,
+        voltage_mv: 3_700,
+        temperature_c: None,
+    });
+
+    let mut ui = screen(&settings, TALL);
+
+    assert!(ui.find("none").is_ok(), "the row says it has no reading");
+    assert!(
+        ui.find("31.4 C").is_err(),
+        "and the page does not invent one to fill the gap"
+    );
 }
 
 // =============================================================================

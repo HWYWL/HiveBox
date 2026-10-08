@@ -158,6 +158,33 @@ bool hal_power_is_charging(void);
  */
 int32_t hal_power_get_battery_voltage_mv(void);
 
+/**
+ * @brief Read the PMIC's own die temperature, in tenths of a degree Celsius.
+ *
+ * The die, not the cell: this board carries a two-pin battery, so there is no NTC on the TS pin and
+ * no pack temperature to read. hal_power_init() turns that channel off for exactly that reason, and
+ * what is left on the power path is the AXP2101's own temperature.
+ *
+ * @param[out] out_dc  Temperature in 0.1 °C units (314 = 31.4 °C).
+ *
+ * @return
+ *      - ESP_OK on success
+ *      - ESP_ERR_INVALID_ARG if out_dc is NULL
+ *      - ESP_ERR_INVALID_STATE if the PMIC has not been initialised
+ *      - ESP_ERR_INVALID_RESPONSE when the ADC has not produced a reading yet
+ */
+esp_err_t hal_power_get_chip_temperature_dc(int32_t *out_dc);
+
+/**
+ * @brief Restart the board: reset the SoC from the application.
+ *
+ * A reset and not a power cycle — the PMIC keeps the rails up, and what the chip keeps across a
+ * reset (the RTC in its own memory, the reset reason) survives.
+ *
+ * @note Does not return.
+ */
+void hal_power_restart(void);
+
 /* ---------------------------------------------------------------------------
  * Wi-Fi station (esp_wifi).
  *

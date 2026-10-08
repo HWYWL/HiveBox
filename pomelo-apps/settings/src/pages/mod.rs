@@ -9,6 +9,7 @@
 pub mod battery;
 pub mod card;
 pub mod common;
+pub mod dialog;
 pub mod main_page;
 pub mod memory;
 pub mod storage;

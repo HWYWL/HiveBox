@@ -21,6 +21,11 @@ use pomelo_widgets::SystemPreferences;
 /// `connected` is the SSID the radio is on, or `None` if it is not on one. The labels are
 /// translated; a network's name is not, because it is the network's, not the interface's. See
 /// [`crate::i18n`].
+///
+/// Two rows of the last card are not destinations, and they carry no chevron-shaped promise: the
+/// language row *is* the switch it looks like a setting for, and the restart row asks a question
+/// rather than opening a page. They are at the foot of the list because neither is a reading of this
+/// machine — one is about the interface, the other is about the whole of it.
 pub(crate) fn main_page<'a>(preferences: SystemPreferences, connected: Option<&str>) -> UI<'a> {
     let language = preferences.language;
     let theme = preferences.theme;
@@ -68,6 +73,14 @@ pub(crate) fn main_page<'a>(preferences: SystemPreferences, connected: Option<&s
             Icon::SCHEDULE,
             SettingsSection::Time,
             language.text(Key::Time),
+        ))
+        .tile(Tile::action(
+            Icon::RESTART_ALT,
+            // Red, and above the language row: this is the one row in the list that can interrupt
+            // what a person is doing, and the colour is the only warning a list row has to give.
+            style::IconColor::Red,
+            language.text(Key::Restart),
+            Message::Restart,
         ))
         .tile(Tile::action(
             Icon::TRANSLATE,

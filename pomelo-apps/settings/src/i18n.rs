@@ -67,6 +67,10 @@ pub enum Key {
     Language,
     DarkMode,
     FontSize,
+    // The one row of the list that opens no page: it asks a question, and the answer resets the
+    // board. `RestartQuestion` is what the question says under its own title.
+    Restart,
+    RestartQuestion,
 
     // The Wi-Fi page.
     Toggle,
@@ -133,7 +137,9 @@ pub enum Key {
     NotCharging,
     Voltage,
     Level,
-    Temperature,
+    // The PMIC's die temperature, and not "the battery's": there is no NTC on this board's battery
+    // to read a pack temperature from. Named for where it is measured, like the PMIC row above it.
+    PmicTemperature,
     LowPowerMode,
 
     // The system page.
@@ -188,6 +194,8 @@ impl Key {
             Self::Language => "语言",
             Self::DarkMode => "深色模式",
             Self::FontSize => "字体大小",
+            Self::Restart => "重启",
+            Self::RestartQuestion => "设备将立即重新启动。",
 
             Self::Toggle => "开关",
             Self::Network => "网络",
@@ -240,7 +248,7 @@ impl Key {
             Self::Power => "电源",
             Self::Voltage => "电压",
             Self::Level => "电量",
-            Self::Temperature => "温度",
+            Self::PmicTemperature => "PMIC 温度",
             Self::LowPowerMode => "低功耗模式",
 
             Self::Model => "型号",
@@ -291,6 +299,8 @@ impl Key {
             Self::Language => "Language",
             Self::DarkMode => "Dark Mode",
             Self::FontSize => "Text Size",
+            Self::Restart => "Restart",
+            Self::RestartQuestion => "The device will restart now.",
 
             Self::Toggle => "Switch",
             Self::Network => "Network",
@@ -343,7 +353,7 @@ impl Key {
             Self::Power => "Power",
             Self::Voltage => "Voltage",
             Self::Level => "Level",
-            Self::Temperature => "Temperature",
+            Self::PmicTemperature => "PMIC temperature",
             Self::LowPowerMode => "Low power mode",
 
             Self::Model => "Model",
@@ -426,7 +436,7 @@ mod tests {
 
     /// Every key, for the tests above. Kept beside them so a new variant is a compile error here
     /// too.
-    const ALL: [Key; 89] = [
+    const ALL: [Key; 91] = [
         Key::Settings,
         Key::Back,
         Key::Wifi,
@@ -443,6 +453,8 @@ mod tests {
         Key::Language,
         Key::DarkMode,
         Key::FontSize,
+        Key::Restart,
+        Key::RestartQuestion,
         Key::Toggle,
         Key::Network,
         Key::Signal,
@@ -491,7 +503,7 @@ mod tests {
         Key::Power,
         Key::Voltage,
         Key::Level,
-        Key::Temperature,
+        Key::PmicTemperature,
         Key::LowPowerMode,
         Key::Model,
         Key::Os,

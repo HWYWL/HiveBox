@@ -278,6 +278,8 @@ mod tests {
             total_bytes: 16 * 1024 * 1024,
             regions: vec![
                 region(FlashRegionKind::System, 0x9000),
+                region(FlashRegionKind::System, 0x6000),
+                region(FlashRegionKind::System, 0x1000),
                 region(FlashRegionKind::Firmware, 0xC0_0000),
                 region(FlashRegionKind::Data, 0x30_0000),
                 region(FlashRegionKind::Unallocated, 0xF_0000),

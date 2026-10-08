@@ -200,6 +200,15 @@ pub const SIGNAL_GAP: f32 = 10.0;
 pub const PROMPT_TOP_GAP: f32 = 12.0;
 pub const PROMPT_PADDING: f32 = 16.0;
 
+/// The confirmation dialog: how far its card stands from the panel's edges, the room inside it, and
+/// the gap between what it says.
+///
+/// `DIALOG_MARGIN` is its own number and twice `PAGE_MARGIN`: a card set to the page's own margins
+/// would be a card, and this is a question standing over a page — the room around it is what says so.
+pub const DIALOG_MARGIN: f32 = 40.0;
+pub const DIALOG_PADDING: f32 = 20.0;
+pub const DIALOG_GAP: f32 = 16.0;
+
 /// The gap between the question's own rows.
 ///
 /// Tight, and tighter than when the keys were flexible: with the band's height fixed, every pixel

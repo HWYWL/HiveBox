@@ -41,8 +41,21 @@
 //! knows it. What is different is how often it is asked — a scan is waited on, a slot is probed when
 //! the page opens — which is [`pages::storage`]'s subject rather than this one's.
 //!
-//! The battery page still takes its number from the platform: a reading the platform owns stays
-//! pushed, and nothing here reads `board.power()`.
+//! The battery page takes its numbers from the platform: a reading the platform owns stays pushed,
+//! and the page reads nothing itself. The temperature it draws is one of those readings — the
+//! PMIC's own die temperature, since this board's battery has no NTC to read — and the firmware
+//! pushes a new one whenever it moves half a degree.
+//!
+//! # The restart question
+//!
+//! One row of the list is not a way in. Resetting the board is the only thing this app can do that
+//! a person cannot undo by pressing something else, so it asks before it acts, and the question is
+//! a modal over whatever page is up — see [`pages::dialog`].
+//!
+//! That row is also the one place where asking the board for something *does* something rather than
+//! reading it: [`Settings::restart`] is a call the app makes because there is nowhere else in this
+//! stack that can make it — the launcher hosting this app is a widget tree, not a supervisor, and
+//! resetting a chip is not something a supervisor would do either.
 //!
 //! # Scrolling
 //!
@@ -127,6 +140,12 @@ pub enum Message {
     CycleFontTier,
     /// The storage page's "check again": re-probe the card slot, and read what is mounted.
     StorageDetect,
+    /// The restart row was pressed. Asks the question; resets nothing.
+    Restart,
+    /// The restart question's "yes": reset the board.
+    RestartConfirm,
+    /// The restart question's "no": put the question away and leave the board alone.
+    RestartCancel,
 
     /// The Wi-Fi page asked for a fresh scan: the page was opened, or the scan row was pressed.
     WifiScan,
@@ -152,10 +171,14 @@ pub enum Message {
 
 /// The battery reading the battery page shows.
 ///
-/// The platform owns the real number and pushes it in with [`Settings::set_battery`]; the values
+/// The platform owns the real numbers and pushes them in with [`Settings::set_battery`]; the values
 /// here are what the original read from a bench board. There is deliberately no
 /// `pomelo_hal` dependency — see the crate documentation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// No `Eq`, unlike every other type in this app: a temperature is a `f32`, and a float that claims
+/// to be totally ordered is a promise it cannot keep. `PartialEq` is what a test compares with, and
+/// all this needs.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Battery {
     /// Charge, 0 to 100.
     pub percent: u8,
@@ -163,6 +186,14 @@ pub struct Battery {
     pub charging: bool,
     /// Pack voltage in millivolts.
     pub voltage_mv: u16,
+    /// The PMIC's die temperature, when the platform could read one.
+    ///
+    /// `None` and not a number with a default: a board whose PMIC cannot be asked has no
+    /// temperature, and `0.0` on the page would be a reading of freezing hardware. There is no
+    /// bench value here the way there is for the other three — a temperature is the one reading this
+    /// page shows that changes on its own, and a plausible-looking constant is exactly what it must
+    /// not be.
+    pub temperature_c: Option<f32>,
 }
 
 impl Default for Battery {
@@ -171,6 +202,7 @@ impl Default for Battery {
             percent: 88,
             charging: true,
             voltage_mv: 4_100,
+            temperature_c: None,
         }
     }
 }
@@ -186,12 +218,24 @@ pub struct Settings {
     battery: Battery,
     /// The system preferences (language, theme, font size tier).
     preferences: SystemPreferences,
+    /// The board, for the one thing this app does to it rather than reads from it: a restart.
+    ///
+    /// The pages that talk to hardware hold their own handle — they were written first and a page
+    /// that owns its conversation is what the module docs describe. This one is the app's, because
+    /// the reset is the app's: no page owns it.
+    board: Arc<Board>,
     /// The Wi-Fi page, which owns the board: it is one of the two pages that talk to hardware rather
     /// than reading a value the platform pushed in.
     wifi: Wifi,
     /// The storage page, and the other one. It holds the same board — a page that asks the SDMMC slot
     /// whether there is a card in it is asking the board, and there is nowhere else to ask.
     storage: Storage,
+    /// Whether the restart question is up, which is the only modal the *app* has.
+    ///
+    /// A `bool` and not a dialog type: there is one question, and an enum with one variant is a
+    /// name for a thing that has not happened yet. The Wi-Fi page's prompt is an index into its own
+    /// list of networks, which is why it is not a flag.
+    restart_prompt: bool,
 }
 
 impl Settings {
@@ -203,8 +247,10 @@ impl Settings {
             is_24h_format: true,
             battery: Battery::default(),
             preferences: SystemPreferences::default(),
+            board: Arc::clone(&board),
             wifi: Wifi::new(Arc::clone(&board)),
             storage: Storage::new(board),
+            restart_prompt: false,
         };
 
         // One read at boot, so the switch and the main list's Wi-Fi row are true before the page is
@@ -233,6 +279,14 @@ impl Settings {
     /// the host and the tests are the only other readers.
     pub fn storage(&self) -> &Storage {
         &self.storage
+    }
+
+    /// Whether the restart question is up.
+    ///
+    /// There is nothing inside the question to read — it asks about the whole board and holds no
+    /// state of its own — so the question *is* the flag, and this is the flag.
+    pub fn is_confirming_restart(&self) -> bool {
+        self.restart_prompt
     }
 
     /// Whether the clock is 24-hour.
@@ -291,6 +345,17 @@ impl Settings {
     /// intercepts `Message::Back` and calls this directly: a modal that only closed when the app was
     /// running standalone would be a modal that never closes on the board.
     pub fn go_back(&mut self) -> Option<Task<Message>> {
+        // The two modals first, and neither of them is about which page is up: back closes what is
+        // standing over the page before it does anything to the page itself. The restart question
+        // is the app's, so it is asked first — there is no arrangement of the two that puts the
+        // password sheet under it.
+        if self.restart_prompt {
+            self.restart_prompt = false;
+
+            // A question sits over the page; the body under it did not move.
+            return Some(Task::none());
+        }
+
         if self.wifi.has_prompt() {
             self.wifi.cancel_prompt();
 
@@ -303,6 +368,20 @@ impl Settings {
         } else {
             self.section = SettingsSection::Main;
             Some(to_top())
+        }
+    }
+
+    /// Resets the board, which is what the question was asking about.
+    ///
+    /// On the board this does not return: the SoC goes back to its bootloader, and the frame that
+    /// would have drawn the question away is never drawn. What is left to handle is the case where
+    /// it *did* return — a backend that cannot reset — and the app says so rather than going on as
+    /// if the machine had restarted.
+    fn restart(&mut self) {
+        self.restart_prompt = false;
+
+        if let Err(error) = self.board.power().restart() {
+            eprintln!("[settings] the board could not be restarted: {error}");
         }
     }
 
@@ -363,6 +442,10 @@ impl Settings {
             Message::SetTheme(theme) => self.set_theme_mode(theme),
             Message::CycleFontTier => self.set_font_tier(self.preferences.font_tier.cycle()),
             Message::StorageDetect => self.storage.detect(),
+            // The row asks; the question's two answers are the only things that do or do not.
+            Message::Restart => self.restart_prompt = true,
+            Message::RestartCancel => self.restart_prompt = false,
+            Message::RestartConfirm => self.restart(),
             Message::WifiScan => self.wifi.start_scan(),
             Message::WifiFrame(now) => self.wifi.poll(now),
             Message::WifiSelect(index) => self.wifi.select(index),
@@ -452,10 +535,10 @@ impl Settings {
 
     /// Describes the interface for the current state.
     pub fn view(&self) -> UI<'_> {
-        use iced::widget::container;
+        use iced::widget::{container, stack};
         use iced::Length;
         use pages::{
-            battery::battery_page, main_page::main_page, memory::memory_page,
+            battery::battery_page, dialog::restart_dialog, main_page::main_page, memory::memory_page,
             storage::storage_page, system::system_page, theme::theme_page, time::time_page,
             wifi::wifi_page,
         };
@@ -485,14 +568,23 @@ impl Settings {
         // black on an AMOLED panel, where an unlit pixel costs nothing. See `style::background_for`.
         let theme = self.preferences.theme;
 
-        container(page)
+        let surface = container(page)
             .width(Length::Fill)
             .height(Length::Fill)
             .style(move |_theme| container::Style {
                 background: Some(style::background_for(theme).into()),
                 ..container::Style::default()
-            })
-            .into()
+            });
+
+        // The restart question, when it is up, is a layer *over* the page rather than part of it —
+        // the arrangement the Wi-Fi page gives its password sheet, and for the same reason: a modal
+        // the page behind it can still be pressed through is not a modal. It is stacked here, by the
+        // app, because it is not about a page: the row that opens it is on the list, and the question
+        // is about the whole machine.
+        match self.restart_prompt {
+            true => stack![surface, restart_dialog(self.preferences)].into(),
+            false => surface.into(),
+        }
     }
 }
 

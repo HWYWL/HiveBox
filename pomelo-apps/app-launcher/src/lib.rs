@@ -302,11 +302,16 @@ impl Launcher {
         if self.settings.is_none() {
             let mut app = Settings::new(Arc::clone(&self.board));
             app.set_preferences(self.preferences);
+            // The two readings the status bar does not carry. Voltage has been read here all along;
+            // the temperature joins it, and comes from the PMIC — this board's battery has no NTC,
+            // so the chip's own die temperature is the one the page can be given.
             let voltage_mv = self.board.power().battery_voltage_mv().unwrap_or(0) as u16;
+            let temperature_c = self.board.power().chip_temperature_c().ok();
             app.set_battery(settings::Battery {
                 percent: self.battery,
                 charging: self.charging,
                 voltage_mv,
+                temperature_c,
             });
             self.settings = Some(app);
         }
@@ -370,10 +375,15 @@ impl Launcher {
 
         if let Some(settings) = &mut self.settings {
             let voltage_mv = self.board.power().battery_voltage_mv().unwrap_or(0) as u16;
+            // Read now, not carried: the firmware sends this message when the chip's temperature has
+            // moved half a degree, so "the battery changed" and "the PMIC warmed up" are the same
+            // arrival, and the freshest number is the one on the board this instant.
+            let temperature_c = self.board.power().chip_temperature_c().ok();
             settings.set_battery(settings::Battery {
                 percent: self.battery,
                 charging,
                 voltage_mv,
+                temperature_c,
             });
         }
     }

@@ -1,5 +1,6 @@
 #include "board_hal_internal.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "driver/i2c_master.h"
 #include "driver/gpio.h"
 #include "bsp/esp-bsp.h"
@@ -23,6 +24,8 @@ static const char *TAG = "board_power";
 #define AXP2101_REG_ADC_CH_CTRL      0x30  /* ADC channel enable control */
 #define AXP2101_REG_VBAT_H           0x34  /* Battery voltage data [12:8] */
 #define AXP2101_REG_VBAT_L           0x35  /* Battery voltage data [7:0] */
+#define AXP2101_REG_ADC_TDIE_H       0x3C  /* Die temperature data [13:8] */
+#define AXP2101_REG_ADC_TDIE_L       0x3D  /* Die temperature data [7:0] */
 #define AXP2101_REG_INTEN1           0x41  /* IRQ enable register 1 */
 #define AXP2101_REG_INTSTS1          0x48  /* IRQ status register 1 */
 #define AXP2101_REG_INTSTS2          0x49  /* IRQ status register 2 */
@@ -258,6 +261,99 @@ int32_t hal_power_get_battery_voltage_mv(void)
     return 0;
 }
 
+/** The die temperature, in tenths of a degree Celsius.
+ *
+ * The battery on this board is a two-pin part, so the TS pin has no NTC on it and the *pack*
+ * temperature is not a thing that can be read — `hal_power_init` turns that channel off rather than
+ * measure a floating pin. What the power path does have is the PMIC's own temperature, and this is
+ * it.
+ *
+ * The layout and the conversion are XPowersLib's (`XPowersAXP2101.hpp`), which is what this chip is
+ * driven by everywhere else it appears: 14 bits, the high six in 0x3C and the low eight in 0x3D, and
+ * `22.0 + (7274 - raw) / 20.0` degrees. A raw value of all ones is an ADC that has not converted
+ * since the channel was enabled, and reading it as a temperature gives something absurd — the check
+ * is not paranoia, it is the difference between a reading and a number. */
+esp_err_t hal_power_get_chip_temperature_dc(int32_t *out_dc)
+{
+    if (out_dc == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!s_axp2101_dev) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    uint8_t h = 0, l = 0;
+    esp_err_t ret = axp2101_read_reg(AXP2101_REG_ADC_TDIE_H, &h);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    ret = axp2101_read_reg(AXP2101_REG_ADC_TDIE_L, &l);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    uint16_t raw = (uint16_t)(((uint16_t)(h & 0x3F) << 8) | l);
+    if (raw >= 0x3FFF) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    /* In tenths, integer throughout: `(7274 - raw) / 20.0` °C is `(7274 - raw) / 2` tenths, and the
+     * page has one decimal place to put it in. */
+    *out_dc = 220 + ((int32_t)7274 - (int32_t)raw) / 2;
+
+    return ESP_OK;
+}
+
+/** Restart the board.
+ *
+ * Nothing is torn down first and nothing is flushed: this is a reset of the CPU, and the PMIC, the
+ * panel and every rail stay exactly as they are across it. What survives is what the chip keeps —
+ * the RTC in its own memory, the reset reason — and what does not is everything in RAM, which is
+ * what a restart means. */
+void hal_power_restart(void)
+{
+    ESP_LOGW(TAG, "restart requested");
+    esp_restart();
+}
+
+/* How far the die temperature has to move before it is worth telling the platform about.
+ *
+ * Half a degree: the ADC resolves 0.05 °C, so an exact compare would send an event for the noise
+ * alone, and a whole degree would leave a page that draws a temperature a degree behind the chip. */
+#define POWER_TEMPERATURE_STEP_DC 5
+
+/** Whether the PMIC's die temperature has moved enough to be worth reporting.
+ *
+ * `last` is the reading this task last reported, and is updated here. `INT32_MIN` — what it starts
+ * at — is not a temperature, which is what makes the first successful read a change rather than a
+ * comparison against a sentinel. A read that fails is not a change: the temperature is unknown, and
+ * unknown is not something to push. */
+static bool chip_temperature_moved(int32_t *last)
+{
+    int32_t now = 0;
+    if (hal_power_get_chip_temperature_dc(&now) != ESP_OK) {
+        return false;
+    }
+
+    if (*last == INT32_MIN) {
+        *last = now;
+        return true;
+    }
+
+    int32_t delta = now - *last;
+    if (delta < 0) {
+        delta = -delta;
+    }
+
+    if (delta < POWER_TEMPERATURE_STEP_DC) {
+        return false;
+    }
+
+    *last = now;
+    return true;
+}
+
 static void power_monitor_task(void *arg)
 {
     (void)arg;
@@ -266,6 +362,9 @@ static void power_monitor_task(void *arg)
     int32_t last_percent = -1;
     bool last_charging = false;
     uint32_t tick_count = 0;
+    /* The last die temperature this task told the platform about. `INT32_MIN` until the first
+     * successful read, which is what makes the first one a change. */
+    int32_t last_temperature_dc = INT32_MIN;
 
     // Initial reading
     int32_t raw_init = read_raw_battery_percent();
@@ -302,7 +401,12 @@ static void power_monitor_task(void *arg)
             int32_t percent = smooth_battery_percent(raw_percent);
             int32_t voltage = hal_power_get_battery_voltage_mv();
 
-            if (percent != last_percent || charging_changed) {
+            // The die temperature is the one reading here that moves on its own: the fuel gauge
+            // changes by the hour and the charger's state by the plug, so without it a page that
+            // draws a temperature draws the same one until either of the other two does.
+            bool temperature_moved = chip_temperature_moved(&last_temperature_dc);
+
+            if (percent != last_percent || charging_changed || temperature_moved) {
                 last_percent = percent;
                 last_charging = charging;
 
