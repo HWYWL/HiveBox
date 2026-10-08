@@ -28,10 +28,37 @@ static const char *TAG = "board_wifi";
 
 #define MAX_AP_RECORDS 20
 
+/* Long enough for a WPA2 key and its NUL. IDF's own limit is 64 characters. */
+#define HAL_WIFI_PASSWORD_MAX_LEN 65
+
 static bool             s_inited = false;
 static bool             s_enabled = false;
 static esp_netif_t     *s_sta_netif = NULL;
 static SemaphoreHandle_t s_lock = NULL;
+
+/* ---- The connection the app asked for ---------------------------------------
+ *
+ * An *ask*, and not a call: `esp_wifi_connect` needs an interface that has already started, and
+ * `esp_wifi_start` returns before it has — the station comes up asynchronously and says so with
+ * `WIFI_EVENT_STA_START`. So the ask is recorded here and answered in the event handler, which is
+ * where every IDF example answers it too. Asked for before the start, the answer arrives a moment
+ * later; asked for after, it is answered on the spot. Before this, the boot path called
+ * `esp_wifi_connect` immediately after `esp_wifi_start` and lost the race, so a board that was
+ * supposed to rejoin its network at boot simply did not.
+ *
+ * `s_wanted` is cleared by a disconnect and by turning the radio off: both are the app saying it no
+ * longer wants the connection, and a layer that went on reconnecting through either would be a
+ * layer fighting the finger that just asked it not to. */
+static bool s_started = false;
+static bool s_wanted = false;
+static char s_want_ssid[HAL_WIFI_SSID_MAX_LEN] = {0};
+static char s_want_password[HAL_WIFI_PASSWORD_MAX_LEN] = {0};
+
+/** Write a network into the driver's station config. Valid before the station has started. */
+static esp_err_t configure_station(const char *ssid, const char *password);
+
+/** Ask the driver to join what the station has been configured with. Needs a started station. */
+static esp_err_t join(const char *ssid);
 
 // ---- Cached state (guarded by s_lock) ---------------------------------------
 static int32_t        s_scan_state = HAL_WIFI_SCAN_IDLE;
@@ -134,6 +161,24 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
                 hal_event_send(&ev);
             }
             break;
+
+        case WIFI_EVENT_STA_START: {
+            /* The station is up, which is the first moment a connect can succeed. Anything the app
+             * asked for before this was recorded rather than attempted — see the note beside
+             * `s_wanted` — and this is where it is answered. */
+            lock();
+            s_started = true;
+            bool wanted = s_wanted;
+            char want_ssid[HAL_WIFI_SSID_MAX_LEN];
+            snprintf(want_ssid, sizeof(want_ssid), "%s", s_want_ssid);
+            unlock();
+
+            if (wanted) {
+                ESP_LOGI(TAG, "station started; joining \"%s\" as asked", want_ssid);
+                join(want_ssid);
+            }
+            break;
+        }
 
         case WIFI_EVENT_STA_CONNECTED:
             lock();
@@ -274,6 +319,12 @@ esp_err_t hal_wifi_set_enabled(bool on)
         if (s_enabled) {
             return ESP_OK;
         }
+        /* Before the start, and not after: the station is not up until it says so, and a connect
+         * attempted in between would be aimed at an interface that is not there. */
+        lock();
+        s_started = false;
+        unlock();
+
         esp_err_t ret = esp_wifi_start();
         if (ret != ESP_OK && ret != ESP_ERR_WIFI_CONN) {
             ESP_LOGW(TAG, "esp_wifi_start: %s", esp_err_to_name(ret));
@@ -288,6 +339,12 @@ esp_err_t hal_wifi_set_enabled(bool on)
         (void)esp_wifi_disconnect();
         (void)esp_wifi_stop();
         s_enabled = false;
+        lock();
+        /* The radio is off and the ask with it: a station that came back up would have nothing to
+         * join, and the switch is what says whether anything should be joined at all. */
+        s_started = false;
+        s_wanted = false;
+        unlock();
 
         lock();
         s_conn_state = HAL_WIFI_STATE_DISCONNECTED;
@@ -362,6 +419,38 @@ esp_err_t hal_wifi_connect(const char *ssid, const char *password)
         return ESP_ERR_INVALID_ARG;
     }
 
+    /* Recorded before it is acted on, and that order is the point. A connect asked for while the
+     * station is still starting has nowhere to go yet; recording it here means `STA_START` can
+     * answer it a moment later. See the note beside `s_wanted`. */
+    lock();
+    s_wanted = true;
+    snprintf(s_want_ssid, sizeof(s_want_ssid), "%s", ssid);
+    snprintf(s_want_password, sizeof(s_want_password), "%s", password ? password : "");
+    bool started = s_started;
+    unlock();
+
+    /* The network goes into the driver now, even when the station has not started: this is the call
+     * meant for exactly that moment, and doing it here is what leaves the `STA_START` handler with
+     * nothing in it but the one call every IDF example makes from there — `esp_wifi_connect()`. A
+     * blocking API called from an event handler is a thing to stay away from, and this is how. */
+    esp_err_t ret = configure_station(ssid, password);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    if (!started) {
+        /* Reported as success and not as a failure: the ask has been taken, and the connection is
+         * coming. An error here would have the page say the password was refused when nobody has
+         * offered it to anybody yet. */
+        ESP_LOGI(TAG, "the station is still starting; \"%s\" is joined once it has", ssid);
+        return ESP_OK;
+    }
+
+    return join(ssid);
+}
+
+static esp_err_t configure_station(const char *ssid, const char *password)
+{
     wifi_config_t wc = {0};
     strncpy((char *)wc.sta.ssid, ssid, sizeof(wc.sta.ssid) - 1);
     if (password) {
@@ -399,10 +488,14 @@ esp_err_t hal_wifi_connect(const char *ssid, const char *password)
     esp_err_t ret = esp_wifi_set_config(WIFI_IF_STA, &wc);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "esp_wifi_set_config: %s", esp_err_to_name(ret));
-        return ret;
     }
 
-    ret = esp_wifi_connect();
+    return ret;
+}
+
+static esp_err_t join(const char *ssid)
+{
+    esp_err_t ret = esp_wifi_connect();
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "esp_wifi_connect: %s", esp_err_to_name(ret));
         return ret;
@@ -417,6 +510,13 @@ esp_err_t hal_wifi_disconnect(void)
     if (!s_inited) {
         return ESP_OK;
     }
+
+    /* Asked to leave, and that is the end of the ask to join: the app's "disconnect" row is a
+     * person saying they do not want this network, and a layer that went on reconnecting would be
+     * a layer that undid the press. */
+    lock();
+    s_wanted = false;
+    unlock();
 
     esp_err_t ret = esp_wifi_disconnect();
     if (ret != ESP_OK && ret != ESP_ERR_WIFI_NOT_CONNECT) {

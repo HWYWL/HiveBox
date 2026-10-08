@@ -294,6 +294,49 @@ esp_err_t hal_storage_get_internal(hal_storage_volume_t *out);
  */
 esp_err_t hal_storage_get_card(hal_storage_volume_t *out);
 
+/* Files on the built-in partition, through `stdio`.
+ *
+ * These exist because the Rust half's `std::fs` cannot create a file on this board — it opens an
+ * existing one for reading happily and fails every write with ENOENT — which made the Wi-Fi
+ * credentials look saved and never be. See the note above them in `board_storage.c` for what was
+ * measured. They are `fopen`/`fwrite`, the same calls `main.c` has always written its files with. */
+
+/**
+ * @brief Read a whole file as text, NUL-terminated.
+ *
+ * @param[in]  path      Path under a mount point, e.g. "/internal/AppData/WIFI/wifi.conf".
+ * @param[out] out       Buffer of at least `capacity` bytes to fill.
+ * @param[in]  capacity  Size of `out`. One byte is held back for the terminator.
+ * @param[out] out_len   Bytes read, not counting the terminator.
+ *
+ * @return
+ *      - ESP_OK on success
+ *      - ESP_ERR_INVALID_ARG if any pointer is NULL or `capacity` is 0
+ *      - ESP_ERR_NOT_FOUND when there is no such file — the ordinary "nothing has been saved yet"
+ *      - ESP_ERR_INVALID_SIZE when the file does not fit, in which case `out` is not touched
+ *      - ESP_FAIL for anything else the filesystem said
+ */
+esp_err_t hal_storage_read_file(const char *path, char *out, size_t capacity, size_t *out_len);
+
+/**
+ * @brief Write `len` bytes to `path`, truncating it, creating the directories above it.
+ *
+ * @return
+ *      - ESP_OK on success, with every byte written and the file closed cleanly
+ *      - ESP_ERR_INVALID_ARG if `path` or `data` is NULL
+ *      - ESP_ERR_INVALID_SIZE if the path is longer than this layer will build
+ *      - ESP_FAIL on a short write, a failed close, or any filesystem error
+ */
+esp_err_t hal_storage_write_file(const char *path, const char *data, size_t len);
+
+/**
+ * @brief Remove `path`.
+ *
+ * @return ESP_OK when it is gone, including when it never existed; ESP_ERR_INVALID_ARG if `path` is
+ *         NULL; ESP_FAIL if the filesystem refused.
+ */
+esp_err_t hal_storage_remove_file(const char *path);
+
 /* The flash chip itself: how much of it there is, and what every region of it is for.
  *
  * hal_storage_get_internal() answers "how full is the filesystem the box can write" — on this board

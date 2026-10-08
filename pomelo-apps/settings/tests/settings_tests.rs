@@ -959,6 +959,55 @@ fn an_open_network_connects_without_a_prompt() {
     assert!(ui.find("Disconnect").is_ok(), "the page offers the way out");
 }
 
+/// A network tapped in the list is remembered, prompt or no prompt.
+///
+/// The credentials used to be written on the prompt's path only: `pending` meant "a prompt is
+/// open", so a connection that never opened one never came back to be written down — and the board
+/// forgot the network the moment it left it.
+#[test]
+fn an_open_network_tapped_in_the_list_is_remembered() {
+    let (board, mut settings) = scanned();
+
+    settings.update(Message::WifiSelect(3));
+
+    let saved = board
+        .wifi()
+        .saved()
+        .expect("the network it just joined is remembered");
+
+    assert_eq!(saved.ssid, "OpenGuest");
+    assert!(saved.enabled, "with the switch as it was left");
+    assert!(saved.autoconnect, "and wanted again the next time");
+}
+
+/// Turning the switch back on rejoins the network the board remembers.
+///
+/// The failure this guards is the one a phone does not have: the switch was only ever a switch, so
+/// a board that had been on a network came back to a list of networks. The file knew where it
+/// belonged and nothing read it again until the next boot.
+#[test]
+fn turning_the_switch_back_on_rejoins_the_remembered_network() {
+    let (_, mut settings) = scanned();
+
+    settings.update(Message::WifiSelect(3));
+    assert_eq!(settings.wifi_status().ssid, "OpenGuest");
+
+    // Off: the radio goes down and what was on screen goes with it.
+    settings.update(Message::ToggleWifi);
+    assert!(!settings.wifi_enabled());
+    assert_ne!(settings.wifi_status().state, WifiState::Connected);
+
+    // On again, with no finger on the list: the network the board knows comes back by itself.
+    settings.update(Message::ToggleWifi);
+    assert!(settings.wifi_enabled());
+    assert_eq!(
+        settings.wifi_status().state,
+        WifiState::Connected,
+        "the radio came back up on the network it remembers"
+    );
+    assert_eq!(settings.wifi_status().ssid, "OpenGuest");
+}
+
 /// The connection card is the radio's numbers, and disconnecting leaves the network.
 #[test]
 fn the_connection_card_is_the_boards_own_numbers() -> Result<(), iced_test::Error> {

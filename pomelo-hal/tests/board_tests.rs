@@ -222,13 +222,39 @@ fn sim_wifi_boot_leaves_a_network_alone_when_the_file_says_to() {
     );
 }
 
-/// A board that has never been on a network comes up on nothing at all.
+/// A board that has never been on a network comes up on nothing at all — but on.
+///
+/// The radio and the network are two answers, and this is the board out of the box: there is nothing
+/// to join because nothing has been remembered, and that is not a reason to leave the radio down. The
+/// switch is where a person starts.
 #[test]
 fn sim_wifi_boot_without_a_file_joins_nothing() {
     let board = Board::simulated();
 
     board.wifi().autoconnect().unwrap();
 
+    assert_eq!(board.wifi().status().state, WifiState::Disconnected);
+    assert!(
+        board.wifi().is_enabled(),
+        "the radio is up, and unconnected rather than off"
+    );
+}
+
+/// A file that says the switch was off keeps the radio down across a reboot.
+///
+/// The other half of the default: on is what happens when nothing was said, and a finger that turned
+/// the radio off said something.
+#[test]
+fn sim_wifi_boot_respects_a_switch_left_off() {
+    let board = Board::simulated();
+
+    let mut credentials = credentials("Pomelo-OS", true);
+    credentials.enabled = false;
+    board.wifi().remember(&credentials).unwrap();
+
+    board.wifi().autoconnect().unwrap();
+
+    assert!(!board.wifi().is_enabled(), "the radio stays down");
     assert_eq!(board.wifi().status().state, WifiState::Disconnected);
 }
 

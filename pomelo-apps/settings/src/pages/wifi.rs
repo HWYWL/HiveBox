@@ -166,6 +166,7 @@ impl Wifi {
 
         if on {
             self.start_scan();
+            self.reconnect();
         } else {
             // Nothing to list and nothing to connect to: the page says so.
             self.access_points.clear();
@@ -200,6 +201,25 @@ impl Wifi {
                 self.enabled
             );
         }
+    }
+
+    /// Asks the board for the network it remembers, now that the switch is on.
+    ///
+    /// The same call the firmware makes at boot, and for the same reason: turning the radio on *is*
+    /// asking to be on the network the board knows. On a phone the switch and the network come back
+    /// together, and a page that only scanned would leave a person looking at a list of networks
+    /// while the one they had already given a password for sat unused — which is what this page did.
+    ///
+    /// `autoconnect` is the one path to the radio coming up and connecting; this is the second
+    /// moment it is called. What it does is still the file's decision: no remembered network, or one
+    /// marked `autoconnect = false`, and nothing happens. Written by hand and not remembered — the
+    /// switch's own state went into the file a line above, which is what lets this read it back.
+    fn reconnect(&mut self) {
+        if let Err(error) = self.board.wifi().autoconnect() {
+            eprintln!("[wifi] the remembered network could not be rejoined: {error:?}");
+        }
+
+        self.read();
     }
 
     /// Asks the radio for a scan.
@@ -263,12 +283,13 @@ impl Wifi {
                 WifiState::Disconnected => {
                     // The driver clears the status when it gives up, so `status.ssid` is empty by the
                     // time this line runs and naming it that way printed `""`. The name comes from
-                    // the list the attempt was made from — and while `pending` is set, the prompt is
-                    // what says which entry that was.
+                    // the attempt, which is the one thing that knows which network was asked for —
+                    // a prompt is not: an open network tapped in the list has no prompt and an
+                    // attempt of its own.
                     let ssid = self
-                        .prompt
-                        .and_then(|index| self.access_points.get(index))
-                        .map(|ap| ap.ssid.clone());
+                        .attempt
+                        .as_ref()
+                        .map(|credentials| credentials.ssid.clone());
 
                     eprintln!("[wifi] gave up waiting for {ssid:?} — {}", self.answer());
                     self.pending = false;
@@ -371,7 +392,12 @@ impl Wifi {
             autoconnect: true,
         });
 
-        self.pending = self.prompt.is_some();
+        // Pending is "an attempt is in flight", and not "a prompt is open". The two are the same
+        // thing when a password was asked for, and they are not when a network was tapped in the
+        // list: an open one connects with nothing to type, and the `false` this used to be for it
+        // meant nothing ever came back to call `connected()` — so the credentials were never
+        // written, and the board forgot the network as soon as it left it.
+        self.pending = true;
         self.read();
         eprintln!(
             "[wifi] asked, pending={} — {}",

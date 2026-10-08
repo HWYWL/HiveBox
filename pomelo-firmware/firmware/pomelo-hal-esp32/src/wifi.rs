@@ -54,6 +54,17 @@ mod ffi {
         pub fn hal_wifi_connect(ssid: *const c_char, password: *const c_char) -> i32;
         pub fn hal_wifi_disconnect() -> i32;
         pub fn hal_wifi_get_status(out_status: *mut HalWifiStatus) -> i32;
+
+        /// Files on the built-in partition, through the C `stdio` shim — see the note above
+        /// `read_credentials` for why these are not `std::fs`.
+        pub fn hal_storage_read_file(
+            path: *const c_char,
+            out: *mut c_char,
+            capacity: usize,
+            out_len: *mut usize,
+        ) -> i32;
+        pub fn hal_storage_write_file(path: *const c_char, data: *const c_char, len: usize) -> i32;
+        pub fn hal_storage_remove_file(path: *const c_char) -> i32;
     }
 }
 
@@ -94,9 +105,104 @@ impl Default for EspWifi {
 /// cost nobody would see coming.
 static SAVED: Mutex<Option<WifiCredentials>> = Mutex::new(None);
 
-/// A failed filesystem call, as the HAL's error type.
-fn io_error(error: std::io::Error) -> HalError {
-    HalError::Io(error.to_string())
+/// The largest credentials file this backend will read or write.
+///
+/// Four fields for a network name and a password. The bound is not a limitation to be raised later:
+/// it is what lets a file too big to be one of these be an error rather than a truncated password.
+const CREDENTIALS_CAPACITY: usize = 4096;
+
+/// `ESP_ERR_NOT_FOUND`: the C side's "there is no such file" — the ordinary answer from a board that
+/// has never been asked to remember anything, and not a fault.
+const ESP_ERR_NOT_FOUND: i32 = 0x105;
+
+/// The path as a C string. A NUL inside a path is impossible here and would be a bad argument.
+fn c_path(path: &std::path::Path) -> Result<CString, HalError> {
+    CString::new(path.to_string_lossy().as_ref()).map_err(|_| HalError::InvalidArg)
+}
+
+/// Read the credentials file.
+///
+/// # Why this is not `std::fs`
+///
+/// `std::fs` is how a file is written on every other platform, and on this board it cannot create one.
+/// It was what wrote this file, and it failed silently in the one direction that looks like success:
+/// `metadata`, `read_dir` and `create_dir_all` all work, reading an existing file works, and *every*
+/// way of opening a file for writing — `File::create`, `OpenOptions` with and without truncate, with
+/// `create_new`, with append — comes back ENOENT. So `save` returned `Err`, the settings page logged
+/// it and moved on, and the board kept nothing. "It has forgotten my network" was never the flash
+/// being rewritten; there was never a file.
+///
+/// The measurement is the reason for the shim and not a guess about which syscall the Rust runtime
+/// picks: the C side's `fopen` has written this partition since `main.c` mounted it, so the write goes
+/// through `fopen`, and the read goes through the same pair so that a file written cannot be one the
+/// reader would not find.
+///
+/// `Ok(None)` is a board that has never been on a network; an `Err` is a file that is *there* and
+/// wrong, which is a different problem and must not be answered as the first.
+fn read_credentials(root: &str) -> Result<Option<WifiCredentials>, HalError> {
+    let path = c_path(&wifi_credentials::path(root))?;
+
+    let mut buffer = vec![0u8; CREDENTIALS_CAPACITY];
+    let mut len = 0usize;
+
+    let code = unsafe {
+        ffi::hal_storage_read_file(
+            path.as_ptr(),
+            buffer.as_mut_ptr() as *mut c_char,
+            buffer.len(),
+            &mut len,
+        )
+    };
+
+    if code == ESP_ERR_NOT_FOUND {
+        return Ok(None);
+    }
+
+    if code != 0 {
+        return Err(HalError::Internal(code));
+    }
+
+    let text = String::from_utf8_lossy(&buffer[..len]);
+
+    WifiCredentials::parse(&text)
+        .map(Some)
+        .map_err(|error| HalError::Io(error.to_string()))
+}
+
+/// Write the credentials file, over an existing one.
+///
+/// The C side makes the directories above it, so the `AppData/WIFI` path does not have to exist
+/// first — which is what a board fresh out of the box has: no file, and no directory to put one in.
+fn write_credentials(credentials: &WifiCredentials, root: &str) -> Result<(), HalError> {
+    let text = credentials
+        .to_file()
+        .map_err(|error| HalError::Io(error.to_string()))?;
+
+    let path = c_path(&wifi_credentials::path(root))?;
+    let data = CString::new(text).map_err(|_| HalError::InvalidArg)?;
+
+    let code = unsafe {
+        ffi::hal_storage_write_file(path.as_ptr(), data.as_ptr(), data.as_bytes().len())
+    };
+
+    if code != 0 {
+        return Err(HalError::Internal(code));
+    }
+
+    Ok(())
+}
+
+/// Remove the credentials file. Gone, or never there, are the same answer.
+fn remove_credentials(root: &str) -> Result<(), HalError> {
+    let path = c_path(&wifi_credentials::path(root))?;
+
+    let code = unsafe { ffi::hal_storage_remove_file(path.as_ptr()) };
+
+    if code != 0 {
+        return Err(HalError::Internal(code));
+    }
+
+    Ok(())
 }
 
 impl WifiBackend for EspWifi {
@@ -104,13 +210,17 @@ impl WifiBackend for EspWifi {
         // Read once, here. `Ok(None)` is a board that has never been on a network and is not worth a
         // line; an `Err` is a file that is there and unreadable, which is a different problem from
         // no file at all and must not be reported as one.
-        match WifiCredentials::load(wifi_credentials::BOARD_APP_DATA) {
+        match read_credentials(wifi_credentials::BOARD_APP_DATA) {
             Ok(saved) => {
-                if let Some(saved) = &saved {
-                    eprintln!(
-                        "[wifi] remembered {:?} (autoconnect={})",
-                        saved.ssid, saved.autoconnect
-                    );
+                match &saved {
+                    Some(saved) => eprintln!(
+                        "[wifi] remembered {:?} (enabled={}, autoconnect={})",
+                        saved.ssid, saved.enabled, saved.autoconnect
+                    ),
+                    // Said out loud rather than passed over: "the board forgot where it belongs" and
+                    // "there was nothing to remember" look the same from the panel, and this line is
+                    // the difference between them.
+                    None => eprintln!("[wifi] no remembered network"),
                 }
                 *SAVED.lock().unwrap() = saved;
             }
@@ -124,24 +234,39 @@ impl WifiBackend for EspWifi {
 
     /// What the board does, unasked, when it comes up.
     ///
-    /// The file was read in `init`; this acts on what it said. The radio comes on only if the switch
-    /// was on, and one connection is attempted only if the file says to connect without being asked.
-    /// A board with no file does nothing at all — the radio stays down until a finger turns it on,
-    /// and the first network is chosen by hand from the page.
+    /// The file was read in `init`; this acts on what it said. The radio comes up **on** unless the
+    /// file says a finger turned it off — the default is the page's, and it is where a person starts:
+    /// a board that came up with the radio down could not even look for a network until someone found
+    /// the switch. One connection is attempted only if the file names a network that is wanted.
     ///
-    /// Called from a thread of its own by `rust_main`, so the panel is up before the radio is.
+    /// Called from a thread of its own by `rust_main`, so the panel is up before the radio is, and
+    /// again by the settings page when the switch is turned back on.
     fn autoconnect(&mut self) -> Result<(), HalError> {
-        let Some(saved) = self.saved() else {
-            return Ok(());
-        };
+        let saved = self.saved();
 
-        if !saved.enabled {
+        // No file is not "nothing was said", it is "nothing was said *yet*": a board out of the box
+        // comes up ready to look for a network, and the first thing a person does with it is turn the
+        // radio on. A file that carries the key is believed, because the only thing that writes it is
+        // a finger on the switch.
+        let wanted = saved.as_ref().map_or(true, |saved| saved.enabled);
+
+        if !wanted {
+            eprintln!("[wifi] the switch was left off; the radio stays down");
             return Ok(());
         }
 
         self.set_enabled(true)?;
 
+        let Some(saved) = saved else {
+            eprintln!("[wifi] the radio is up; nothing is remembered to join yet");
+            return Ok(());
+        };
+
         if !saved.autoconnect {
+            eprintln!(
+                "[wifi] {:?} is remembered, but not wanted at boot",
+                saved.ssid
+            );
             return Ok(());
         }
 
@@ -157,9 +282,10 @@ impl WifiBackend for EspWifi {
     }
 
     fn remember(&mut self, credentials: &WifiCredentials) -> Result<(), HalError> {
-        credentials
-            .save(wifi_credentials::BOARD_APP_DATA)
-            .map_err(io_error)?;
+        // Written before it is cached, and the cache is only touched once the write has returned: a
+        // board that says it remembered a network it could not write down would reconnect happily
+        // until the next boot and then have nothing, which is the failure this used to be.
+        write_credentials(credentials, wifi_credentials::BOARD_APP_DATA)?;
 
         eprintln!("[wifi] remembered {:?}", credentials.ssid);
         *SAVED.lock().unwrap() = Some(credentials.clone());
@@ -167,7 +293,7 @@ impl WifiBackend for EspWifi {
     }
 
     fn forget(&mut self) -> Result<(), HalError> {
-        WifiCredentials::forget(wifi_credentials::BOARD_APP_DATA).map_err(io_error)?;
+        remove_credentials(wifi_credentials::BOARD_APP_DATA)?;
 
         eprintln!("[wifi] forgot the remembered network");
         *SAVED.lock().unwrap() = None;

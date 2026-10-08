@@ -7,11 +7,21 @@ use crate::types::{ApInfo, ScanState, WifiStatus};
 pub trait WifiBackend: Send + Sync {
     fn init(&mut self) -> Result<(), HalError>;
 
-    /// What the board does, unasked, when it comes up: read the file, and act on what it said.
+    /// Do what the file says: read it, and act on what it said.
     ///
-    /// The radio comes on only if the file says the switch was on, and one connection is attempted
-    /// only if the file says to connect without being asked. A board with no file — or one whose
-    /// switch was left off — does nothing at all, and the first network is then chosen by hand.
+    /// The radio comes up **on** unless the file says the switch was turned off, and one connection is
+    /// attempted only if the file names a network that is wanted. A board with no file has nothing to
+    /// join and comes up on anyway: the switch is where a person starts, and a radio that came up down
+    /// would have to be found before it could look for anything.
+    ///
+    /// Called at two moments, and both of them are "the board is coming up": once by the firmware
+    /// when the panel has been drawn, and once by the app when the switch is turned back on. The
+    /// second is the same question as the first — the radio is up and the file knows where it
+    /// belongs — and asking it any other way would be a second path to a connection, which is what
+    /// [`WifiBackend::set_enabled`] is deliberately not.
+    ///
+    /// Idempotent, because the second call follows a switch that was just flipped: a radio already
+    /// on stays on, and a connection already up is connected to again rather than refused.
     ///
     /// No default: a backend that cannot do this must say so, and an `Ok(())` that did nothing is
     /// the one answer nobody could tell from success.

@@ -21,9 +21,11 @@
 
 #include "board_hal.h"
 
+#include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "bsp/esp32_s3_touch_amoled_2_16.h"
 #include "esp_flash.h"
@@ -188,6 +190,147 @@ esp_err_t hal_storage_get_card(hal_storage_volume_t *out)
     out->free_bytes = free_bytes;
 
     return ESP_OK;
+}
+
+/* ---------------------------------------------------------------------------
+ * Files, through `stdio`.
+ *
+ * # Why this exists at all
+ *
+ * The Rust half has `std::fs`, and on every other platform it is what a file is written with. Here it
+ * does not work — and it fails in the flattering direction, with a *read* that succeeds and a write
+ * that does not, so the code that used it looked correct and quietly kept nothing.
+ *
+ * What the board actually does, measured rather than supposed:
+ *
+ *   metadata, read_dir, create_dir, create_dir_all, remove_dir_all   all fine
+ *   open an existing file for reading                                fine
+ *   open anything for writing, every flag combination, O_CREAT or not
+ *                                                                    ENOENT, always
+ *
+ * `main.c` has been writing `/internal/welcome.txt` with `fopen` since the partition was mounted, so
+ * the filesystem is not the part that cannot write: it is `std::fs`'s way in. Rather than guess at
+ * which syscall the Rust runtime picks, the write goes through the same `stdio` call the rest of the
+ * firmware already uses, and the Rust side keeps `std::fs` for the parts of it that work.
+ *
+ * # The signatures are the point
+ *
+ * `hal_storage_read_file` fills a caller-owned buffer, because the caller is the one that knows how
+ * much text it is willing to hold: a file bigger than the buffer is an error and not a truncation, and
+ * the Rust side reads that as "this is not a credentials file" instead of as a shorter one.
+ * ------------------------------------------------------------------------- */
+
+/** Every directory on the way to `path`, created if it is not there yet. */
+static esp_err_t make_dirs(const char *path)
+{
+    /* A stack copy of the path, because the loop below has to end the string at each separator to
+     * hand `mkdir` one component at a time, and the caller's own string is not this function's to
+     * write in. 256 characters is more than any path this board builds — `/internal/AppData/WIFI/
+     * wifi.conf` is 33 — and a longer one is refused rather than silently cut short. */
+    char scratch[256];
+    size_t len = strlen(path);
+
+    if (len >= sizeof(scratch)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    memcpy(scratch, path, len + 1);
+
+    /* From the second character, so that the leading `/` of the mount point — which always exists and
+     * cannot be made — is not mistaken for a component. */
+    for (char *slash = scratch + 1; (slash = strchr(slash, '/')) != NULL; slash++) {
+        *slash = '\0';
+
+        if (mkdir(scratch, 0777) != 0 && errno != EEXIST) {
+            ESP_LOGE(TAG, "cannot make %s: errno %d", scratch, errno);
+            return ESP_FAIL;
+        }
+
+        *slash = '/';
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t hal_storage_read_file(const char *path, char *out, size_t capacity, size_t *out_len)
+{
+    if (path == NULL || out == NULL || out_len == NULL || capacity == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    FILE *file = fopen(path, "rb");
+
+    if (file == NULL) {
+        /* A file that is not there is the ordinary answer, not a fault: it is what a board that has
+         * never been asked to remember anything says. */
+        return (errno == ENOENT) ? ESP_ERR_NOT_FOUND : ESP_FAIL;
+    }
+
+    /* One byte held back for the terminator, so the text handed back is a C string either way. */
+    size_t read = fread(out, 1, capacity - 1, file);
+    bool  over = !feof(file);
+
+    fclose(file);
+
+    if (over) {
+        ESP_LOGW(TAG, "%s is larger than the %u-byte buffer it was read into",
+                 path, (unsigned)capacity);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    out[read] = '\0';
+    *out_len = read;
+
+    return ESP_OK;
+}
+
+esp_err_t hal_storage_write_file(const char *path, const char *data, size_t len)
+{
+    if (path == NULL || data == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t made = make_dirs(path);
+    if (made != ESP_OK) {
+        return made;
+    }
+
+    FILE *file = fopen(path, "wb");
+
+    if (file == NULL) {
+        ESP_LOGE(TAG, "cannot open %s for writing: errno %d", path, errno);
+        return ESP_FAIL;
+    }
+
+    size_t written = fwrite(data, 1, len, file);
+    int    closed = fclose(file);
+
+    /* Both checked, and both reported together: a short write is a disk that filled up, and a failed
+     * close is data that never reached the flash — either one means the file is not what was asked
+     * for, and the caller has to hear about it rather than find out at the next boot. */
+    if (written != len || closed != 0) {
+        ESP_LOGE(TAG, "%s: wrote %u of %u bytes, close returned %d",
+                 path, (unsigned)written, (unsigned)len, closed);
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t hal_storage_remove_file(const char *path)
+{
+    if (path == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (remove(path) == 0 || errno == ENOENT) {
+        /* Including the case where there was nothing to remove: the caller asked for the file to be
+         * gone, and it is. */
+        return ESP_OK;
+    }
+
+    ESP_LOGE(TAG, "cannot remove %s: errno %d", path, errno);
+    return ESP_FAIL;
 }
 
 /* ---------------------------------------------------------------------------

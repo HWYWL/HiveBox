@@ -88,11 +88,15 @@ pub fn path(root: impl AsRef<Path>) -> PathBuf {
 /// reader, the writer and the check that the file matches all follow from it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WifiCredentials {
-    /// Whether the radio is on at boot.
+    /// Whether the radio is on at boot — the switch, as a finger last left it.
     ///
-    /// Defaults to *off*: a file that predates the key is a board whose radio came up off, and a
-    /// default that changes what the board already did is not a default, it is a change.
-    #[serde(default)]
+    /// Defaults to *on*, and so does a board with no file at all: see
+    /// [`crate::traits::WifiBackend::autoconnect`], which is where that default lives. The key is
+    /// only written by a finger on the switch, so a file that carries it is believed whichever way it
+    /// says — turning the radio off is a thing a person did, and it has to survive a reboot. A file
+    /// that does not carry it was written by a board that was being used, and being used means the
+    /// radio was up.
+    #[serde(default = "yes")]
     pub enabled: bool,
 
     /// The network's name, as it is broadcast. Not translated and not owned by us: it is the
@@ -254,7 +258,7 @@ mod tests {
         assert_eq!(
             read,
             WifiCredentials {
-                enabled: false,
+                enabled: true,
                 ssid: "home".into(),
                 password: "hunter2".into(),
                 autoconnect: true,
@@ -264,16 +268,17 @@ mod tests {
     }
 
     #[test]
-    fn the_switches_have_the_defaults_that_keep_a_board_quiet() {
+    fn a_file_that_says_nothing_leaves_the_radio_on_and_wanting_to_connect() {
         let without = WifiCredentials::parse("[wifi]\nssid = \"home\"\n").unwrap();
 
         assert!(
-            !without.enabled,
-            "a file written before the key existed is a board whose radio came up off"
+            without.enabled,
+            "a file written before the key existed belongs to a board that was being used, and the \
+             radio comes up on by default"
         );
         assert!(
             without.autoconnect,
-            "and one whose owner was connecting: the two defaults point opposite ways on purpose"
+            "and one whose owner was connecting"
         );
         assert_eq!(
             without.password, "",

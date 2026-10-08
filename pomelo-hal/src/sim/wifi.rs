@@ -78,16 +78,22 @@ impl WifiBackend for SimWifi {
     ///
     /// Which is the whole reason the simulator has it: the boot behaviour is a rule about a file,
     /// and a rule only one side implements is a rule only testable on the side nobody can run here.
+    /// That includes the default — the radio comes up on when the file says nothing, because there
+    /// is no file — so the two sides answer a board out of the box the same way.
     fn autoconnect(&mut self) -> Result<(), HalError> {
-        let Some(saved) = self.saved() else {
-            return Ok(());
-        };
+        let saved = self.saved();
 
-        if !saved.enabled {
-            return Ok(());
+        let wanted = saved.as_ref().map_or(true, |saved| saved.enabled);
+
+        if !wanted {
+            return self.set_enabled(false);
         }
 
         self.set_enabled(true)?;
+
+        let Some(saved) = saved else {
+            return Ok(());
+        };
 
         if !saved.autoconnect {
             return Ok(());
