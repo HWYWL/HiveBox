@@ -5,12 +5,17 @@
 #include "esp_codec_dev.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "bsp/esp-bsp.h"
 
 static const char *TAG = "board_audio";
 
 static esp_codec_dev_handle_t s_spk_codec_dev = NULL;
 static bool s_audio_opened = false;
+/* Serialises `hal_audio_tone` against itself and against a player mid-stream: the codec is one
+ * device, and a tone that reconfigures the sample rate underneath a running stream would be heard
+ * as noise rather than a beep. */
+static SemaphoreHandle_t s_audio_lock = NULL;
 
 /* ---------------------------------------------------------------------------
  * Primary Audio Hardware Control API (Audio Sink)
@@ -18,6 +23,9 @@ static bool s_audio_opened = false;
 
 esp_err_t hal_audio_init(void)
 {
+    if (s_audio_lock == NULL) {
+        s_audio_lock = xSemaphoreCreateMutex();
+    }
     if (s_spk_codec_dev != NULL) {
         return ESP_OK;
     }
@@ -105,4 +113,74 @@ esp_err_t hal_audio_close(void)
         ESP_LOGI(TAG, "Audio stream closed.");
     }
     return ESP_OK;
+}
+
+/* 16 kHz mono 16-bit is the ES8311's most forgiving rate: it needs no mclk juggling, and the tone
+ * is short enough that the difference from the player's 44.1 kHz is imperceptible. */
+#define TONE_RATE_HZ 16000
+#define TONE_AMPLITUDE 12000
+
+esp_err_t hal_audio_tone(uint32_t freq_hz, uint32_t ms, uint8_t volume)
+{
+    if (!s_spk_codec_dev) {
+        if (hal_audio_init() != ESP_OK) {
+            return ESP_FAIL;
+        }
+    }
+    if (freq_hz == 0 || ms == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (ms > 5000) {
+        ms = 5000; // a "test tone" that outlasts a browser's patience is not worth the DMA
+    }
+
+    if (s_audio_lock != NULL) {
+        xSemaphoreTake(s_audio_lock, portMAX_DELAY);
+    }
+
+    esp_err_t ret = ESP_OK;
+    if (hal_audio_open(TONE_RATE_HZ, 1, 16) != ESP_OK) {
+        ret = ESP_FAIL;
+        goto out;
+    }
+    if (volume <= 100) {
+        hal_audio_set_volume(volume);
+    }
+
+    // One period's worth of steps, then repeated: cheaper than a division per sample and exactly
+    // periodic, since the step count is rounded to a whole period.
+    const int32_t total = (int32_t)((uint64_t)TONE_RATE_HZ * ms / 1000);
+    const int32_t period = (int32_t)(TONE_RATE_HZ / freq_hz);
+    if (period < 2) {
+        ret = ESP_ERR_INVALID_ARG;
+        goto out;
+    }
+    int16_t buf[256];
+    int32_t done = 0;
+    while (done < total) {
+        int32_t n = total - done;
+        if (n > (int32_t)(sizeof(buf) / sizeof(buf[0]))) {
+            n = (int32_t)(sizeof(buf) / sizeof(buf[0]));
+        }
+        for (int32_t i = 0; i < n; i++) {
+            // Raise a half-sine so the tone starts and ends at zero and does not click.
+            int32_t phase = (done + i) % period;
+            int32_t v = (phase < period / 2) ? (TONE_AMPLITUDE * 2 * phase / period - TONE_AMPLITUDE)
+                                            : (TONE_AMPLITUDE - TONE_AMPLITUDE * 2 * (phase - period / 2) / period);
+            buf[i] = (int16_t)v;
+        }
+        if (hal_audio_write(buf, (uint32_t)n * sizeof(int16_t)) != ESP_OK) {
+            ret = ESP_FAIL;
+            break;
+        }
+        done += n;
+    }
+    hal_audio_drain();
+
+out:
+    hal_audio_close();
+    if (s_audio_lock != NULL) {
+        xSemaphoreGive(s_audio_lock);
+    }
+    return ret;
 }

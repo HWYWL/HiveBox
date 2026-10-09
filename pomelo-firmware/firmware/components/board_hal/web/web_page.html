@@ -9,6 +9,11 @@
 <meta name="apple-mobile-web-app-title" content="HiveBox">
 <title>HiveBox 网页管理</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='15' fill='%23007aff'/%3E%3Cpath fill='%23fff' fill-rule='evenodd' d='M49 32 40.5 46.7 23.5 46.7 15 32 23.5 17.3 40.5 17.3Z M32 25.6 40 30.2 40 33.8 32 38.4 24 33.8 24 30.2Z'/%3E%3C/svg%3E">
+<!-- Installed behind a certificate (or from localhost) this page becomes an app: the manifest, the
+     icon and the service worker are the three routes that make that so, and over plain http on a LAN
+     they are simply never asked for. -->
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon.svg">
 <script>
 /* Ahead of the first paint, so that a dark screen never flashes white. The choice is the system's
    unless somebody has made one on this page; `light` is what the stylesheet is written in, so only
@@ -459,6 +464,21 @@ dialog.full { margin: auto; width: 100%; }
 .pv-body audio, .pv-body video { max-width: 100%; max-height: 100%; }
 .pv-body iframe { width: 100%; height: 100%; border: 0; background: #fff; }
 .pv-note { font-size: 12.5px; color: var(--label-2); text-align: center; }
+.pv-body .player {
+  display: flex; flex-direction: column; gap: 13px;
+  width: min(420px, calc(100% - 32px)); padding: 26px 22px;
+  background: var(--card); border-radius: 20px; box-shadow: 0 12px 34px rgba(0,0,0,.14);
+}
+.player-art {
+  width: 92px; height: 92px; margin: 0 auto; border-radius: 50%;
+  display: grid; place-items: center; color: #fff;
+  background: linear-gradient(160deg, #d17bf5, #af52de);
+  box-shadow: 0 10px 24px rgba(175,82,222,.32);
+}
+.player-art .ic { width: 42px; height: 42px; }
+.player-name { font-size: 15.5px; font-weight: 700; text-align: center; word-break: break-all; }
+.player-meta { font-size: 12.5px; color: var(--label-2); text-align: center; }
+.player audio { width: 100%; }
 .pv-void { padding: 30px; text-align: center; color: var(--label-2); }
 .pv-void .ic { width: 46px; height: 46px; margin: 0 auto 12px; color: var(--label-3); }
 .pv-foot { display: flex; gap: 8px; padding: 10px 12px calc(12px + env(safe-area-inset-bottom)); border-top: .5px solid var(--sep); }
@@ -494,6 +514,61 @@ dialog.full { margin: auto; width: 100%; }
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+/* --- the console: the screen, the clock, the log --------------------------- */
+.slider { flex: 1; display: flex; align-items: center; gap: 12px; min-width: 0; }
+.slider input[type="range"] {
+  flex: 1; min-width: 0; height: 26px; margin: 0; background: none;
+  accent-color: var(--tint); -webkit-appearance: none; appearance: none;
+}
+.slider input[type="range"]::-webkit-slider-runnable-track {
+  height: 5px; border-radius: 3px; background: var(--fill-2);
+}
+.slider input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none; width: 22px; height: 22px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 5px rgba(0,0,0,.3); margin-top: -8.5px;
+}
+.slider input[type="range"]::-moz-range-track { height: 5px; border-radius: 3px; background: var(--fill-2); }
+.slider input[type="range"]::-moz-range-thumb { width: 22px; height: 22px; border: 0; border-radius: 50%; background: #fff; }
+.slider-val { font-size: 13px; color: var(--label-2); font-variant-numeric: tabular-nums; min-width: 40px; text-align: right; }
+
+.stage {
+  position: relative; background: #000; margin: 0; overflow: hidden;
+  display: grid; place-items: center; min-height: 240px; max-height: 62vh;
+}
+.stage img {
+  width: 100%; height: auto; display: block; cursor: crosshair;
+  touch-action: none; user-select: none; -webkit-user-drag: none;
+}
+.stage .stage-note {
+  position: absolute; inset: 0; display: grid; place-items: center; text-align: center;
+  padding: 26px; font-size: 13px; line-height: 1.6; color: rgba(255,255,255,.62);
+}
+.stage .stage-flash {
+  position: absolute; inset: 0; pointer-events: none; border: 2px solid var(--tint);
+  border-radius: 0; animation: popout .45s var(--ease) forwards;
+}
+
+.log {
+  margin: 0; padding: 10px 14px 14px; max-height: 46vh; overflow: auto;
+  font: 11.5px/1.7 var(--mono); white-space: pre-wrap; word-break: break-word;
+  border-top: .5px solid var(--sep);
+}
+.log .at { color: var(--label-3); }
+.log .lv-W { color: var(--orange); }
+.log .lv-E { color: var(--red); }
+.log .lv-I { color: var(--label); }
+.log .lv-D, .log .lv-V { color: var(--label-3); }
+.log-line { display: block; }
+.log-line.on { background: var(--tint-soft); }
+
+textarea.code {
+  width: 100%; height: 100%; min-height: 50vh; border: 0; outline: none; resize: none;
+  font: 12.5px/1.6 var(--mono); color: var(--label); background: var(--card);
+  padding: 14px; tab-size: 4; white-space: pre; overflow: auto;
+}
+textarea.code.wrap { white-space: pre-wrap; word-break: break-word; }
+.pv-body.edit { display: block; background: var(--card); padding: 0; }
 </style>
 </head>
 <body>
@@ -539,6 +614,11 @@ dialog.full { margin: auto; width: 100%; }
 <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M7.2 18.6h9.6a4.1 4.1 0 0 0 .3-8.2 5.6 5.6 0 0 0-10.7-1A3.4 3.4 0 0 0 7.2 18.6Z"/></symbol>
 <symbol id="i-sort" viewBox="0 0 24 24"><path d="M4 7h16M6.8 12h10.4M10 17h4"/></symbol>
 <symbol id="i-link" viewBox="0 0 24 24"><path d="M10.2 13.8a3.6 3.6 0 0 0 5.1 0l3-3a3.6 3.6 0 0 0-5.1-5.1l-1.4 1.4"/><path d="M13.8 10.2a3.6 3.6 0 0 0-5.1 0l-3 3a3.6 3.6 0 0 0 5.1 5.1l1.4-1.4"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6"/><path d="M12 7.2V12l3.4 2.1"/></symbol>
+<symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4.6" width="18" height="14.8" rx="2.4"/><path d="m7.4 10 2.4 2.2-2.4 2.2"/><path d="M12.8 15.4h3.8"/></symbol>
+<symbol id="i-sliders" viewBox="0 0 24 24"><path d="M5 8h9M17 8h2M5 16h2M10 16h9"/><circle cx="15.5" cy="8" r="2"/><circle cx="8.5" cy="16" r="2"/></symbol>
+<symbol id="i-edit-file" viewBox="0 0 24 24"><path d="M6.2 3.5h7.3l4.3 4.4v12.6H6.2Z"/><path d="M13.3 3.6v4.4h4.4"/><path d="m10 17.6 4.6-4.6a1.3 1.3 0 0 0-1.8-1.8L8.2 15.8l-.5 2z"/></symbol>
+<symbol id="i-puzzle" viewBox="0 0 24 24"><path d="M10.4 4.4a1.9 1.9 0 0 1 3.2 1.3v.9h3a1.4 1.4 0 0 1 1.4 1.4v3h.9a1.9 1.9 0 0 1 0 3.8h-.9v3a1.4 1.4 0 0 1-1.4 1.4h-3v-.9a1.9 1.9 0 0 0-3.8 0v.9h-3a1.4 1.4 0 0 1-1.4-1.4v-3h-.9a1.9 1.9 0 0 1 0-3.8h.9v-3A1.4 1.4 0 0 1 7.4 6.6h3v-.9a1.9 1.9 0 0 1 0-1.3Z"/></symbol>
 </defs></svg>
 
 <header class="bar">
@@ -557,6 +637,8 @@ dialog.full { margin: auto; width: 100%; }
       <div class="seg-thumb" id="segThumb"></div>
       <button data-view="files" class="on">文件</button>
       <button data-view="wifi">网络</button>
+      <button data-view="control">控制</button>
+      <button data-view="logs">日志</button>
       <button data-view="system">设备</button>
     </nav>
   </div>
@@ -575,6 +657,7 @@ dialog.full { margin: auto; width: 100%; }
         <input id="search" type="search" placeholder="搜索这个文件夹里的文件" autocomplete="off" spellcheck="false">
       </label>
       <button class="icon-btn" id="sortBtn" aria-label="排序"><svg class="ic sm"><use href="#i-sort"/></svg></button>
+      <button class="icon-btn" id="analyzeBtn" aria-label="分析占用"><svg class="ic sm"><use href="#i-disk"/></svg></button>
     </div>
     <div class="bar-actions">
       <button class="btn primary" id="upBtn"><svg class="ic sm"><use href="#i-upload"/></svg>上传文件</button>
@@ -584,6 +667,7 @@ dialog.full { margin: auto; width: 100%; }
     </div>
     <div class="card"><div class="list" id="list"></div></div>
     <div class="card storage" id="storage" hidden></div>
+    <div class="card storage" id="analysis" hidden></div>
   </section>
 
   <section id="view-wifi" hidden>
@@ -612,13 +696,79 @@ dialog.full { margin: auto; width: 100%; }
       <button class="btn danger" id="rebootBtn"><svg class="ic sm"><use href="#i-power"/></svg>重启设备</button>
     </div>
   </section>
+
+  <section id="view-control" hidden>
+    <div class="group">
+      <div class="group-title">屏幕</div>
+      <div class="card" id="screenCard"></div>
+    </div>
+    <div class="group">
+      <div class="group-title">远程操作</div>
+      <div class="card">
+        <div class="stage" id="stage">
+          <div class="stage-note" id="stageNote">点「截屏」看一眼现在的屏幕，之后可以在画面上点按或拖动，操作会和手指按在设备上一样。</div>
+        </div>
+        <div class="bar-actions" style="padding:12px 14px 14px;margin:0">
+          <button class="btn tinted" id="shotBtn"><svg class="ic sm"><use href="#i-refresh"/></svg>截屏</button>
+          <button class="btn" id="screenOffBtn"><svg class="ic sm"><use href="#i-power"/></svg>熄屏</button>
+          <button class="btn" id="beepBtn"><svg class="ic sm"><use href="#i-music"/></svg>响一声</button>
+        </div>
+      </div>
+      <div class="pv-note" style="padding:10px 4px 0;text-align:left">
+        遥控只在同一个网络里有效，设备屏幕上的操作会真的发生。
+      </div>
+    </div>
+    <div class="group">
+      <div class="group-title">时间</div>
+      <div class="card" id="rtcCard"></div>
+    </div>
+  </section>
+
+  <section id="view-logs" hidden>
+    <div class="group">
+      <div class="group-title">运行状态</div>
+      <div class="stats" id="diagStats"></div>
+      <div class="card" id="diagInfo" style="margin-top:12px"></div>
+    </div>
+    <div class="group">
+      <div class="group-title">网络探测</div>
+      <div class="card">
+        <div class="row" style="gap:8px">
+          <label class="field" style="flex:1">
+            <svg class="ic sm"><use href="#i-link"/></svg>
+            <input id="probeHost" placeholder="主机名或地址，例如 1.1.1.1" autocomplete="off" spellcheck="false">
+          </label>
+          <button class="btn sm tinted" id="probeBtn">探测</button>
+        </div>
+        <div id="probeOut"></div>
+      </div>
+    </div>
+    <div class="group">
+      <div class="group-title">日志</div>
+      <div class="card">
+        <div class="row" style="min-height:0;padding:10px 14px">
+          <svg class="ic sm" style="color:var(--label-2)"><use href="#i-terminal"/></svg>
+          <div class="row-main">
+            <div class="row-name" style="font-size:14.5px">实时跟随</div>
+            <div class="row-meta" id="logMeta">—</div>
+          </div>
+          <button class="icon-btn" id="logCopy" aria-label="复制日志"><svg class="ic sm"><use href="#i-copy"/></svg></button>
+          <span class="switch on" id="logSwitch" role="switch" aria-label="实时跟随"></span>
+        </div>
+        <pre class="log" id="logBox"></pre>
+      </div>
+    </div>
+    <div class="bar-actions">
+      <button class="btn" id="diagRefresh"><svg class="ic sm"><use href="#i-refresh"/></svg>刷新</button>
+      <button class="btn ghost" id="logClear">清空这一页</button>
+    </div>
+  </section>
 </main>
 
 <div class="selbar" id="selbar" hidden>
   <span class="selbar-count" id="selCount">已选择 0 项</span>
   <button class="btn sm" id="selAll">全选</button>
-  <button class="btn sm tinted" id="selDownload">下载</button>
-  <button class="btn sm danger" id="selDelete">删除</button>
+  <button class="icon-btn" id="selMore" aria-label="更多操作"><svg class="ic sm"><use href="#i-dots"/></svg></button>
   <button class="btn sm primary" id="selDone">完成</button>
 </div>
 
@@ -709,8 +859,29 @@ dialog.full { margin: auto; width: 100%; }
     <div class="pv-body" id="pvBody"></div>
     <div class="pv-foot">
       <button class="btn wide tinted" id="pvDownload"><svg class="ic sm"><use href="#i-download"/></svg>下载</button>
+      <button class="btn wide" id="pvEdit" hidden><svg class="ic sm"><use href="#i-edit-file"/></svg>编辑</button>
       <button class="btn wide" id="pvRename"><svg class="ic sm"><use href="#i-pencil"/></svg>重命名</button>
       <button class="btn wide danger" id="pvDelete"><svg class="ic sm"><use href="#i-trash"/></svg>删除</button>
+    </div>
+  </div>
+</dialog>
+
+<!-- The editor: the one place a page writes a file the person typed, as opposed to one they uploaded.
+     `POST /api/write` is the whole body, so this is a `<textarea>` and a save. -->
+<dialog id="dlgEditor" class="full">
+  <div class="pv">
+    <div class="pv-head">
+      <button class="icon-btn" id="edBack" aria-label="关闭"><svg class="ic sm"><use href="#i-back"/></svg></button>
+      <div class="pv-title"><b id="edName"></b><span id="edMeta">—</span></div>
+      <button class="icon-btn" id="edSave" aria-label="保存"><svg class="ic sm"><use href="#i-check"/></svg></button>
+    </div>
+    <div class="pv-body" style="display:block;background:var(--card)">
+      <textarea id="edText" class="code" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+    </div>
+    <div class="pv-foot">
+      <button class="btn wide tinted" id="edSaveBtn"><svg class="ic sm"><use href="#i-check"/></svg>保存</button>
+      <button class="btn wide" id="edWrap">自动换行</button>
+      <button class="btn wide" id="edClose">关闭</button>
     </div>
   </div>
 </dialog>
@@ -746,6 +917,13 @@ const ERRORS = {
   disconnect_failed: "断开失败",
   save_failed: "保存失败",
   restart_failed: "重启失败",
+  move_failed: "移动失败，多半是空间不够",
+  cross_volume: "文件夹不能跨储存移动，先复制再删掉原来的",
+  no_capture: "这台设备的屏幕读不回来",
+  capture_failed: "截屏失败，再试一次",
+  rtc_failed: "时间没写进时钟芯片",
+  audio_failed: "扬声器没有发出声音",
+  touch_failed: "这一下没能送到屏幕上",
   network: "连不上设备，看看是否还在同一个网络里"
 };
 const RESET_REASONS = {
@@ -780,7 +958,16 @@ const state = {
   booted: 0,             // Date.now() minus the uptime, so the clock in the hero keeps ticking
   transfers: [],
   job: 0,
-  conflict: { asked: false, choice: null, counter: 0 }
+  conflict: { asked: false, choice: null, counter: 0 },
+  screen: null,          // the last /api/display answer: on, brightness, idle_seconds, capture
+  rtc: null,
+  rtcAt: 0,              // when that answer arrived, so the clock can be walked forward locally
+  live: null,            // the newest status frame off the stream
+  diag: null,
+  probe: null,
+  logs: { lines: [], seq: 0, live: true, follow: true },
+  editor: null,          // { path, name, size, dirty }
+  analyzing: false
 };
 
 /* --- the small things ----------------------------------------------------- */
@@ -1014,6 +1201,8 @@ async function loadFiles(path) {
   if (path) state.path = path;
   state.loading = true;
   state.picked.clear();
+  /* A count of where you were is not a count of where you are. */
+  $("analysis").hidden = true;
   renderList();
   try {
     const info = await api("/api/files", { path: state.path });
@@ -1058,8 +1247,7 @@ function syncSelectionBar() {
   const bar = $("selbar");
   const on = state.picked.size > 0;
   $("selCount").textContent = on ? "已选择 " + state.picked.size + " 项" : "选择要处理的文件";
-  $("selDownload").disabled = !on;
-  $("selDelete").disabled = !on;
+  $("selMore").disabled = !on;
   $("selbar").hidden = !state.select;
   $("selectBtn").classList.toggle("primary", state.select);
 }
@@ -1160,21 +1348,26 @@ async function deleteOne(name, isDir) {
 /* The row's own menu, so that a long press is not the only way to find these. */
 function rowMenu(entry) {
   const index = state.shown.indexOf(entry);
+  const kind = entry.dir ? "dir" : kindOf(entry.name, false);
+  const editable = !entry.dir && (kind === "code" || kind === "text") && entry.size <= EDIT_MAX;
+
   actionSheet({
     title: entry.name,
     note: entry.dir ? "文件夹" : fmtSize(entry.size),
     items: [
       entry.dir ? { label: "打开", value: "open", icon: "i-folder" }
                  : { label: "预览", value: "preview", icon: "i-eye" },
+      editable ? { label: "编辑", value: "edit", icon: "i-edit-file", desc: "改完直接写回设备" } : null,
       { label: "下载", value: "download", icon: "i-download" },
       { label: "重命名", value: "rename", icon: "i-pencil" },
       { label: "删除", value: "delete", icon: "i-trash", danger: true }
-    ]
+    ].filter(Boolean)
   }).then((answer) => {
     if (state.shown[index] !== entry) return;   /* the list moved under us: the menu is about a memory */
     const value = answer && answer.value;
     if (value === "open") go(joinPath(state.path, entry.name));
     else if (value === "preview") preview(entry);
+    else if (value === "edit") openEditor(joinPath(state.path, entry.name), entry.name, entry.size);
     else if (value === "download") download(entry.name);
     else if (value === "rename") renameOne(entry.name);
     else if (value === "delete") deleteOne(entry.name, entry.dir);
@@ -1384,6 +1577,38 @@ function showVoid(message) {
     '<div class="pv-note" style="margin-top:10px">下载后可以在本机打开它</div></div>';
 }
 
+/* The one kind that plays is wrapped in a small card rather than left as a bare element: the name,
+   what it is, and how long it runs — none of which the native control shows. The control itself is
+   still the browser's; this is a frame around it, not a player written here. Seeking works because
+   `/api/download` answers `Range` requests (see `handle_download`), so the element can ask for the
+   part it wants instead of holding the whole file. */
+function showAudio(name, url) {
+  const body = $("pvBody");
+  const format = (extensionOf(name) || "audio").toUpperCase();
+
+  body.className = "pv-body";
+  body.innerHTML = '<div class="player">' +
+    '<div class="player-art"><svg class="ic"><use href="#i-music"/></svg></div>' +
+    '<div class="player-name">' + esc(name) + "</div>" +
+    '<div class="player-meta">' + esc(format) + "</div>" +
+    '<audio controls playsinline preload="metadata" src="' + esc(url) + '"></audio>' +
+    "</div>";
+
+  const player = body.querySelector("audio");
+  const meta = body.querySelector(".player-meta");
+
+  /* The length is only known once the header has been read, and an MP3 with no encoder frame has
+     none to report — so the line is filled in when it can be, and left as the format when it cannot. */
+  player.onloadedmetadata = () => {
+    const parts = [format];
+    if (isFinite(player.duration) && player.duration > 0) parts.push(logClock(player.duration));
+    parts.push("可拖动进度");
+    meta.textContent = parts.join(" · ");
+  };
+
+  player.onerror = () => showVoid("这段音频播不了：也许是浏览器不支持它的编码，或者文件没传完");
+}
+
 function showText(bytes, truncated) {
   const body = $("pvBody");
   const text = bytes && bytes.length ? decode(bytes) : { text: "", binary: false };
@@ -1403,6 +1628,8 @@ async function preview(entry) {
   $("pvName").textContent = entry.name;
   $("pvMeta").textContent = fmtSize(entry.size) + " · " + KIND_LABEL[kind];
   $("pvZoom").hidden = kind !== "image";
+  /* Text is the one kind that can go back: everything else is read here and only read. */
+  $("pvEdit").hidden = (kind !== "code" && kind !== "text") || entry.size > EDIT_MAX;
 
   const body = $("pvBody");
   body.className = "pv-body";
@@ -1421,7 +1648,7 @@ async function preview(entry) {
     body.innerHTML = '<video controls playsinline preload="metadata" src="' + esc(url) + '"></video>';
     body.querySelector("video").onerror = () => showVoid("这段视频播不了，可能是编码不受支持");
   } else if (kind === "audio") {
-    body.innerHTML = '<audio controls preload="metadata" src="' + esc(url) + '"></audio>';
+    showAudio(entry.name, url);
   } else if (kind === "pdf") {
     body.innerHTML = '<iframe src="' + esc(url) + '" title="PDF"></iframe>';
   } else if (kind === "text" || kind === "code") {
@@ -1899,7 +2126,10 @@ function renderSystem() {
     '<div class="kv"><span class="k">运行时长</span><span class="v" data-uptime>—</span></div>',
     kvRow("复位原因", RESET_REASONS[sys.reset] || sys.reset || "—"),
     kvRow("空闲内存", fmtSize(sys.heap_free) + "（历史最低 " + fmtSize(sys.heap_min) + "）"),
-    sys.psram_free ? kvRow("PSRAM 空闲", fmtSize(sys.psram_free)) : ""
+    sys.psram_free ? kvRow("PSRAM 空闲", fmtSize(sys.psram_free)) : "",
+    typeof sys.chip_temp_c === "number" ? kvRow("芯片温度", sys.chip_temp_c + " °C") : "",
+    sys.display ? kvRow("屏幕", (sys.display.on ? "亮着" : "已熄灭") + " · 背光 " +
+      Math.round((sys.display.brightness / 255) * 100) + "%") : ""
   ].join("");
 
   const percent = battery.percent == null ? -1 : battery.percent;
@@ -1972,10 +2202,12 @@ async function copyText(text) {
   }
 }
 
-/* --- the three views ------------------------------------------------------ */
+/* --- the five views -------------------------------------------------------- */
 function setView(view) {
   state.view = view;
-  for (const name of ["files", "wifi", "system"]) $("view-" + name).hidden = name !== view;
+  for (const name of ["files", "wifi", "control", "logs", "system"]) {
+    $("view-" + name).hidden = name !== view;
+  }
 
   const buttons = Array.from($("seg").querySelectorAll("button"));
   for (const button of buttons) button.classList.toggle("on", button.dataset.view === view);
@@ -1988,6 +2220,12 @@ function setView(view) {
   try { localStorage.setItem("hivebox.view", view); } catch (error) { /* private mode */ }
   if (view === "wifi") { renderWifi(); refreshWifi(true); }
   if (view === "system") renderSystem();
+
+  /* The stream is opened when the log is being looked at and closed when it is not: a connection to
+     the box is one of four, and one left open behind another tab is one a person cannot use. */
+  if (view === "control") { renderScreen(); loadScreen(true); renderRtc(); loadRtc(true); }
+  if (view === "logs") { renderDiag(); loadDiag(true); readTail(); openStream(); }
+  else closeStream();
 }
 
 function paintTheme(theme) {
@@ -2122,6 +2360,661 @@ async function reboot() {
   } catch (error) { toast(error.message, "bad"); }
 }
 
+/* ---------------------------------------------------------------------------
+   The screen. Two things on this page touch the panel: the backlight with its idle sleep, and the
+   picture itself. Both go in through one route, and both read back before they answer — a switch
+   shows what the box did, not what the page asked for.
+   --------------------------------------------------------------------------- */
+const IDLE_CHOICES = [
+  { label: "不自动熄屏", value: 0, desc: "一直亮着" },
+  { label: "1 分钟", value: 1 },
+  { label: "2 分钟", value: 2 },
+  { label: "5 分钟", value: 5 },
+  { label: "10 分钟", value: 10 },
+  { label: "30 分钟", value: 30 }
+];
+
+function idleLabel(seconds) {
+  const minutes = Math.round((seconds || 0) / 60);
+  const found = IDLE_CHOICES.find((choice) => choice.value === minutes);
+  return found ? found.label : minutes + " 分钟";
+}
+
+function renderScreen() {
+  const box = $("screenCard");
+  const screen = state.screen;
+  if (!screen) { box.innerHTML = skeletonHtml(); return; }
+
+  box.innerHTML =
+    "<div class=\"row\">" +
+      "<span class=\"tile t-image\"><svg class=\"ic\"><use href=\"#i-sun\"/></svg></span>" +
+      "<div class=\"row-main\"><div class=\"row-name\">点亮屏幕</div>" +
+      "<div class=\"row-meta\">" + (screen.on ? "现在亮着" : "现在黑着") +
+      (screen.capture ? "" : " · 这台设备读不回屏幕") + "</div></div>" +
+      "<span class=\"switch " + (screen.on ? "on" : "") + "\" id=\"scrPower\" role=\"switch\" aria-label=\"点亮屏幕\"></span>" +
+    "</div>" +
+    "<div class=\"row\" style=\"min-height:56px\">" +
+      "<svg class=\"ic sm\" style=\"color:var(--label-2)\"><use href=\"#i-sun\"/></svg>" +
+      "<div class=\"slider\">" +
+        "<input type=\"range\" id=\"scrBright\" min=\"8\" max=\"255\" step=\"1\" value=\"" + screen.brightness + "\">" +
+        "<span class=\"slider-val\" id=\"scrBrightVal\">" + Math.round((screen.brightness / 255) * 100) + "%</span>" +
+      "</div>" +
+    "</div>" +
+    "<div class=\"row tap\" id=\"scrIdle\">" +
+      "<svg class=\"ic sm\" style=\"color:var(--label-2)\"><use href=\"#i-moon\"/></svg>" +
+      "<div class=\"row-main\"><div class=\"row-name\" style=\"font-size:14.5px\">闲置熄屏</div>" +
+      "<div class=\"row-meta\">没人碰它，也不访问网页的时候</div></div>" +
+      "<span class=\"row-val\">" + esc(idleLabel(screen.idle_seconds)) + "</span>" +
+      "<svg class=\"ic sm chev\"><use href=\"#i-chev\"/></svg>" +
+    "</div>";
+}
+
+async function loadScreen(quiet) {
+  try {
+    state.screen = await api("/api/display");
+  } catch (error) {
+    if (!quiet) toast(error.message, "bad");
+    return;
+  }
+  if (state.view === "control") renderScreen();
+}
+
+async function setScreen(params, note) {
+  try {
+    state.screen = await api("/api/display", params, "POST");
+  } catch (error) {
+    toast(error.message, "bad");
+    loadScreen(true);
+    return;
+  }
+  if (state.view === "control") renderScreen();
+  if (note) toast(note, "good");
+}
+
+function askIdle() {
+  const current = Math.round((state.screen.idle_seconds || 0) / 60);
+  actionSheet({
+    title: "闲置多久后熄屏",
+    note: "只在没人碰屏幕、也没人访问网页时计时",
+    items: IDLE_CHOICES.map((choice) => ({
+      label: choice.label,
+      value: choice.value,
+      icon: "i-moon",
+      desc: choice.value === current ? "当前" : (choice.desc || "")
+    }))
+  }).then((answer) => {
+    if (answer) setScreen({ idle: answer.value * 60 }, answer.value ? "" : "屏幕会一直亮着");
+  });
+}
+
+/* One picture, asked for whenever someone asks. There is no way to read the panel back, so this is
+   the shadow the driver kept on the way past — which is precisely what is on the glass. */
+function captureScreen() {
+  const stage = $("stage");
+  if (state.screen && state.screen.capture === false) {
+    stage.innerHTML = "<div class=\"stage-note\">" + esc(ERRORS.no_capture) + "</div>";
+    return;
+  }
+
+  const picture = new Image();
+  picture.alt = "设备屏幕";
+  stage.innerHTML = "<div class=\"stage-note\">正在取回屏幕…</div>";
+  picture.onload = () => {
+    stage.innerHTML = "";
+    stage.appendChild(picture);
+    wireStage(picture);
+  };
+  picture.onerror = () => {
+    stage.innerHTML = "<div class=\"stage-note\">" + esc(ERRORS.capture_failed) + "</div>";
+  };
+  picture.src = "/api/screenshot?t=" + Date.now();
+}
+
+function flashStage() {
+  const flash = document.createElement("span");
+  flash.className = "stage-flash";
+  $("stage").appendChild(flash);
+  setTimeout(() => flash.remove(), 500);
+}
+
+function sendTouch(type, x, y) {
+  /* Deliberately not awaited: a drag is a stream of these, and a page that waited for each one would
+     be a page that lagged behind the finger. A failure deserves saying once, not once per move. */
+  api("/api/remote", { type: type, x: x, y: y }, "POST").catch((error) => {
+    if (sendTouch.complained) return;
+    sendTouch.complained = true;
+    toast(error.message, "bad");
+    setTimeout(() => { sendTouch.complained = false; }, 4000);
+  });
+}
+
+function wireStage(picture) {
+  const mapped = (event) => {
+    const rect = picture.getBoundingClientRect();
+    const width = picture.naturalWidth || 480, height = picture.naturalHeight || 480;
+    const scale = Math.min(rect.width / width, rect.height / height) || 1;
+    const left = rect.left + (rect.width - width * scale) / 2;
+    const top = rect.top + (rect.height - height * scale) / 2;
+    return {
+      x: Math.max(0, Math.min(width - 1, Math.round((event.clientX - left) / scale))),
+      y: Math.max(0, Math.min(height - 1, Math.round((event.clientY - top) / scale)))
+    };
+  };
+
+  let down = null;
+
+  picture.onpointerdown = (event) => {
+    event.preventDefault();
+    try { picture.setPointerCapture(event.pointerId); } catch (error) { /* still works without */ }
+    const at = mapped(event);
+    down = { x: at.x, y: at.y, moved: false };
+    sendTouch("down", at.x, at.y);
+  };
+
+  picture.onpointermove = (event) => {
+    if (!down) return;
+    const at = mapped(event);
+    if (!down.moved && Math.abs(at.x - down.x) < 4 && Math.abs(at.y - down.y) < 4) return;
+    down.moved = true;
+    sendTouch("move", at.x, at.y);
+  };
+
+  const release = (event) => {
+    if (!down) return;
+    const at = mapped(event);
+    sendTouch("up", at.x, at.y);
+    down = null;
+    flashStage();
+  };
+
+  picture.onpointerup = release;
+  picture.onpointercancel = () => { down = null; };
+}
+
+async function beep() {
+  try {
+    await api("/api/audio", { freq: 880, ms: 400 }, "POST");
+  } catch (error) {
+    toast(error.message, "bad");
+  }
+}
+
+/* --- the clock ------------------------------------------------------------- */
+function localStamp(epoch) {
+  if (!epoch) return "—";
+  return new Date(epoch * 1000).toLocaleString("zh-CN", { hour12: false });
+}
+
+function renderRtc() {
+  const box = $("rtcCard");
+  const rtc = state.rtc;
+  if (!rtc) { box.innerHTML = skeletonHtml(); return; }
+
+  const started = Math.floor(Date.now() / 1000) - Math.round(rtc.uptime || 0);
+  const drift = Math.round(Date.now() / 1000 - rtc.epoch);
+  /* Before the first sync the box counts up from its own reset, so "the time" is the uptime and the
+     honest thing to print is that nobody has set it yet. */
+  const known = rtc.valid === true;
+  const driftWords = !known ? "还没对过表 · 上电 " + fmtUptime(rtc.uptime)
+    : Math.abs(drift) < 3 ? "和本页一致"
+    : drift > 0 ? "比本页慢 " + fmtUptime(drift) : "比本页快 " + fmtUptime(-drift);
+
+  box.innerHTML =
+    "<div class=\"row\">" +
+      "<span class=\"tile t-code\"><svg class=\"ic\"><use href=\"#i-clock\"/></svg></span>" +
+      "<div class=\"row-main\"><div class=\"row-name\" data-rtc-now>" +
+        esc(known ? localStamp(rtc.epoch) : "未设置") + "</div>" +
+      "<div class=\"row-meta\">设备时间 · " + esc(driftWords) + "</div></div></div>" +
+    kvRow("时钟芯片", rtc.rtc ? localStamp(rtc.rtc.epoch) : "这一版没有装") +
+    (rtc.rtc && rtc.rtc.iso ? kvRow("芯片 UTC", rtc.rtc.iso, true) : "") +
+    kvRow("本页时间", localStamp(Math.floor(Date.now() / 1000))) +
+    (known ? "" : kvRow("对表之后", "这台设备就能在没有网络时也知道几点了")) +
+    "<div class=\"bar-actions\" style=\"padding:12px 14px 14px;margin:0\">" +
+      "<button class=\"btn tinted\" id=\"rtcSync\"><svg class=\"ic sm\"><use href=\"#i-clock\"/></svg>用本页时间校准</button>" +
+      "<button class=\"btn\" id=\"rtcReload\"><svg class=\"ic sm\"><use href=\"#i-refresh\"/></svg>刷新</button>" +
+    "</div>";
+}
+
+async function loadRtc(quiet) {
+  try {
+    state.rtc = await api("/api/rtc");
+    state.rtcAt = Date.now();
+  } catch (error) {
+    if (!quiet) toast(error.message, "bad");
+    return;
+  }
+  if (state.view === "control") renderRtc();
+}
+
+function tickRtc() {
+  if (!state.rtc || state.rtc.valid !== true || state.view !== "control") return;
+  const node = document.querySelector("[data-rtc-now]");
+  if (!node) return;
+  /* Walked forward in the page: asking every second would be a request a second for a number that
+     only changes when the box is told to change it. */
+  node.textContent = localStamp(state.rtc.epoch + Math.round((Date.now() - state.rtcAt) / 1000));
+}
+
+async function syncClock() {
+  let mine = Math.floor(Date.now() / 1000);
+  try {
+    const answer = await api("/api/rtc", { epoch: mine }, "POST");
+    toast("已把设备时间设为 " + localStamp(answer.epoch), "good");
+  } catch (error) {
+    toast(error.message, "bad");
+  }
+  loadRtc(true);
+}
+
+/* --- what the box is doing, and what it says about it ---------------------- */
+const PROBE_RESULTS = {
+  ok: "通了", dns_failed: "这个名字没解析出地址", timeout: "没人应答",
+  refused: "对方把门关上了", error: "没能连出去"
+};
+
+function statTile(key, value, note) {
+  return '<div class="stat"><div class="stat-k">' + esc(key) + "</div>" +
+    '<div class="stat-v">' + esc(value) + "</div>" +
+    '<div class="stat-n">' + esc(note) + "</div></div>";
+}
+
+function renderDiag() {
+  const diag = state.diag;
+  if (!diag) {
+    $("diagStats").innerHTML = '<div class="stat"><div class="sk"><b class="l1"></b></div></div>' +
+      '<div class="stat"><div class="sk"><b class="l1"></b></div></div>' +
+      '<div class="stat"><div class="sk"><b class="l1"></b></div></div>' +
+      '<div class="stat"><div class="sk"><b class="l1"></b></div></div>';
+    $("diagInfo").innerHTML = "";
+    return;
+  }
+
+  $("diagStats").innerHTML =
+    statTile("芯片温度", diag.chip_temp_c == null ? "—" : diag.chip_temp_c + " °C",
+             diag.chip_temp_c == null ? "这颗模组没有温度计" : "模组自己的读数") +
+    statTile("空闲内存", fmtSize(diag.heap_free), "至今最低 " + fmtSize(diag.heap_min)) +
+    statTile("PSRAM 空闲", fmtSize(diag.psram_free), "画笔和缓冲都在这儿") +
+    statTile("运行时长", fmtUptime(diag.uptime), RESET_REASONS[diag.reset] || diag.reset || "启动方式未知");
+
+  const wifi = diag.wifi || {};
+  $("diagInfo").innerHTML =
+    kvRow("网络状态", WIFI_STATE[wifi.state] || wifi.state || "未连接") +
+    (wifi.ip ? kvRow("设备地址", wifi.ip, true) : "") +
+    (wifi.gateway ? kvRow("网关", wifi.gateway, true) : "") +
+    (typeof wifi.rssi === "number" ? kvRow("信号强度", wifi.rssi + " dBm") : "") +
+    (diag.dns ? kvRow("DNS", diag.dns, true) : "");
+}
+
+async function loadDiag(quiet) {
+  try {
+    state.diag = await api("/api/diag");
+  } catch (error) {
+    if (!quiet) toast(error.message, "bad");
+    return;
+  }
+  renderDiag();
+}
+
+function renderProbe() {
+  const box = $("probeOut");
+  const probe = state.probe;
+  if (!probe) { box.innerHTML = ""; return; }
+
+  const words = PROBE_RESULTS[probe.result] || probe.result;
+  const detail = probe.result === "ok"
+    ? [probe.ip, probe.ms + " ms"].filter(Boolean).join(" · ")
+    : "主机 " + (probe.host || "");
+
+  box.innerHTML = '<div class="kv"><span class="k">' + esc(words) + '</span>' +
+    '<span class="v" style="font-family:var(--mono);font-size:12.5px">' + esc(detail) + "</span></div>";
+}
+
+async function runProbe() {
+  const host = $("probeHost").value.trim();
+  if (!host) { $("probeHost").focus(); return; }
+
+  const button = $("probeBtn");
+  button.disabled = true;
+  $("probeOut").innerHTML = '<div class="kv"><span class="k">正在探测 ' + esc(host) + "…</span></div>";
+  try {
+    state.diag = await api("/api/diag", { host: host, port: 80 });
+    state.probe = state.diag.probe || { host: host, result: "error" };
+  } catch (error) {
+    state.probe = null;
+    $("probeOut").innerHTML = '<div class="kv"><span class="k">' + esc(error.message) + "</span></div>";
+  } finally {
+    button.disabled = false;
+  }
+  if (state.probe) renderProbe();
+  renderDiag();
+}
+
+/* --- the log ---------------------------------------------------------------
+   The box keeps the last lines in a ring of its own (see `board_log.c`) and hands them out from a
+   `seq` — so the page never asks twice for the same line, whether it is reading the tail once or
+   following the stream. Everything else about this view is book-keeping on top of that one number.
+   --------------------------------------------------------------------------- */
+let logTimer = 0;
+let stream = null;
+let streamRetry = 0;
+
+function logClock(at) {
+  if (typeof at === "number") {
+    const seconds = Math.max(0, Math.floor(at));
+    return [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60]
+      .map((part) => String(part).padStart(2, "0")).join(":");
+  }
+  return String(at == null ? "" : at);
+}
+
+function logLevel(text) {
+  const found = /^([EWIDV])\s*\(/.exec(text || "");
+  return found ? found[1] : "I";
+}
+
+function pushLog(line) {
+  if (!line || typeof line.seq !== "number" || line.seq <= state.logs.seq) return;
+  state.logs.seq = line.seq;
+  state.logs.lines.push(line);
+  if (state.logs.lines.length > 500) {
+    state.logs.lines.splice(0, state.logs.lines.length - 500);
+  }
+  scheduleLog();
+}
+
+function scheduleLog() {
+  if (logTimer) return;
+  logTimer = setTimeout(() => { logTimer = 0; renderLog(); }, 150);
+}
+
+function renderLog() {
+  const box = $("logBox");
+  box.innerHTML = state.logs.lines.map((line) =>
+    '<span class="log-line lv-' + logLevel(line.text) + '"><i class="at">' +
+    esc(logClock(line.at)) + "</i> " + esc(line.text) + "</span>").join("\n");
+  if (state.logs.follow) box.scrollTop = box.scrollHeight;
+  updateLogMeta();
+}
+
+function updateLogMeta() {
+  const live = state.live;
+  const bits = [state.logs.lines.length + " 行"];
+  if (live) {
+    bits.push("已运行 " + fmtUptime(live.uptime));
+    if (typeof live.chip_temp_c === "number") bits.push(live.chip_temp_c + " °C");
+    if (live.wifi) bits.push(live.wifi.rssi + " dBm");
+  }
+  bits.push(stream ? "正在跟随" : (state.logs.follow ? "等待重连" : "已暂停"));
+  $("logMeta").textContent = bits.join(" · ");
+}
+
+async function readTail() {
+  try {
+    const answer = await api("/api/logs", { since: state.logs.seq, limit: 200 });
+    (answer.lines || []).forEach(pushLog);
+    if (typeof answer.since === "number" && !state.logs.lines.length) {
+      /* Nothing new to show: remember where the box is, so the stream starts at the end rather than
+         replaying a ring's worth of history. */
+      state.logs.seq = answer.since;
+    }
+  } catch (error) {
+    toast(error.message, "bad");
+  }
+  renderLog();
+}
+
+function openStream() {
+  if (stream || state.view !== "logs") return;
+  if (!window.EventSource) { readTail(); return; }
+
+  stream = new EventSource("/api/events?since=" + state.logs.seq);
+
+  stream.addEventListener("log", (event) => {
+    let line;
+    try { line = JSON.parse(event.data); } catch (error) { return; }
+    pushLog(line);
+  });
+
+  stream.addEventListener("status", (event) => {
+    let live;
+    try { live = JSON.parse(event.data); } catch (error) { return; }
+    state.live = live;
+    if (typeof live.since === "number" && live.since > state.logs.seq) state.logs.seq = live.since;
+    updateLogMeta();
+  });
+
+  stream.onopen = () => { streamRetry = 0; };
+
+  /* The box ends this on purpose after thirty seconds. EventSource's own reconnect would come back to
+     the URL it was given — the one carrying the `seq` from when the view opened — and be handed
+     everything since, so the connection is driven by hand: reopened from where we actually got to. */
+  stream.onerror = () => {
+    closeStream();
+    if (state.view !== "logs") return;
+    streamRetry = Math.min(streamRetry + 1, 6);
+    setTimeout(() => { openStream(); }, 400 * streamRetry);
+  };
+
+  updateLogMeta();
+}
+
+function closeStream() {
+  if (stream) { stream.close(); stream = null; }
+}
+
+/* ---------------------------------------------------------------------------
+   The editor. One file, typed into, saved in place — `POST /api/write` takes the whole body, so the
+   only real work here is refusing to open what could not be saved whole: a file the read had to cut
+   short would be a file the save would cut short too, and that is a way to lose somebody's work.
+   --------------------------------------------------------------------------- */
+const EDIT_MAX = 200 * KB;
+
+async function openEditor(path, name, size) {
+  if (size > EDIT_MAX) {
+    toast("文件有 " + fmtSize(size) + "，编辑器放不下", "bad");
+    return;
+  }
+
+  $("edName").textContent = name;
+  $("edMeta").textContent = "正在读取…";
+  $("edText").value = "";
+
+  const dialog = $("dlgEditor");
+  dialog.returnValue = "";
+  if (!dialog.open) dialog.showModal();
+
+  let head;
+  try {
+    head = await readFirst("/api/download?" + new URLSearchParams({ path: path, inline: "1" }).toString(),
+                           EDIT_MAX);
+  } catch (error) {
+    $("edMeta").textContent = error.message;
+    toast(error.message, "bad");
+    return;
+  }
+
+  const text = decode(head.bytes);
+  if (text.binary) {
+    $("edMeta").textContent = "不是文本";
+    toast("这个文件不是文本，写在这里只会是一堆乱码", "bad");
+    return;
+  }
+
+  state.editor = { path: path, name: name, size: head.bytes.length, dirty: false };
+  $("edText").value = text.text;
+  $("edMeta").textContent = fmtSize(head.bytes.length) + " · 未改动";
+  $("edText").focus();
+}
+
+function closeEditor() {
+  /* Which asks if there is anything to lose — see the dialog's own `close` handler, which owns the
+     question because the backdrop and the Esc key end here too. */
+  $("dlgEditor").close();
+}
+
+async function saveEditor() {
+  const editor = state.editor;
+  if (!editor) return;
+
+  const button = $("edSaveBtn");
+  button.disabled = true;
+  $("edMeta").textContent = "正在保存…";
+
+  let response;
+  try {
+    response = await fetch("/api/write?" + new URLSearchParams({ path: editor.path }).toString(), {
+      method: "POST",
+      body: $("edText").value,
+      cache: "no-store"
+    });
+  } catch (error) {
+    button.disabled = false;
+    $("edMeta").textContent = ERRORS.network;
+    toast(ERRORS.network, "bad");
+    return;
+  }
+
+  let answer = {};
+  try { answer = await response.json(); } catch (error) { /* an empty or failed body */ }
+  button.disabled = false;
+
+  if (!response.ok || answer.error) {
+    const words = ERRORS[answer.error] || ("保存失败（" + response.status + "）");
+    $("edMeta").textContent = words;
+    toast(words, "bad");
+    return;
+  }
+
+  editor.dirty = false;
+  editor.size = answer.size || $("edText").value.length;
+  $("edMeta").textContent = fmtSize(editor.size) + " · 已保存";
+  toast("已保存 " + editor.name, "good");
+  loadFiles();
+}
+
+/* --- moving, packing, counting --------------------------------------------- */
+function pickedEntries() {
+  return state.shown.filter((entry) => state.picked.has(entry.name));
+}
+
+async function movePicked() {
+  const picked = pickedEntries();
+  if (!picked.length) return;
+
+  const from = state.path;
+  const answer = await askText({
+    title: "移动到",
+    note: picked.length + " 项，从 " + baseName(from),
+    value: from,
+    placeholder: "目标文件夹的完整路径，例如 /sdcard/music",
+    ok: "移动"
+  });
+  if (answer === null || answer === undefined) return;
+
+  const to = String(answer).trim().replace(/\/+$/, "") || "/";
+  if (to === from) { toast("目标就是这里"); return; }
+
+  let moved = 0, failed = 0, reason = "";
+  for (const entry of picked) {
+    try {
+      await api("/api/move", { from: joinPath(from, entry.name), to: to }, "POST");
+      moved++;
+    } catch (error) {
+      failed++;
+      if (!reason) reason = error.message;
+    }
+  }
+
+  if (failed) toast("移动了 " + moved + " 项，" + failed + " 项没动：" + reason, "bad");
+  else toast("已把 " + moved + " 项移到 " + to, "good");
+
+  exitSelect();
+  loadFiles();
+}
+
+async function archivePicked() {
+  const picked = pickedEntries();
+  if (!picked.length) return;
+
+  const stem = picked.length === 1 ? picked[0].name.replace(/\.[^.]+$/, "") : (baseName(state.path) || "pomelo");
+  const name = (stem || "pomelo") + ".zip";
+
+  toast("正在打包 " + picked.length + " 项…");
+  let response;
+  try {
+    response = await fetch("/api/archive?" + new URLSearchParams({ name: name }).toString(), {
+      method: "POST",
+      body: picked.map((entry) => joinPath(state.path, entry.name)).join("\n"),
+      cache: "no-store"
+    });
+  } catch (error) {
+    toast(ERRORS.network, "bad");
+    return;
+  }
+
+  if (!response.ok) {
+    let answer = {};
+    try { answer = await response.json(); } catch (error) { /* not a refusal object */ }
+    toast(ERRORS[answer.error] || ("打包失败（" + response.status + "）"), "bad");
+    return;
+  }
+
+  /* The box streams the archive and this holds it — the one place a download is not handed straight
+     to the browser, because the name of the file is decided here and not by the URL. */
+  const blob = await response.blob();
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 20000);
+
+  toast("已打包 " + fmtSize(blob.size), "good");
+  exitSelect();
+}
+
+async function analyzeHere() {
+  if (state.analyzing) return;
+  state.analyzing = true;
+
+  const box = $("analysis");
+  box.hidden = false;
+  box.innerHTML = '<div class="storage-head"><span>正在统计 ' + esc(baseName(state.path)) +
+    '</span><span>…</span></div><div class="meter lg"><i style="width:100%"></i></div>';
+
+  try {
+    renderAnalysis(await api("/api/analysis", { path: state.path }));
+  } catch (error) {
+    box.innerHTML = '<div class="storage-head"><span>' + esc(error.message) + "</span></div>";
+  } finally {
+    state.analyzing = false;
+  }
+}
+
+function renderAnalysis(info) {
+  const box = $("analysis");
+  box.hidden = false;
+
+  const parts = info.largest || [];
+  const rows = parts.length
+    ? parts.map((part) => {
+        const shown = part.path.indexOf(info.path + "/") === 0 ? part.path.slice(info.path.length + 1) : part.path;
+        return '<div class="kv"><span class="k" style="word-break:break-all">' + esc(shown) +
+          '</span><span class="v">' + fmtSize(part.size) + "</span></div>";
+      }).join("")
+    : '<div class="row-meta">这里一个文件都没有</div>';
+
+  box.innerHTML =
+    '<div class="storage-head"><span>占用统计 · ' + esc(baseName(info.path)) + "</span>" +
+      "<span>" + esc(info.files + " 个文件 · " + info.directories + " 个文件夹") + "</span></div>" +
+    '<div class="row-meta" style="margin-bottom:10px">一共 ' + fmtSize(info.bytes) +
+      (info.truncated ? "（太多了，只走了一部分）" : "") + "，下面是最大的几样</div>" +
+    rows +
+    '<div class="bar-actions" style="padding-top:12px;margin:0">' +
+      '<button class="btn sm ghost" id="anaClose">收起</button></div>';
+}
+
 /* --- everything that listens ---------------------------------------------- */
 $("list").onclick = (event) => {
   const more = event.target.closest("[data-more]");
@@ -2163,8 +3056,27 @@ $("selAll").onclick = () => {
   syncSelectionBar();
 };
 $("selDone").onclick = exitSelect;
-$("selDelete").onclick = deletePicked;
-$("selDownload").onclick = downloadPicked;
+$("selMore").onclick = () => {
+  const picked = pickedEntries();
+  if (!picked.length) { toast("还没有选中任何东西"); return; }
+
+  actionSheet({
+    title: "已选择 " + picked.length + " 项",
+    items: [
+      { label: "下载", value: "download", icon: "i-download" },
+      { label: "打包成 zip", value: "archive", icon: "i-archive",
+        desc: picked.length === 1 ? "把这一项打包" : "把这 " + picked.length + " 项装进一个压缩包" },
+      { label: "移动到…", value: "move", icon: "i-folder", desc: "按路径搬到别处，包括别的储存" },
+      { label: "删除", value: "delete", icon: "i-trash", danger: true, desc: "删掉就找不回来了" }
+    ]
+  }).then((answer) => {
+    if (!answer) return;
+    if (answer.value === "download") downloadPicked();
+    else if (answer.value === "archive") archivePicked();
+    else if (answer.value === "move") movePicked();
+    else if (answer.value === "delete") deletePicked();
+  });
+};
 
 $("upBtn").onclick = () => $("fileInput").click();
 $("upDirBtn").onclick = () => $("dirInput").click();
@@ -2231,6 +3143,105 @@ $("sysInfo").onclick = (event) => {
 $("sysRefresh").onclick = () => refreshSystem(false);
 $("rebootBtn").onclick = reboot;
 
+$("analyzeBtn").onclick = () => {
+  if (!$("analysis").hidden) { $("analysis").hidden = true; return; }
+  analyzeHere();
+};
+$("analysis").onclick = (event) => {
+  if (event.target.closest("#anaClose")) $("analysis").hidden = true;
+};
+
+/* --- the screen, the clock, the stream ------------------------------------- */
+$("shotBtn").onclick = captureScreen;
+$("beepBtn").onclick = beep;
+$("screenOffBtn").onclick = () => setScreen({ on: false }, "屏幕已熄灭");
+
+/* Read once when the view is opened, then only when asked: a range that is being dragged must not be
+   written back under the finger, so the slider is the one thing here that reports only on `change`. */
+$("view-control").addEventListener("change", (event) => {
+  if (event.target.id === "scrBright") {
+    setScreen({ brightness: Number(event.target.value) });
+  }
+});
+$("view-control").addEventListener("input", (event) => {
+  if (event.target.id === "scrBright") {
+    $("scrBrightVal").textContent = Math.round((Number(event.target.value) / 255) * 100) + "%";
+  }
+});
+$("view-control").addEventListener("click", (event) => {
+  const on = (id) => event.target.closest && event.target.closest("#" + id);
+  if (on("rtcSync")) syncClock();
+  else if (on("rtcReload")) loadRtc();
+  else if (!state.screen) return;
+  else if (on("scrPower")) setScreen({ on: !state.screen.on });
+  else if (on("scrIdle")) askIdle();
+});
+
+$("probeBtn").onclick = runProbe;
+$("probeHost").onkeydown = (event) => { if (event.key === "Enter") runProbe(); };
+$("diagRefresh").onclick = () => { loadDiag(); readTail(); };
+
+$("logSwitch").onclick = () => {
+  state.logs.follow = !state.logs.follow;
+  $("logSwitch").classList.toggle("on", state.logs.follow);
+  if (state.logs.follow) {
+    const box = $("logBox");
+    box.scrollTop = box.scrollHeight;
+  }
+  updateLogMeta();
+};
+
+/* Scrolling back through the log is a request to be left where you are. */
+$("logBox").onscroll = () => {
+  const box = $("logBox");
+  const atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
+  if (atEnd === state.logs.follow) return;
+  state.logs.follow = atEnd;
+  $("logSwitch").classList.toggle("on", atEnd);
+  updateLogMeta();
+};
+
+$("logCopy").onclick = () => {
+  const text = state.logs.lines.map((line) => logClock(line.at) + " " + line.text).join("\n");
+  copyText(text);
+};
+
+$("logClear").onclick = () => {
+  /* This page's copy, not the box's: the ring on the box keeps filling, and the next line to arrive
+     still has a sequence number greater than the last one cleared. */
+  state.logs.lines = [];
+  renderLog();
+};
+
+/* --- the editor ------------------------------------------------------------ */
+$("edSave").onclick = saveEditor;
+$("edSaveBtn").onclick = saveEditor;
+$("edClose").onclick = closeEditor;
+$("edBack").onclick = closeEditor;
+$("edWrap").onclick = () => $("edText").classList.toggle("wrap");
+$("edText").oninput = () => {
+  if (!state.editor || state.editor.dirty) return;
+  state.editor.dirty = true;
+  $("edMeta").textContent = fmtSize(state.editor.size) + " · 改动还没保存";
+};
+
+/* The dirty check belongs on the dialog closing and not on the button, because the backdrop, the Esc
+   key and the button all end the same way. */
+$("dlgEditor").addEventListener("close", () => {
+  const editor = state.editor;
+  if (!editor || !editor.dirty) { state.editor = null; return; }
+  if (confirm("「" + editor.name + "」还有没保存的改动，关掉就没了。")) { state.editor = null; return; }
+  setTimeout(() => $("dlgEditor").showModal(), 0);
+});
+
+$("pvEdit").onclick = () => {
+  if (!previewTarget) return;
+  const target = previewTarget;
+  const entry = state.shown.find((item) => item.name === target.name);
+  closePreview();
+  openEditor(target.path, target.name, entry ? entry.size : 0);
+};
+
 $("themeBtn").onclick = () => {
   const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
   paintTheme(next);
@@ -2266,6 +3277,14 @@ function tick() {
   if (document.hidden) return;
   if (state.view === "wifi") refreshWifi(true);
   else if (state.view === "system") refreshSystem(true);
+  else if (state.view === "control" && document.activeElement !== $("scrBright")) {
+    /* The screen sleeps on its own, so the switch is refreshed rather than trusted. Not while the
+       brightness slider has the finger, though: that would move it out from under one. */
+    loadScreen(true);
+  } else if (state.view === "logs") {
+    loadDiag(true);
+    if (!window.EventSource) readTail();
+  }
   if (!state.wifi || Date.now() - (state.wifiAt || 0) > 30000) refreshWifi(true);
 }
 
@@ -2275,7 +3294,7 @@ function start() {
 
   let view = "files";
   try { view = localStorage.getItem("hivebox.view") || "files"; } catch (error) { /* private mode */ }
-  if (["files", "wifi", "system"].indexOf(view) < 0) view = "files";
+  if (["files", "wifi", "control", "logs", "system"].indexOf(view) < 0) view = "files";
   setView(view);
 
   refreshSystem(true);
@@ -2284,6 +3303,14 @@ function start() {
 
   setInterval(tick, 5000);
   setInterval(tickUptime, 1000);
+  setInterval(tickRtc, 1000);
+
+  /* Behind a certificate — or on localhost — this page installs as an app and works from the cache
+     for the shell it already has. Over plain http on a LAN the browser simply never asks for either
+     file, and nothing here runs. */
+  if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost")) {
+    navigator.serviceWorker.register("/sw.js").catch(() => { /* not fatal, and not worth saying */ });
+  }
 }
 
 start();

@@ -13,7 +13,10 @@ int lstat(const char *path, struct stat *st)
 
 esp_err_t board_hal_init(void)
 {
-    // 0. Initialize unified hardware event queue
+    // 0. Install the log ring before anything else says anything, so the boot sequence is in it
+    hal_log_init();
+
+    // 0.5. Initialize unified hardware event queue
     hal_event_init();
 
     // 1. Initialize PMIC power management first to ensure power hold and display rail

@@ -44,6 +44,9 @@ static volatile uint32_t s_te_count = 0;
 static bool s_te_active = false;
 static int64_t s_last_frame_start_us = 0;
 static bool s_display_active = false;
+/* Panel brightness, 0-255. Remembered so that waking the display does not silently slam it back to
+ * full, and so a page can read back what it set. */
+static uint8_t s_brightness = 255;
 
 #if BSP_LCD_TE_ENABLED
 static IRAM_ATTR void s_te_gpio_isr_handler(void *arg)
@@ -103,6 +106,19 @@ void hal_display_wait_vsync(void)
 #define CHUNK_STRIP_WIDTH_DEFAULT 64
 static int s_chunk_strip_width = CHUNK_STRIP_WIDTH_DEFAULT;
 static uint16_t *s_dma_chunk[2] = {NULL, NULL};
+
+/* The shadow frame: the same pixels the panel last received, kept so a page can be shown what the
+ * screen is showing.
+ *
+ * The panel is written once and never read back — the CO5300 has no path that returns its GRAM over
+ * QSPI — so the only way to have a picture of the screen is to keep one on the way past. Every draw
+ * the Rust side makes carries the whole frame buffer and the rectangle of it that changed
+ * (`flush_damage` in `platform.rs`), so copying that rectangle out of the frame here reproduces the
+ * screen exactly, for the cost of one `memcpy` per flush and half a megabyte of PSRAM.
+ *
+ * `NULL` when the allocation failed, which is the one state `hal_display_capture` reports. */
+static uint16_t *s_shadow = NULL;
+static SemaphoreHandle_t s_shadow_lock = NULL;
 
 // =============================================================================
 // CO5300 AMOLED Panel Initialization Command Sequence
@@ -281,6 +297,27 @@ esp_err_t board_display_init(void)
         xSemaphoreTake(s_trans_done_sem, portMAX_DELAY);
     }
 
+    // The shadow frame the screenshot is taken from (see the note by `s_shadow`). PSRAM only: it is
+    // half a megabyte, it is only read when somebody asks for a picture, and the internal heap is
+    // where the DMA strips and the Rust UI live. A board that cannot spare it simply has no
+    // screenshot, which is what a `NULL` here means.
+    if (s_shadow == NULL) {
+        s_shadow = (uint16_t *)heap_caps_malloc(
+            (size_t)BOARD_DISPLAY_WIDTH * BOARD_DISPLAY_HEIGHT * sizeof(uint16_t),
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (s_shadow != NULL) {
+            memset(s_shadow, 0, (size_t)BOARD_DISPLAY_WIDTH * BOARD_DISPLAY_HEIGHT * sizeof(uint16_t));
+            ESP_LOGI(TAG, "Shadow frame allocated in PSRAM (%u bytes).",
+                     (unsigned)((size_t)BOARD_DISPLAY_WIDTH * BOARD_DISPLAY_HEIGHT * sizeof(uint16_t)));
+        } else {
+            ESP_LOGW(TAG, "No PSRAM for the shadow frame; /api/screenshot will answer no_capture.");
+        }
+    }
+
+    if (s_shadow_lock == NULL) {
+        s_shadow_lock = xSemaphoreCreateMutex();
+    }
+
 /*
 #if HAS_SPLASH_LOGO
     // Draw centered "Pomelo UI" splash logo
@@ -345,6 +382,15 @@ void hal_display_draw_bitmap(int32_t x1, int32_t y1, int32_t x2, int32_t y2, con
         return;
     }
 
+    // Fold this rectangle into the shadow frame before it goes out. Done first, and on the calling
+    // thread, so the picture is current even while the DMA underneath is still catching up.
+    if (s_shadow != NULL) {
+        for (int32_t row = 0; row < height; row++) {
+            memcpy(s_shadow + (size_t)(y1 + row) * BOARD_DISPLAY_WIDTH + x1,
+                   pixels + (size_t)(y1 + row) * stride + x1, (size_t)width * sizeof(uint16_t));
+        }
+    }
+
     // Only auto-synchronize if no frame pacing timestamp was recorded at all
     if (s_last_frame_start_us == 0) {
         hal_display_wait_vsync();
@@ -390,12 +436,8 @@ void hal_display_draw_bitmap(int32_t x1, int32_t y1, int32_t x2, int32_t y2, con
     // Turn on display and full brightness seamlessly once the first valid frame is written
     if (!s_display_active) {
         esp_lcd_panel_disp_on_off(s_panel_handle, true);
-        uint32_t lcd_cmd = 0x51;
-        lcd_cmd &= 0xff;
-        lcd_cmd <<= 8;
-        lcd_cmd |= 0x02 << 24;
-        uint8_t param = 255;
-        esp_lcd_panel_io_tx_param(s_io_handle, lcd_cmd, &param, 1);
+        uint32_t lcd_cmd = ((uint32_t)0x51 << 8) | ((uint32_t)0x02 << 24);
+        esp_lcd_panel_io_tx_param(s_io_handle, lcd_cmd, &s_brightness, 1);
         s_display_active = true;
         ESP_LOGI(TAG, "AMOLED display output enabled on first frame.");
     }
@@ -408,5 +450,53 @@ void hal_display_set_power(bool on)
         esp_lcd_panel_disp_on_off(s_panel_handle, on);
         s_display_active = on;
     }
+}
+
+esp_err_t hal_display_set_brightness(uint8_t level)
+{
+    if (!s_panel_handle || !s_io_handle) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_brightness = level;
+    // 0x51 is the CO5300's brightness register. The command word carries the `0x02` QSPI opcode in
+    // its top byte, exactly as the power-on path above sends it.
+    uint32_t lcd_cmd = ((uint32_t)0x51 << 8) | ((uint32_t)0x02 << 24);
+    return esp_lcd_panel_io_tx_param(s_io_handle, lcd_cmd, &s_brightness, 1);
+}
+
+uint8_t hal_display_get_brightness(void)
+{
+    return s_brightness;
+}
+
+bool hal_display_is_powered(void)
+{
+    return s_display_active;
+}
+
+bool hal_display_has_capture(void)
+{
+    return s_shadow != NULL;
+}
+
+esp_err_t hal_display_capture(uint16_t *out, size_t pixels)
+{
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_shadow == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (pixels < (size_t)BOARD_DISPLAY_WIDTH * BOARD_DISPLAY_HEIGHT) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if (s_shadow_lock != NULL) {
+        xSemaphoreTake(s_shadow_lock, portMAX_DELAY);
+    }
+    memcpy(out, s_shadow, (size_t)BOARD_DISPLAY_WIDTH * BOARD_DISPLAY_HEIGHT * sizeof(uint16_t));
+    if (s_shadow_lock != NULL) {
+        xSemaphoreGive(s_shadow_lock);
+    }
+    return ESP_OK;
 }
 

@@ -196,3 +196,43 @@ esp_err_t hal_rtc_init(void)
 
     return ESP_OK;
 }
+
+esp_err_t hal_rtc_get_epoch(time_t *out_epoch)
+{
+    if (out_epoch == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_rtc_initialized || s_rtc_lock == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (xSemaphoreTake(s_rtc_lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    pcf85063a_datetime_t dt;
+    esp_err_t ret = pcf85063a_get_time_date(&s_pcf_dev, &dt);
+    xSemaphoreGive(s_rtc_lock);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    // An unset chip reads back as something before 2024, which is the same "not a real time"
+    // test the boot path uses.
+    if (dt.year < 2024 || dt.month < 1 || dt.month > 12 || dt.day < 1 || dt.day > 31) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    int days = days_from_civil(dt.year, dt.month, dt.day);
+    *out_epoch = (time_t)days * 86400 + dt.hour * 3600 + dt.min * 60 + dt.sec;
+    return ESP_OK;
+}
+
+esp_err_t hal_rtc_set_epoch(time_t epoch)
+{
+    if (epoch < 1704067200) { // 2024-01-01, below which the chip and the wrappers both refuse
+        return ESP_ERR_INVALID_ARG;
+    }
+    // Through the POSIX call rather than straight at the chip: the `__wrap_settimeofday` this file
+    // installs is what keeps the system clock and the chip in step, and it is the only place that
+    // knows about both. A direct chip write here would drift the two apart until the next reboot.
+    struct timeval tv = {.tv_sec = epoch, .tv_usec = 0};
+    return settimeofday(&tv, NULL) == 0 ? ESP_OK : ESP_FAIL;
+}

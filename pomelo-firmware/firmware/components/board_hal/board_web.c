@@ -39,12 +39,15 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "esp_app_desc.h"
@@ -52,8 +55,14 @@
 #include "esp_heap_caps.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_netif.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "lwip/inet.h"
+#include "lwip/netdb.h"
+#include "lwip/sockets.h"
 
 #include "board_hal.h"
 
@@ -91,6 +100,35 @@ static uint16_t       s_port   = WEB_PORT_DEFAULT;
 /* The handlers run on the server's own tasks and the app starts and stops it from another, so the
  * handle is read and written under a lock rather than assumed to be one or the other. */
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
+
+/* What the panel is showing, named by the Rust launcher through hal_web_set_app_name(). The server
+ * cannot look this up: the foreground is iced's decision, one of the two things C does not own. */
+static char s_app_name[64] = "pomelo";
+
+void hal_web_set_app_name(const char *name)
+{
+    if (name == NULL || name[0] == '\0') {
+        return;
+    }
+
+    /* Copied under the same lock the handler-side readers use: a name arriving mid-answer would
+     * otherwise be half of one name and half of another. */
+    portENTER_CRITICAL(&s_lock);
+    snprintf(s_app_name, sizeof s_app_name, "%s", name);
+    portEXIT_CRITICAL(&s_lock);
+}
+
+static void app_name_copy(char *out, size_t cap)
+{
+    portENTER_CRITICAL(&s_lock);
+    snprintf(out, cap, "%s", s_app_name);
+    portEXIT_CRITICAL(&s_lock);
+}
+
+/* When this server last answered anything, for the idle sleep below. Written from every handler
+ * through the two functions that end every answer — send_json and handle_page — which is every
+ * request this server has. */
+static volatile int64_t s_last_request_us = 0;
 
 bool hal_web_is_running(void)
 {
@@ -145,6 +183,22 @@ static void buf_free(web_buf_t *buf)
     free(buf->data);
     buf->data = NULL;
     buf->len = buf->cap = 0;
+}
+
+/* Back to empty, keeping the allocation. For the one caller that builds many small answers in a row
+ * — the event stream, which frames a line, sends it, and frames the next — where re-allocating each
+ * time would be a heap churn with nothing to show for it.
+ *
+ * `full` is cleared with the length: it means "this answer hit the ceiling", and an answer that has
+ * been emptied has not. */
+static void buf_reset(web_buf_t *buf)
+{
+    buf->len  = 0;
+    buf->full = false;
+
+    if (buf->data != NULL) {
+        buf->data[0] = '\0';
+    }
 }
 
 static bool buf_reserve(web_buf_t *buf, size_t extra)
@@ -429,6 +483,7 @@ static void make_dirs(const char *path)
 
 static esp_err_t send_json(httpd_req_t *req, const char *json)
 {
+    s_last_request_us = esp_timer_get_time();
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
 
@@ -470,6 +525,7 @@ static esp_err_t handle_page(httpd_req_t *req)
 {
     size_t len = (size_t)(web_page_html_end - web_page_html_start);
 
+    s_last_request_us = esp_timer_get_time();
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
 
@@ -528,12 +584,33 @@ static esp_err_t handle_system(httpd_req_t *req)
 
     buf_printf(&buf, ",\"cores\":%d,\"chip\":\"esp32s3\"", chip.cores);
 
+    buf_puts(&buf, ",\"running\":");
+    {
+        char running[64];
+        app_name_copy(running, sizeof running);
+        buf_json(&buf, running);
+    }
+
     buf_printf(&buf, ",\"uptime\":%lld", esp_timer_get_time() / 1000000);
     buf_printf(&buf, ",\"heap_free\":%u", (unsigned)esp_get_free_heap_size());
     buf_printf(&buf, ",\"heap_min\":%u", (unsigned)esp_get_minimum_free_heap_size());
     buf_printf(&buf, ",\"psram_free\":%u",
                (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     buf_printf(&buf, ",\"reset\":\"%s\"", reset_reason_name(esp_reset_reason()));
+
+    /* The die's own thermometer, in tenths of a degree from the PMIC (see the HAL note). Reported as
+     * a decimal here so that a page does not have to know the unit. */
+    int32_t temperature_dc = 0;
+    if (hal_power_get_chip_temperature_dc(&temperature_dc) == ESP_OK) {
+        buf_printf(&buf, ",\"chip_temp_c\":%.1f", (double)temperature_dc / 10.0);
+    } else {
+        buf_puts(&buf, ",\"chip_temp_c\":null");
+    }
+
+    buf_printf(&buf, ",\"display\":{\"on\":%s,\"brightness\":%u,\"capture\":%s}",
+               hal_display_is_powered() ? "true" : "false",
+               (unsigned)hal_display_get_brightness(),
+               hal_display_has_capture() ? "true" : "false");
 
     buf_printf(&buf, ",\"battery\":{\"percent\":%d,\"charging\":%s,\"voltage_mv\":%d}",
                (int)hal_power_get_battery_percent(),
@@ -781,6 +858,85 @@ static const char *mime_for(const char *path)
     return "application/octet-stream";
 }
 
+/* A byte range out of a `Range:` header, and whether this server should act on one.
+ *
+ * The three answers are the three things a caller can do: no range (or one this server will not
+ * act on, in which case the whole file is the answer, because a header it cannot read is no reason
+ * to refuse a request it can serve), a range to honour, or a range that starts past the end of the
+ * file — which is the one case that is its own HTTP status.
+ *
+ * `bytes=first-last`, `bytes=first-` and `bytes=-suffix` are the three forms a browser sends; a
+ * multi-range request (`a-b,c-d`) is deliberately not read, because the answer to it is a multipart
+ * body and no media element on the page asks for one.
+ */
+static int range_parse(const char *header, long long total, long long *start, long long *end)
+{
+    if (header == NULL || strncasecmp(header, "bytes=", 6) != 0) {
+        return 0;
+    }
+
+    const char *spec = header + 6;
+    long long   first;
+    long long   last;
+    char       *after;
+
+    if (spec[0] == '-') {
+        /* `bytes=-N`: the last N bytes, which is how a player asks for a file's tail. */
+        long long suffix = strtoll(spec + 1, &after, 10);
+        if (after == spec + 1 || suffix <= 0) {
+            return 0;
+        }
+
+        first = total - suffix;
+        if (first < 0) {
+            first = 0;
+        }
+        last = total - 1;
+    } else {
+        first = strtoll(spec, &after, 10);
+        if (after == spec || *after != '-') {
+            return 0;
+        }
+
+        const char *tail = after + 1;
+        if (*tail == '\0' || *tail == ',') {
+            last = total - 1; /* `bytes=N-`: from N to the end. */
+        } else if (*tail >= '0' && *tail <= '9') {
+            last = strtoll(tail, NULL, 10);
+        } else {
+            return 0;
+        }
+    }
+
+    if (total <= 0 || first >= total) {
+        return -1;
+    }
+
+    if (last >= total) {
+        last = total - 1;
+    }
+
+    if (last < first) {
+        return 0;
+    }
+
+    *start = first;
+    *end   = last;
+    return 1;
+}
+
+/* A file out of the card, whole or in the part the caller asked for.
+ *
+ * The part matters because this is also how the page plays music: an `<audio>` element asks with
+ * `Range: bytes=...` when it wants to seek, and a server that ignores the header answers with the
+ * file from the beginning every time, which is a track that cannot be scrubbed. So the header is
+ * read, the status becomes `206 Partial Content`, and the body is the slice it named.
+ *
+ * The body is still sent chunked — a card-sized file does not fit in the RAM this box has, and
+ * esp_httpd both adds `Transfer-Encoding: chunked` and refuses to let a caller set `Content-Length`
+ * beside it. `Content-Range` is what carries the range in that arrangement, and it is the header a
+ * media element reads.
+ */
 static esp_err_t handle_download(httpd_req_t *req)
 {
     char path[WEB_PATH_MAX];
@@ -805,6 +961,10 @@ static esp_err_t handle_download(httpd_req_t *req)
 
     const char *type = mime_for(clean);
     httpd_resp_set_type(req, type);
+
+    /* Sent on the whole file too, and it has to be: a player asks for the file first and only then
+     * learns there is anything to seek with. */
+    httpd_resp_set_hdr(req, "Accept-Ranges", "bytes");
 
     /* A picture or a text file opens in the tab; anything else is saved. `inline=1` is the page
      * saying "show me this one" — the preview a file manager needs and the browser cannot guess. */
@@ -832,10 +992,56 @@ static esp_err_t handle_download(httpd_req_t *req)
         httpd_resp_set_hdr(req, "Content-Disposition", disposition);
     }
 
-    char  chunk[WEB_CHUNK];
-    size_t read;
+    /* Read before the body starts: esp_httpd purges the request headers on the first send, so this
+     * is the only moment the `Range` header can be looked at. */
+    long long total       = (long long)info.st_size;
+    long long start       = 0;
+    long long wanted      = total;
 
-    while ((read = fread(chunk, 1, sizeof chunk, file)) > 0) {
+    char range_header[64];
+    if (total > 0 && httpd_req_get_hdr_value_str(req, "Range", range_header, sizeof range_header) == ESP_OK) {
+        long long first = 0;
+        long long last  = 0;
+        int       parsed = range_parse(range_header, total, &first, &last);
+
+        if (parsed < 0) {
+            fclose(file);
+
+            char unsatisfiable[48];
+            snprintf(unsatisfiable, sizeof unsatisfiable, "bytes */%lld", total);
+            httpd_resp_set_hdr(req, "Content-Range", unsatisfiable);
+
+            return send_error(req, "416 Range Not Satisfiable", "bad_range", range_header);
+        }
+
+        if (parsed > 0) {
+            start  = first;
+            wanted = last - first + 1;
+
+            char content_range[64];
+            snprintf(content_range, sizeof content_range, "bytes %lld-%lld/%lld", first, last, total);
+            httpd_resp_set_hdr(req, "Content-Range", content_range);
+            httpd_resp_set_status(req, "206 Partial Content");
+
+            if (fseek(file, (long)start, SEEK_SET) != 0) {
+                fclose(file);
+                return send_error(req, "500 Internal Server Error", "seek_failed", strerror(errno));
+            }
+        }
+    }
+
+    char   chunk[WEB_CHUNK];
+    size_t remaining = (size_t)wanted;
+
+    while (remaining > 0) {
+        size_t want = remaining < sizeof chunk ? remaining : sizeof chunk;
+        size_t read = fread(chunk, 1, want, file);
+        if (read == 0) {
+            /* The file is shorter than its own `stat` said — a card pulled mid-read, a write that
+             * never finished. Stop rather than pad the answer with nothing. */
+            break;
+        }
+
         if (httpd_resp_send_chunk(req, chunk, (ssize_t)read) != ESP_OK) {
             /* The client went away — a tap on another tab, a phone that locked. Nothing is wrong, and
              * the file is closed either way. */
@@ -843,6 +1049,8 @@ static esp_err_t handle_download(httpd_req_t *req)
             fclose(file);
             return ESP_OK;
         }
+
+        remaining -= read;
     }
 
     fclose(file);
@@ -890,6 +1098,19 @@ static esp_err_t handle_upload(httpd_req_t *req)
 
     bool overwrite = query_string(req, "overwrite", flag, sizeof flag) && strcmp(flag, "1") == 0;
 
+    /* How much of this file the box already has. A page that lost the network halfway through a large
+     * upload comes back with `offset=<bytes already stored>` and sends only the rest, which on a card
+     * and a phone is the difference between a retry and a restart. No `offset`, or a zero, is a fresh
+     * upload and the partial file — if one is there from last time — is started over. */
+    long long offset = 0;
+    char      offset_text[20];
+    if (query_string(req, "offset", offset_text, sizeof offset_text)) {
+        offset = strtoll(offset_text, NULL, 10);
+    }
+    if (offset < 0) {
+        offset = 0;
+    }
+
     char clean[WEB_PATH_MAX];
     if (!path_clean(directory, clean, sizeof clean)) {
         return send_blocked(req, "path is not under a mounted volume");
@@ -920,7 +1141,26 @@ static esp_err_t handle_upload(httpd_req_t *req)
         }
     }
 
-    FILE *file = fopen(part, "wb");
+    FILE *file = NULL;
+
+    if (offset > 0) {
+        /* A resume is only a resume if the partial file is still there and is exactly as long as the
+         * caller believes. Appending to a partial of a different length is how a file comes out with
+         * a seam in it that nothing downstream can see. */
+        struct stat partial;
+        if (stat(part, &partial) != 0) {
+            return send_error(req, "409 Conflict", "cannot_resume", "the partial upload is gone");
+        }
+        if ((long long)partial.st_size != offset) {
+            return send_error(req, "409 Conflict", "cannot_resume",
+                              "the partial upload is not the length the caller has");
+        }
+
+        file = fopen(part, "ab");
+    } else {
+        file = fopen(part, "wb");
+    }
+
     if (file == NULL) {
         return send_error(req, "500 Internal Server Error", "write_failed", strerror(errno));
     }
@@ -959,12 +1199,15 @@ static esp_err_t handle_upload(httpd_req_t *req)
     fclose(file);
 
     if ((int)received != req->content_len) {
-        /* A short write is a file with a hole in it, and a file with a hole in it is worse than no
-         * file: it is taken for one. It goes, and the answer says why. What it is not is the file that
-         * was already at this name — that one is still whole and is still there. */
-        remove(part);
+        /* The bytes that did arrive stay in `<name>.part` rather than being thrown away: they are the
+         * resume point, and the answer says how far they got. A `.part` is never mistaken for the
+         * file — the name it would have had is a different name — so the only thing keeping it costs
+         * is the room it takes, which is exactly the room an upload already needed. */
+        char detail[96];
+        snprintf(detail, sizeof detail, "cut short at %lld bytes; resume with offset",
+                 offset + (long long)received);
 
-        return send_error(req, "408 Request Timeout", "upload_incomplete", "the body was cut short");
+        return send_error(req, "408 Request Timeout", "upload_incomplete", detail);
     }
 
     /* All of it is on the flash, so what is left is to put it where it was asked for. The old copy
@@ -986,7 +1229,8 @@ static esp_err_t handle_upload(httpd_req_t *req)
 
     buf_puts(&buf, "{\"ok\":true,\"path\":");
     buf_json(&buf, full);
-    buf_printf(&buf, ",\"bytes\":%u}", (unsigned)received);
+    buf_printf(&buf, ",\"bytes\":%lld,\"resumed_from\":%lld}",
+               offset + (long long)received, offset);
 
     if (buf.full) {
         buf_free(&buf);
@@ -1466,6 +1710,26 @@ static esp_err_t handle_restart(httpd_req_t *req)
  * The server itself
  * ------------------------------------------------------------------------- */
 
+/* Defined below the table they are named in, and earlier than it would read well for them to be:
+ * the section after this one is the routes that need the most explaining, and that explanation is
+ * worth more next to the code than next to the list of names. */
+static esp_err_t handle_logs(httpd_req_t *req);
+static esp_err_t handle_events(httpd_req_t *req);
+static esp_err_t handle_diag(httpd_req_t *req);
+static esp_err_t handle_write(httpd_req_t *req);
+static esp_err_t handle_move(httpd_req_t *req);
+static esp_err_t handle_archive(httpd_req_t *req);
+static esp_err_t handle_analysis(httpd_req_t *req);
+static esp_err_t handle_display(httpd_req_t *req);
+static esp_err_t handle_screenshot(httpd_req_t *req);
+static esp_err_t handle_remote(httpd_req_t *req);
+static esp_err_t handle_audio(httpd_req_t *req);
+static esp_err_t handle_rtc(httpd_req_t *req);
+static esp_err_t handle_rtc_set(httpd_req_t *req);
+static esp_err_t handle_manifest(httpd_req_t *req);
+static esp_err_t handle_service_worker(httpd_req_t *req);
+static esp_err_t handle_icon(httpd_req_t *req);
+
 typedef struct {
     const char   *uri;
     httpd_method_t method;
@@ -1493,6 +1757,22 @@ static const web_route_t s_routes[] = {
     { "/api/wifi/disconnect", HTTP_POST, handle_wifi_disconnect },
     { "/api/wifi/forget",     HTTP_POST, handle_wifi_forget },
     { "/api/restart",         HTTP_POST, handle_restart },
+    { "/api/logs",            HTTP_GET,  handle_logs },
+    { "/api/events",          HTTP_GET,  handle_events },
+    { "/api/diag",            HTTP_GET,  handle_diag },
+    { "/api/write",           HTTP_POST, handle_write },
+    { "/api/move",            HTTP_POST, handle_move },
+    { "/api/archive",         HTTP_POST, handle_archive },
+    { "/api/analysis",        HTTP_GET,  handle_analysis },
+    { "/api/display",         HTTP_GET | HTTP_POST, handle_display },
+    { "/api/screenshot",      HTTP_GET,  handle_screenshot },
+    { "/api/remote",          HTTP_POST, handle_remote },
+    { "/api/audio",           HTTP_POST, handle_audio },
+    { "/api/rtc",             HTTP_GET,  handle_rtc },
+    { "/api/rtc",             HTTP_POST, handle_rtc_set },
+    { "/manifest.webmanifest", HTTP_GET, handle_manifest },
+    { "/sw.js",               HTTP_GET,  handle_service_worker },
+    { "/icon.svg",            HTTP_GET,  handle_icon },
 };
 
 esp_err_t hal_web_start(uint16_t port)
@@ -1579,4 +1859,1763 @@ esp_err_t hal_web_stop(void)
     ESP_LOGI(TAG, "the management page is down");
 
     return ESP_OK;
+}
+
+/* ---------------------------------------------------------------------------
+ * The log ring, live
+ *
+ * The console has the lines and nobody is sitting next to it. These two routes are the sofa's end of
+ * it: one hands back what has been written since a number, and one keeps a connection open and
+ * pushes the same lines as they arrive.
+ * ------------------------------------------------------------------------- */
+
+/* How many lines one answer carries. The ring holds HAL_LOG_LINES; a page that is up to date asks
+ * for a handful and gets a handful. */
+#define WEB_LOG_LINES 100
+
+static esp_err_t handle_logs(httpd_req_t *req)
+{
+    char     raw[16];
+    uint32_t since = 0;
+    size_t   limit = 40;
+
+    if (query_string(req, "since", raw, sizeof raw)) {
+        since = (uint32_t)strtoul(raw, NULL, 10);
+    }
+    if (query_string(req, "limit", raw, sizeof raw)) {
+        long asked = strtol(raw, NULL, 10);
+        if (asked > 0) {
+            limit = (size_t)asked;
+        }
+    }
+    if (limit > WEB_LOG_LINES) {
+        limit = WEB_LOG_LINES;
+    }
+
+    hal_log_entry_t *lines = heap_caps_malloc(sizeof(hal_log_entry_t) * HAL_LOG_LINES,
+                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (lines == NULL) {
+        lines = malloc(sizeof(hal_log_entry_t) * HAL_LOG_LINES);
+    }
+    if (lines == NULL) {
+        return send_busy(req);
+    }
+
+    size_t count = hal_log_read(lines, HAL_LOG_LINES, &since);
+
+    /* The newest `limit`, because a page that opens a log view wants the end of it. `hal_log_read`
+     * hands lines over oldest-first, which is the order they read in. */
+    size_t first = count > limit ? count - limit : 0;
+
+    web_buf_t buf;
+    buf_init(&buf, 4096);
+
+    buf_printf(&buf, "{\"since\":%u,\"count\":%u,\"lines\":[", (unsigned)since,
+               (unsigned)(count - first));
+
+    for (size_t i = first; i < count; i++) {
+        int seconds = (int)(lines[i].uptime_us / 1000000);
+
+        if (i > first) {
+            buf_puts(&buf, ",");
+        }
+
+        buf_printf(&buf, "{\"seq\":%u,\"at\":\"%02d:%02d:%02d\",\"text\":", (unsigned)lines[i].seq,
+                   seconds / 3600, (seconds / 60) % 60, seconds % 60);
+        buf_json(&buf, lines[i].text);
+        buf_puts(&buf, "}");
+    }
+
+    buf_puts(&buf, "]}");
+
+    free(lines);
+
+    if (buf.full) {
+        buf_free(&buf);
+        return send_busy(req);
+    }
+
+    esp_err_t ret = send_json(req, buf.data);
+    buf_free(&buf);
+
+    return ret;
+}
+
+/* One `event:` frame, framed the way the SSE spec wants it and flushed by httpd's chunked send. The
+ * buffer is sized for what is ever in it — a status object and one log line, escaped — and not for
+ * the largest answer this component can build, because it lives on the handler's stack. */
+#define WEB_EVENT_FRAME_MAX 1024
+
+static bool event_send(httpd_req_t *req, const char *name, const char *json)
+{
+    char frame[WEB_EVENT_FRAME_MAX];
+
+    int written = snprintf(frame, sizeof frame, "event: %s\ndata: %s\n\n", name, json);
+    if (written <= 0 || (size_t)written >= sizeof frame) {
+        return false;
+    }
+
+    return httpd_resp_send_chunk(req, frame, written) == ESP_OK;
+}
+
+/* The live status, small: what changes while a page is open and nothing else. The whole picture is
+ * `/api/system`, which is asked for when the page is drawn. */
+static void live_status_json(web_buf_t *buf)
+{
+    hal_wifi_status_t wifi;
+    bool              have_wifi = hal_wifi_get_status(&wifi) == ESP_OK;
+    int32_t           temperature_dc = 0;
+
+    buf_puts(buf, "{");
+
+    buf_printf(buf, "\"uptime\":%lld", esp_timer_get_time() / 1000000);
+    buf_printf(buf, ",\"heap_free\":%u", (unsigned)esp_get_free_heap_size());
+    buf_printf(buf, ",\"battery\":%d", (int)hal_power_get_battery_percent());
+
+    if (hal_power_get_chip_temperature_dc(&temperature_dc) == ESP_OK) {
+        buf_printf(buf, ",\"chip_temp_c\":%.1f", (double)temperature_dc / 10.0);
+    } else {
+        buf_puts(buf, ",\"chip_temp_c\":null");
+    }
+
+    buf_printf(buf, ",\"wifi\":{\"state\":\"%s\",\"rssi\":%d}",
+               have_wifi ? wifi_state_name(wifi.state) : "disconnected",
+               have_wifi ? (int)wifi.rssi : 0);
+
+    buf_puts(buf, "}");
+}
+
+/* A connection held open and fed. Bounded on purpose: a stream that runs as long as the tab is open
+ * is a socket the box never gets back, and there are four of them. Thirty seconds is long enough
+ * that a page looks live and short enough that a tab left open overnight costs one reconnect a
+ * minute. The page remembers the last `seq` it saw and asks for the rest, so the gap is not a hole.
+ */
+#define WEB_EVENT_SECONDS 30
+
+static esp_err_t handle_events(httpd_req_t *req)
+{
+    char     raw[16];
+    uint32_t since = 0;
+
+    if (query_string(req, "since", raw, sizeof raw)) {
+        since = (uint32_t)strtoul(raw, NULL, 10);
+    }
+
+    httpd_resp_set_type(req, "text/event-stream; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    /* Asked of any proxy in between: this is one answer that arrives in pieces. */
+    httpd_resp_set_hdr(req, "X-Accel-Buffering", "no");
+
+    /* A comment first, so the browser fires `onopen` and a buffering proxy lets go of what it is
+     * holding before the first real event. */
+    if (httpd_resp_send_chunk(req, ": pomelo\n\n", 10) != ESP_OK) {
+        return ESP_OK;
+    }
+
+    hal_log_entry_t *lines = heap_caps_malloc(sizeof(hal_log_entry_t) * HAL_LOG_LINES,
+                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (lines == NULL) {
+        lines = malloc(sizeof(hal_log_entry_t) * HAL_LOG_LINES);
+    }
+
+    const int64_t deadline = esp_timer_get_time() + (int64_t)WEB_EVENT_SECONDS * 1000000;
+    bool          ok = true;
+
+    while (ok && esp_timer_get_time() < deadline) {
+        web_buf_t buf;
+        buf_init(&buf, 1024);
+
+        if (lines != NULL) {
+            size_t count = hal_log_read(lines, HAL_LOG_LINES, &since);
+
+            for (size_t i = 0; ok && i < count; i++) {
+                buf_reset(&buf);
+                buf_printf(&buf, "{\"seq\":%u,\"at\":\"%lld\",\"text\":", (unsigned)lines[i].seq,
+                           lines[i].uptime_us / 1000000);
+                buf_json(&buf, lines[i].text);
+                buf_puts(&buf, "}");
+
+                ok = !buf.full && event_send(req, "log", buf.data);
+            }
+        }
+
+        buf_reset(&buf);
+        live_status_json(&buf);
+        buf_printf(&buf, ",\"since\":%u}", (unsigned)since);
+
+        ok = ok && !buf.full && event_send(req, "status", buf.data);
+        buf_free(&buf);
+
+        /* The only thing keeping this task from starving the idle task, and the reason the push
+         * rate is a choice rather than a spin. */
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+    free(lines);
+    httpd_resp_send_chunk(req, NULL, 0);
+
+    return ESP_OK;
+}
+
+/* ---------------------------------------------------------------------------
+ * Diagnostics: the chip's own numbers, and what the network does
+ * ------------------------------------------------------------------------- */
+
+/* A TCP connect and the time it took. Not an ICMP echo: raw sockets are a capability this box has no
+ * other use for, and "can I open a connection to the thing I actually talk to" is the question a
+ * person is asking when they ask whether the network works. */
+static int net_probe(const char *host, int port, int timeout_ms, char *ip_out, size_t ip_cap, int *rtt_ms)
+{
+    char port_text[8];
+    snprintf(port_text, sizeof port_text, "%d", port);
+
+    struct addrinfo  hints = {0};
+    struct addrinfo *found = NULL;
+
+    hints.ai_family   = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+
+    if (getaddrinfo(host, port_text, &hints, &found) != 0 || found == NULL) {
+        return -1; /* the name did not resolve */
+    }
+
+    struct sockaddr_in target;
+    memcpy(&target, found->ai_addr, sizeof target);
+
+    if (ip_out != NULL && ip_cap > 0) {
+        inet_ntoa_r(target.sin_addr, ip_out, (int)ip_cap);
+    }
+
+    freeaddrinfo(found);
+
+    int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (fd < 0) {
+        return -2;
+    }
+
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) {
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    }
+
+    int64_t started = esp_timer_get_time();
+
+    if (connect(fd, (struct sockaddr *)&target, sizeof target) != 0 && errno != EINPROGRESS) {
+        close(fd);
+        return -2;
+    }
+
+    struct timeval wait = {
+        .tv_sec  = timeout_ms / 1000,
+        .tv_usec = (timeout_ms % 1000) * 1000,
+    };
+
+    fd_set writable;
+    fd_set failed;
+    FD_ZERO(&writable);
+    FD_ZERO(&failed);
+    FD_SET(fd, &writable);
+    FD_SET(fd, &failed);
+
+    int ready = select(fd + 1, NULL, &writable, &failed, &wait);
+    if (ready <= 0) {
+        close(fd);
+        return -3; /* nothing answered in time */
+    }
+
+    int       error  = 0;
+    socklen_t length = sizeof error;
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length) != 0 || error != 0) {
+        close(fd);
+        return -4; /* reached, and refused */
+    }
+
+    if (rtt_ms != NULL) {
+        *rtt_ms = (int)((esp_timer_get_time() - started) / 1000);
+    }
+
+    close(fd);
+
+    return 0;
+}
+
+static esp_err_t handle_diag(httpd_req_t *req)
+{
+    web_buf_t buf;
+    buf_init(&buf, 2048);
+
+    int32_t temperature_dc = 0;
+    bool    have_temp = hal_power_get_chip_temperature_dc(&temperature_dc) == ESP_OK;
+
+    buf_puts(&buf, "{");
+
+    if (have_temp) {
+        buf_printf(&buf, "\"chip_temp_c\":%.1f", (double)temperature_dc / 10.0);
+    } else {
+        buf_puts(&buf, "\"chip_temp_c\":null");
+    }
+
+    buf_printf(&buf, ",\"uptime\":%lld", esp_timer_get_time() / 1000000);
+    buf_printf(&buf, ",\"heap_free\":%u,\"heap_min\":%u,\"psram_free\":%u",
+               (unsigned)esp_get_free_heap_size(),
+               (unsigned)esp_get_minimum_free_heap_size(),
+               (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    buf_printf(&buf, ",\"reset\":\"%s\"", reset_reason_name(esp_reset_reason()));
+
+    /* The resolver's own view, which is the one the box uses and the one that is wrong when a name
+     * stops working and an address does not. */
+    esp_netif_t *station = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (station != NULL) {
+        esp_netif_dns_info_t dns;
+        if (esp_netif_get_dns_info(station, ESP_NETIF_DNS_MAIN, &dns) == ESP_OK) {
+            char server[16];
+            if (inet_ntoa_r(dns.ip.u_addr.ip4, server, (int)sizeof server) != NULL) {
+                buf_puts(&buf, ",\"dns\":");
+                buf_json(&buf, server);
+            }
+        }
+    }
+
+    hal_wifi_status_t wifi;
+    if (hal_wifi_get_status(&wifi) == ESP_OK) {
+        buf_printf(&buf, ",\"wifi\":{\"state\":\"%s\",\"rssi\":%d,\"ip\":",
+                   wifi_state_name(wifi.state), (int)wifi.rssi);
+        buf_json(&buf, wifi.ip);
+        buf_puts(&buf, ",\"gateway\":");
+        buf_json(&buf, wifi.gateway);
+        buf_puts(&buf, ",\"netmask\":");
+        buf_json(&buf, wifi.netmask);
+        buf_puts(&buf, "}");
+    }
+
+    /* Reached only when asked: the probe blocks this task for up to its timeout, and a page being
+     * drawn does not need to wait for somebody else's server. */
+    char host[128];
+    if (query_string(req, "host", host, sizeof host) && host[0] != '\0') {
+        char port_text[8];
+        int  port = 80;
+
+        if (query_string(req, "port", port_text, sizeof port_text)) {
+            int asked = atoi(port_text);
+            if (asked > 0 && asked <= 65535) {
+                port = asked;
+            }
+        }
+
+        char ip[16] = "";
+        int  rtt_ms = 0;
+        int  result = net_probe(host, port, 2500, ip, sizeof ip, &rtt_ms);
+
+        buf_puts(&buf, ",\"probe\":{\"host\":");
+        buf_json(&buf, host);
+        buf_printf(&buf, ",\"port\":%d,\"result\":", port);
+
+        switch (result) {
+        case 0:
+            buf_printf(&buf, "\"ok\",\"ms\":%d,\"ip\":", rtt_ms);
+            buf_json(&buf, ip);
+            break;
+        case -1: buf_puts(&buf, "\"dns_failed\""); break;
+        case -3: buf_puts(&buf, "\"timeout\"");    break;
+        case -4: buf_puts(&buf, "\"refused\"");    break;
+        default: buf_puts(&buf, "\"error\"");      break;
+        }
+
+        buf_puts(&buf, "}");
+    }
+
+    buf_puts(&buf, "}");
+
+    if (buf.full) {
+        buf_free(&buf);
+        return send_busy(req);
+    }
+
+    esp_err_t ret = send_json(req, buf.data);
+    buf_free(&buf);
+
+    return ret;
+}
+
+/* ---------------------------------------------------------------------------
+ * Writing a file in place: the editor's save
+ * ------------------------------------------------------------------------- */
+
+/* The body of a text file, as `POST /api/write?path=...`. The whole body is the file, exactly as an
+ * upload's is and for the same reason: the page is JavaScript, and a `Blob` is a body.
+ *
+ * What differs from an upload is the intent. An upload puts a *new* file beside the old one and
+ * renames it over, because the bytes came from outside and a half-written upload must not touch what
+ * was there. An editor's save is the person who was reading the file writing it back, so it goes
+ * straight over: no `.part`, no rename, and no temporary file left in a listing to be puzzled over. */
+#define WEB_WRITE_MAX (256 * 1024)
+
+static esp_err_t handle_write(httpd_req_t *req)
+{
+    char path[WEB_PATH_MAX];
+    if (!query_string(req, "path", path, sizeof path)) {
+        return send_blocked(req, "path is required");
+    }
+
+    char clean[WEB_PATH_MAX];
+    if (!path_clean(path, clean, sizeof clean)) {
+        return send_blocked(req, "path is not under a mounted volume");
+    }
+
+    hal_storage_volume_t volume;
+    if (volume_for(clean, &volume) && strcmp(clean, volume.mount_point) == 0) {
+        return send_blocked(req, "a mount point is not a file");
+    }
+
+    if (req->content_len > WEB_WRITE_MAX) {
+        return send_error(req, "413 Payload Too Large", "too_big", "larger than a text file");
+    }
+
+    /* The directories above it, so that a save to a path the page is about to create works. */
+    char parent[WEB_PATH_MAX];
+    snprintf(parent, sizeof parent, "%s", clean);
+
+    char *slash = strrchr(parent, '/');
+    if (slash != NULL && slash != parent) {
+        *slash = '\0';
+        make_dirs(parent);
+    }
+
+    FILE *file = fopen(clean, "wb");
+    if (file == NULL) {
+        return send_error(req, "500 Internal Server Error", "write_failed", strerror(errno));
+    }
+
+    char   chunk[WEB_CHUNK];
+    size_t received = 0;
+    int    timeouts = 0;
+
+    while (req->content_len > (int)received) {
+        int read = httpd_req_recv(req, chunk, sizeof chunk);
+
+        if (read == HTTPD_SOCK_ERR_TIMEOUT) {
+            if (++timeouts > 3) {
+                break;
+            }
+            continue;
+        }
+
+        if (read <= 0) {
+            break;
+        }
+
+        timeouts = 0;
+
+        if (fwrite(chunk, 1, (size_t)read, file) != (size_t)read) {
+            fclose(file);
+            return send_error(req, "500 Internal Server Error", "write_failed", strerror(errno));
+        }
+
+        received += (size_t)read;
+    }
+
+    if (fclose(file) != 0) {
+        return send_error(req, "500 Internal Server Error", "write_failed", strerror(errno));
+    }
+
+    if ((int)received != req->content_len) {
+        return send_error(req, "408 Request Timeout", "upload_incomplete", "the body was cut short");
+    }
+
+    ESP_LOGI(TAG, "wrote %u bytes to %s", (unsigned)received, clean);
+
+    web_buf_t buf;
+    buf_init(&buf, 512);
+    buf_puts(&buf, "{\"ok\":true,\"path\":");
+    buf_json(&buf, clean);
+    buf_printf(&buf, ",\"bytes\":%u}", (unsigned)received);
+
+    if (buf.full) {
+        buf_free(&buf);
+        return send_busy(req);
+    }
+
+    esp_err_t ret = send_json(req, buf.data);
+    buf_free(&buf);
+
+    return ret;
+}
+
+/* ---------------------------------------------------------------------------
+ * Moving a file, including between the two volumes
+ * ------------------------------------------------------------------------- */
+
+/* `rename` covers the same filesystem and nothing else. Between LittleFS on the flash and FATFS on
+ * the card it fails — they are different drivers, and there is no inode to move.
+ *
+ * The move a person means there is a copy and a delete: the copy goes under the destination's name
+ * and the original goes only once the copy is closed and whole. A card that fills up leaves the
+ * original where it was, and the half-written copy is removed. */
+static esp_err_t move_file(const char *from, const char *to)
+{
+    if (rename(from, to) == 0) {
+        return ESP_OK;
+    }
+
+    FILE *source = fopen(from, "rb");
+    if (source == NULL) {
+        return ESP_FAIL;
+    }
+
+    FILE *destination = fopen(to, "wb");
+    if (destination == NULL) {
+        fclose(source);
+        return ESP_FAIL;
+    }
+
+    char     *buffer = malloc(WEB_CHUNK);
+    size_t    read;
+    esp_err_t ret = ESP_OK;
+
+    if (buffer == NULL) {
+        ret = ESP_ERR_NO_MEM;
+    } else {
+        while ((read = fread(buffer, 1, WEB_CHUNK, source)) > 0) {
+            if (fwrite(buffer, 1, read, destination) != read) {
+                ret = ESP_FAIL;
+                break;
+            }
+        }
+
+        free(buffer);
+    }
+
+    fclose(source);
+
+    if (fclose(destination) != 0) {
+        ret = ESP_FAIL;
+    }
+
+    if (ret != ESP_OK) {
+        remove(to);
+        return ret;
+    }
+
+    if (remove(from) != 0) {
+        /* Both copies are whole, which is a state a person can see and fix. Deleting the original
+         * without a copy that took is the one that cannot. */
+        ESP_LOGW(TAG, "copied %s to %s but could not remove the original", from, to);
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
+
+static esp_err_t handle_move(httpd_req_t *req)
+{
+    char raw_from[WEB_QUERY_MAX];
+    char raw_to[WEB_QUERY_MAX];
+    char flag[8];
+
+    if (!query_string(req, "from", raw_from, sizeof raw_from) ||
+        !query_string(req, "to", raw_to, sizeof raw_to)) {
+        return send_blocked(req, "from and to are required");
+    }
+
+    bool overwrite = query_string(req, "overwrite", flag, sizeof flag) && strcmp(flag, "1") == 0;
+
+    char from[WEB_PATH_MAX];
+    char to[WEB_PATH_MAX];
+    if (!path_clean(raw_from, from, sizeof from) || !path_clean(raw_to, to, sizeof to)) {
+        return send_blocked(req, "a path is not under a mounted volume");
+    }
+
+    hal_storage_volume_t volume;
+    if (volume_for(from, &volume) && strcmp(from, volume.mount_point) == 0) {
+        return send_blocked(req, "a mount point cannot be moved");
+    }
+
+    struct stat info;
+    if (stat(from, &info) != 0) {
+        return send_error(req, "404 Not Found", "no_such_file", strerror(errno));
+    }
+
+    /* A destination that is a directory means "into it", which is what dragging a file onto a folder
+     * means. Otherwise the destination is the name the file is to take. */
+    char        target[WEB_PATH_MAX];
+    struct stat into;
+
+    if (stat(to, &into) == 0 && S_ISDIR(into.st_mode)) {
+        const char *base = strrchr(from, '/');
+        base = base != NULL ? base + 1 : from;
+
+        if (snprintf(target, sizeof target, "%s/%s", to, base) >= (int)sizeof target) {
+            return send_blocked(req, "the path is too long");
+        }
+    } else if (snprintf(target, sizeof target, "%s", to) >= (int)sizeof target) {
+        return send_blocked(req, "the path is too long");
+    }
+
+    char clean_target[WEB_PATH_MAX];
+    if (!path_clean(target, clean_target, sizeof clean_target)) {
+        return send_blocked(req, "the destination is not under a mounted volume");
+    }
+
+    if (strcmp(from, clean_target) == 0) {
+        return send_blocked(req, "the source and the destination are the same");
+    }
+
+    struct stat existing;
+    if (stat(clean_target, &existing) == 0) {
+        if (!overwrite) {
+            return send_error(req, "409 Conflict", "already_exists", "the destination is taken");
+        }
+
+        if (remove(clean_target) != 0) {
+            return send_error(req, "409 Conflict", "directory_not_empty", strerror(errno));
+        }
+    }
+
+    if (S_ISDIR(info.st_mode)) {
+        /* A directory move is a rename or nothing: carrying one across the two filesystems would be a
+         * progress bar and a partial state, and this page has neither. */
+        if (rename(from, clean_target) != 0) {
+            return send_error(req, "400 Bad Request", "cross_volume",
+                              "a directory cannot be moved between volumes");
+        }
+    } else if (move_file(from, clean_target) != ESP_OK) {
+        return send_error(req, "500 Internal Server Error", "move_failed", strerror(errno));
+    }
+
+    ESP_LOGI(TAG, "moved %s to %s", from, clean_target);
+
+    web_buf_t buf;
+    buf_init(&buf, 512);
+    buf_puts(&buf, "{\"ok\":true,\"path\":");
+    buf_json(&buf, clean_target);
+    buf_puts(&buf, "}");
+
+    if (buf.full) {
+        buf_free(&buf);
+        return send_busy(req);
+    }
+
+    esp_err_t ret = send_json(req, buf.data);
+    buf_free(&buf);
+
+    return ret;
+}
+
+/* ---------------------------------------------------------------------------
+ * An archive of several files, streamed as it is built
+ * ------------------------------------------------------------------------- */
+
+/* A STORE-only zip — no compression — because the box is a microcontroller and what is being packed
+ * is mostly already-compressed: audio, pictures, and text too small to be worth a deflate window.
+ * What compression would buy is worth less than the library it would cost, and the format is the
+ * same either way to everything that opens the result.
+ *
+ * Entries are written with a data descriptor (bit 3 of the local header's flags): the CRC and the
+ * sizes come *after* the bytes instead of before them, which is the difference between one pass over
+ * each file and two. Every unzip in a browser and on a desktop reads them — the archive is correct,
+ * not merely tolerated. */
+#define ZIP_NAME_MAX 200
+#define ZIP_MAX_ENTRIES WEB_MAX_ENTRIES
+
+typedef struct {
+    char     name[ZIP_NAME_MAX];
+    uint32_t crc;
+    uint32_t size;
+    uint32_t offset;
+} zip_entry_t;
+
+typedef struct {
+    httpd_req_t *req;
+    uint32_t     offset;
+    zip_entry_t *entries;
+    size_t       count;
+    bool         overflow;
+    bool         aborted;
+} zip_ctx_t;
+
+/* The CRC-32 the format specifies, table built on first use. It is the one piece of arithmetic a
+ * stored zip still needs. */
+static uint32_t s_crc_table[256];
+static bool     s_crc_ready = false;
+
+static void crc_build(void)
+{
+    for (uint32_t i = 0; i < 256; i++) {
+        uint32_t value = i;
+
+        for (int bit = 0; bit < 8; bit++) {
+            value = (value & 1) ? (0xEDB88320u ^ (value >> 1)) : (value >> 1);
+        }
+
+        s_crc_table[i] = value;
+    }
+
+    s_crc_ready = true;
+}
+
+static uint32_t crc_update(uint32_t crc, const uint8_t *data, size_t length)
+{
+    if (!s_crc_ready) {
+        crc_build();
+    }
+
+    crc = crc ^ 0xFFFFFFFFu;
+
+    for (size_t i = 0; i < length; i++) {
+        crc = s_crc_table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
+    }
+
+    return crc ^ 0xFFFFFFFFu;
+}
+
+static void put16(uint8_t *at, uint16_t value)
+{
+    at[0] = (uint8_t)(value & 0xFF);
+    at[1] = (uint8_t)((value >> 8) & 0xFF);
+}
+
+static void put32(uint8_t *at, uint32_t value)
+{
+    at[0] = (uint8_t)(value & 0xFF);
+    at[1] = (uint8_t)((value >> 8) & 0xFF);
+    at[2] = (uint8_t)((value >> 16) & 0xFF);
+    at[3] = (uint8_t)((value >> 24) & 0xFF);
+}
+
+static bool zip_send(zip_ctx_t *ctx, const void *data, size_t length)
+{
+    if (ctx->aborted || length == 0) {
+        return !ctx->aborted;
+    }
+
+    if (httpd_resp_send_chunk(ctx->req, (const char *)data, (ssize_t)length) != ESP_OK) {
+        ctx->aborted = true;
+        return false;
+    }
+
+    ctx->offset += (uint32_t)length;
+
+    return true;
+}
+
+/* The format's date and time, which are a compression of the calendar invented in 1980 and not in
+ * any way the same thing as a Unix timestamp. */
+static void zip_dos_time(time_t when, uint16_t *out_date, uint16_t *out_time)
+{
+    struct tm parts;
+
+    if (localtime_r(&when, &parts) == NULL) {
+        *out_date = (uint16_t)(((2024 - 1980) << 9) | (1 << 5) | 1);
+        *out_time = 0;
+        return;
+    }
+
+    int year = parts.tm_year + 1900;
+    if (year < 1980) {
+        year = 1980;
+    }
+
+    *out_date = (uint16_t)(((year - 1980) << 9) | ((parts.tm_mon + 1) << 5) | parts.tm_mday);
+    *out_time = (uint16_t)((parts.tm_hour << 11) | (parts.tm_min << 5) | (parts.tm_sec / 2));
+}
+
+static void zip_add_file(zip_ctx_t *ctx, const char *fs_path, const char *arc_name)
+{
+    if (ctx->aborted || ctx->overflow) {
+        return;
+    }
+
+    size_t name_len = strlen(arc_name);
+    if (name_len == 0 || name_len >= ZIP_NAME_MAX) {
+        return;
+    }
+
+    struct stat info;
+    if (stat(fs_path, &info) != 0 || S_ISDIR(info.st_mode)) {
+        return;
+    }
+
+    FILE *file = fopen(fs_path, "rb");
+    if (file == NULL) {
+        return;
+    }
+
+    uint16_t dos_date;
+    uint16_t dos_time;
+    zip_dos_time(info.st_mtime, &dos_date, &dos_time);
+
+    uint8_t header[30];
+    put32(header + 0, 0x04034b50);
+    put16(header + 4, 20);      /* version needed */
+    put16(header + 6, 0x0008);  /* bit 3: the CRC and the sizes follow the data */
+    put16(header + 8, 0);       /* stored */
+    put16(header + 10, dos_time);
+    put16(header + 12, dos_date);
+    put32(header + 14, 0);      /* crc, in the descriptor */
+    put32(header + 18, 0);
+    put32(header + 22, 0);
+    put16(header + 26, (uint16_t)name_len);
+    put16(header + 28, 0);      /* no extra field */
+
+    uint32_t start = ctx->offset;
+
+    if (!zip_send(ctx, header, sizeof header) || !zip_send(ctx, arc_name, name_len)) {
+        fclose(file);
+        return;
+    }
+
+    char     buffer[WEB_CHUNK];
+    size_t   read;
+    uint32_t crc  = 0;
+    uint32_t size = 0;
+
+    while ((read = fread(buffer, 1, sizeof buffer, file)) > 0) {
+        crc = crc_update(crc, (const uint8_t *)buffer, read);
+        size += (uint32_t)read;
+
+        if (!zip_send(ctx, buffer, read)) {
+            fclose(file);
+            return;
+        }
+    }
+
+    fclose(file);
+
+    uint8_t descriptor[16];
+    put32(descriptor + 0, 0x08074b50);
+    put32(descriptor + 4, crc);
+    put32(descriptor + 8, size);
+    put32(descriptor + 12, size);
+
+    if (!zip_send(ctx, descriptor, sizeof descriptor)) {
+        return;
+    }
+
+    if (ctx->count == ZIP_MAX_ENTRIES) {
+        ctx->overflow = true;
+        return;
+    }
+
+    zip_entry_t *entry = &ctx->entries[ctx->count++];
+    memcpy(entry->name, arc_name, name_len + 1);
+    entry->crc    = crc;
+    entry->size   = size;
+    entry->offset = start;
+}
+
+/* A directory is walked into rather than stored as an entry: an archive of a folder that opens to
+ * the folder's contents is what a person unzipping it expects, and directory entries are optional in
+ * the format. Depth is capped, because a card can hold a symlink-less tree deep enough to be a
+ * fallback for a runaway recursion. */
+static void zip_add_tree(zip_ctx_t *ctx, const char *fs_dir, const char *arc_prefix, int depth)
+{
+    if (ctx->aborted || ctx->overflow || depth > 8) {
+        return;
+    }
+
+    DIR *dir = opendir(fs_dir);
+    if (dir == NULL) {
+        return;
+    }
+
+    struct dirent *item;
+    while (!ctx->aborted && !ctx->overflow && (item = readdir(dir)) != NULL) {
+        if (strcmp(item->d_name, ".") == 0 || strcmp(item->d_name, "..") == 0) {
+            continue;
+        }
+
+        char full[WEB_PATH_MAX];
+        char name[ZIP_NAME_MAX];
+
+        if (snprintf(full, sizeof full, "%s/%s", fs_dir, item->d_name) >= (int)sizeof full ||
+            snprintf(name, sizeof name, "%s/%s", arc_prefix, item->d_name) >= (int)sizeof name) {
+            continue;
+        }
+
+        struct stat info;
+        if (stat(full, &info) != 0) {
+            continue;
+        }
+
+        if (S_ISDIR(info.st_mode)) {
+            zip_add_tree(ctx, full, name, depth + 1);
+        } else {
+            zip_add_file(ctx, full, name);
+        }
+    }
+
+    closedir(dir);
+}
+
+/* The list of what to pack arrives as the body, one path per line: a URL long enough to hold a
+ * browser's idea of "these twenty files" is a URL a proxy truncates, and the paths contain the
+ * characters a separator would have been. The answer is the archive, as it is built. */
+static esp_err_t handle_archive(httpd_req_t *req)
+{
+    if (req->content_len <= 0 || req->content_len > WEB_JSON_MAX) {
+        return send_blocked(req, "a list of paths is required");
+    }
+
+    char *body = heap_caps_malloc((size_t)req->content_len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (body == NULL) {
+        body = malloc((size_t)req->content_len + 1);
+    }
+    if (body == NULL) {
+        return send_busy(req);
+    }
+
+    int received = 0;
+    int timeouts = 0;
+
+    while (received < req->content_len) {
+        int read = httpd_req_recv(req, body + received, req->content_len - received);
+
+        if (read == HTTPD_SOCK_ERR_TIMEOUT) {
+            if (++timeouts > 3) {
+                break;
+            }
+            continue;
+        }
+
+        if (read <= 0) {
+            break;
+        }
+
+        timeouts = 0;
+        received += read;
+    }
+
+    body[received] = '\0';
+
+    if (received != req->content_len) {
+        free(body);
+        return send_error(req, "408 Request Timeout", "upload_incomplete", "the body was cut short");
+    }
+
+    zip_ctx_t ctx = {0};
+    ctx.req = req;
+    ctx.entries = heap_caps_malloc(sizeof(zip_entry_t) * ZIP_MAX_ENTRIES,
+                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (ctx.entries == NULL) {
+        ctx.entries = malloc(sizeof(zip_entry_t) * ZIP_MAX_ENTRIES);
+    }
+
+    if (ctx.entries == NULL) {
+        free(body);
+        return send_busy(req);
+    }
+
+    char name[WEB_NAME_MAX];
+    if (!query_string(req, "name", name, sizeof name) || name[0] == '\0') {
+        snprintf(name, sizeof name, "pomelo-archive.zip");
+    }
+
+    httpd_resp_set_type(req, "application/zip");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
+    char disposition[WEB_NAME_MAX + 32];
+    snprintf(disposition, sizeof disposition, "attachment; filename=\"%s\"", name);
+    httpd_resp_set_hdr(req, "Content-Disposition", disposition);
+
+    for (char *line = body; line != NULL && !ctx.aborted && !ctx.overflow; ) {
+        char *next = strchr(line, '\n');
+        if (next != NULL) {
+            *next++ = '\0';
+        }
+
+        if (line[0] != '\0') {
+            char        clean[WEB_PATH_MAX];
+            struct stat info;
+
+            if (path_clean(line, clean, sizeof clean) && stat(clean, &info) == 0) {
+                const char *base = strrchr(clean, '/');
+                base = base != NULL ? base + 1 : clean;
+
+                /* A mount point would recurse into the whole volume, which is a download nobody
+                 * meant to start. */
+                hal_storage_volume_t volume;
+                bool is_mount = volume_for(clean, &volume) && strcmp(clean, volume.mount_point) == 0;
+
+                if (!is_mount) {
+                    if (S_ISDIR(info.st_mode)) {
+                        zip_add_tree(&ctx, clean, base, 0);
+                    } else {
+                        zip_add_file(&ctx, clean, base);
+                    }
+                }
+            }
+        }
+
+        line = next;
+    }
+
+    /* The central directory, then where it is. Both are built after the fact from the entries
+     * recorded on the way through, which is the whole reason the entries are recorded. */
+    uint32_t directory_offset = ctx.offset;
+
+    for (size_t i = 0; i < ctx.count && !ctx.aborted; i++) {
+        zip_entry_t *entry   = &ctx.entries[i];
+        size_t       name_len = strlen(entry->name);
+
+        uint8_t record[46];
+        put32(record + 0, 0x02014b50);
+        put16(record + 4, 20);       /* version made by */
+        put16(record + 6, 20);       /* version needed */
+        put16(record + 8, 0x0008);   /* bit 3, matching the local headers */
+        put16(record + 10, 0);       /* stored */
+        put16(record + 12, 0);       /* time, already written locally */
+        put16(record + 14, 0);       /* date, likewise */
+        put32(record + 16, entry->crc);
+        put32(record + 20, entry->size);
+        put32(record + 24, entry->size);
+        put16(record + 28, (uint16_t)name_len);
+        put16(record + 30, 0);       /* extra */
+        put16(record + 32, 0);       /* comment */
+        put16(record + 34, 0);       /* disk */
+        put16(record + 36, 0);       /* internal attributes */
+        put32(record + 38, 0);       /* external attributes */
+        put32(record + 42, entry->offset);
+
+        if (!zip_send(&ctx, record, sizeof record) || !zip_send(&ctx, entry->name, name_len)) {
+            break;
+        }
+    }
+
+    uint32_t directory_size = ctx.offset - directory_offset;
+
+    uint8_t end[22];
+    put32(end + 0, 0x06054b50);
+    put16(end + 4, 0);
+    put16(end + 6, 0);
+    put16(end + 8, (uint16_t)ctx.count);
+    put16(end + 10, (uint16_t)ctx.count);
+    put32(end + 12, directory_size);
+    put32(end + 16, directory_offset);
+    put16(end + 20, 0);
+
+    zip_send(&ctx, end, sizeof end);
+
+    httpd_resp_send_chunk(req, NULL, 0);
+
+    ESP_LOGI(TAG, "packed %u files into %s", (unsigned)ctx.count, name);
+
+    free(ctx.entries);
+    free(body);
+
+    return ESP_OK;
+}
+
+/* ---------------------------------------------------------------------------
+ * What is taking up the room
+ * ------------------------------------------------------------------------- */
+
+/* The walk is bounded twice over: a count of entries and a wall-clock deadline. Both matter. A card
+ * can hold more files than a request should hold the CPU for, and FATFS answers `stat` with a
+ * directory walk of its own, so a hundred thousand of them is minutes. A truncated answer that says
+ * so is worth more than an answer that arrives after the socket has given up. */
+#define WEB_ANALYSIS_BUDGET 3000
+#define WEB_ANALYSIS_MS     2500
+#define WEB_ANALYSIS_TOP    10
+
+typedef struct {
+    char          path[WEB_PATH_MAX];
+    unsigned long size;
+} analysis_top_t;
+
+typedef struct {
+    uint64_t       bytes;
+    size_t         files;
+    size_t         directories;
+    size_t         visited;
+    int64_t        deadline;
+    bool           truncated;
+    analysis_top_t top[WEB_ANALYSIS_TOP];
+} analysis_t;
+
+static void analysis_note(analysis_t *scan, const char *path, unsigned long size)
+{
+    /* An insertion sort into a fixed list of ten, over a list that is mostly not full: the honest
+     * structure for "the ten biggest" in a walk that cannot keep everything. */
+    size_t at = WEB_ANALYSIS_TOP;
+
+    for (size_t i = 0; i < WEB_ANALYSIS_TOP; i++) {
+        if (scan->top[i].path[0] == '\0' || size > scan->top[i].size) {
+            at = i;
+            break;
+        }
+    }
+
+    if (at == WEB_ANALYSIS_TOP) {
+        return;
+    }
+
+    for (size_t i = WEB_ANALYSIS_TOP - 1; i > at; i--) {
+        scan->top[i] = scan->top[i - 1];
+    }
+
+    snprintf(scan->top[at].path, sizeof scan->top[at].path, "%s", path);
+    scan->top[at].size = size;
+}
+
+static void analysis_walk(const char *dir, int depth, analysis_t *scan)
+{
+    /* Recursion, so the depth is a stack bound as much as a sanity bound: each frame holds a
+     * `WEB_PATH_MAX` path, and the handler is already on the server's 8 KB task stack. */
+    if (scan->truncated || depth > 8) {
+        scan->truncated = true;
+        return;
+    }
+
+    if (scan->visited >= WEB_ANALYSIS_BUDGET || esp_timer_get_time() > scan->deadline) {
+        scan->truncated = true;
+        return;
+    }
+
+    DIR *handle = opendir(dir);
+    if (handle == NULL) {
+        return;
+    }
+
+    struct dirent *item;
+
+    while ((item = readdir(handle)) != NULL) {
+        if (strcmp(item->d_name, ".") == 0 || strcmp(item->d_name, "..") == 0) {
+            continue;
+        }
+
+        if (++scan->visited >= WEB_ANALYSIS_BUDGET || esp_timer_get_time() > scan->deadline) {
+            scan->truncated = true;
+            break;
+        }
+
+        char full[WEB_PATH_MAX];
+        if (snprintf(full, sizeof full, "%s/%s", dir, item->d_name) >= (int)sizeof full) {
+            scan->truncated = true;
+            continue;
+        }
+
+        struct stat info;
+        if (stat(full, &info) != 0) {
+            continue;
+        }
+
+        if (S_ISDIR(info.st_mode)) {
+            scan->directories++;
+            analysis_walk(full, depth + 1, scan);
+        } else {
+            scan->files++;
+            scan->bytes += (uint64_t)info.st_size;
+            analysis_note(scan, full, (unsigned long)info.st_size);
+        }
+    }
+
+    closedir(handle);
+}
+
+static esp_err_t handle_analysis(httpd_req_t *req)
+{
+    char raw[WEB_QUERY_MAX];
+    if (!query_string(req, "path", raw, sizeof raw)) {
+        return send_blocked(req, "path is required");
+    }
+
+    char clean[WEB_PATH_MAX];
+    if (!path_clean(raw, clean, sizeof clean)) {
+        return send_blocked(req, "path is not under a mounted volume");
+    }
+
+    struct stat info;
+    if (stat(clean, &info) != 0 || !S_ISDIR(info.st_mode)) {
+        return send_error(req, "404 Not Found", "no_such_directory", strerror(errno));
+    }
+
+    analysis_t *scan = heap_caps_malloc(sizeof(analysis_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (scan == NULL) {
+        scan = malloc(sizeof(analysis_t));
+    }
+    if (scan == NULL) {
+        return send_busy(req);
+    }
+
+    memset(scan, 0, sizeof *scan);
+    scan->deadline = esp_timer_get_time() + (int64_t)WEB_ANALYSIS_MS * 1000;
+
+    analysis_walk(clean, 0, scan);
+
+    web_buf_t buf;
+    buf_init(&buf, 2048);
+
+    buf_puts(&buf, "{\"path\":");
+    buf_json(&buf, clean);
+    buf_printf(&buf, ",\"bytes\":%llu,\"files\":%u,\"directories\":%u,\"scanned\":%u,\"truncated\":%s",
+               (unsigned long long)scan->bytes, (unsigned)scan->files, (unsigned)scan->directories,
+               (unsigned)scan->visited, scan->truncated ? "true" : "false");
+
+    buf_puts(&buf, ",\"largest\":[");
+    for (size_t i = 0; i < WEB_ANALYSIS_TOP && scan->top[i].path[0] != '\0'; i++) {
+        if (i > 0) {
+            buf_puts(&buf, ",");
+        }
+
+        buf_puts(&buf, "{\"path\":");
+        buf_json(&buf, scan->top[i].path);
+        buf_printf(&buf, ",\"size\":%lu}", scan->top[i].size);
+    }
+    buf_puts(&buf, "]}");
+
+    free(scan);
+
+    if (buf.full) {
+        buf_free(&buf);
+        return send_busy(req);
+    }
+
+    esp_err_t ret = send_json(req, buf.data);
+    buf_free(&buf);
+
+    return ret;
+}
+
+/* ---------------------------------------------------------------------------
+ * The screen itself: its brightness, its sleep, and its picture
+ * ------------------------------------------------------------------------- */
+
+/* The idle sleep, which is the one thing on this page that acts on its own. It is off by default and
+ * only ever runs when a page has asked it to: a box whose screen goes dark because a browser once
+ * mentioned it would be a bug, not a feature.
+ *
+ * "Idle" means nothing has touched the glass and nothing has asked the server anything — the two
+ * kinds of attention a box on a shelf receives. Touching wakes it back up, and, since a wake without
+ * the touch reaching the UI would be a tap that did nothing, the touch is never consumed here; only
+ * its timestamp is read. */
+static esp_timer_handle_t s_idle_timer   = NULL;
+static volatile int32_t   s_idle_seconds = 0;
+static volatile bool      s_idle_asleep  = false;
+
+static void idle_sleep_wake(void)
+{
+    if (s_idle_asleep) {
+        s_idle_asleep = false;
+        hal_display_set_power(true);
+    }
+}
+
+static void idle_tick(void *argument)
+{
+    (void)argument;
+
+    if (s_idle_seconds <= 0) {
+        idle_sleep_wake();
+        return;
+    }
+
+    int64_t now      = esp_timer_get_time();
+    int64_t touched  = hal_touch_last_activity_us();
+    int64_t asked    = s_last_request_us;
+    int64_t last     = touched > asked ? touched : asked;
+    int64_t limit_us = (int64_t)s_idle_seconds * 1000000;
+
+    if (now - last >= limit_us) {
+        if (!s_idle_asleep) {
+            s_idle_asleep = true;
+            hal_display_set_power(false);
+            ESP_LOGI(TAG, "the screen is asleep after %d s", (int)s_idle_seconds);
+        }
+    } else {
+        idle_sleep_wake();
+    }
+}
+
+static esp_err_t handle_display(httpd_req_t *req)
+{
+    char on_text[8];
+    char brightness_text[8];
+    char idle_text[8];
+
+    bool want_on         = query_string(req, "on", on_text, sizeof on_text);
+    bool want_brightness = query_string(req, "brightness", brightness_text, sizeof brightness_text);
+    bool want_idle       = query_string(req, "idle", idle_text, sizeof idle_text);
+
+    /* Asking for nothing is asking what it is. The page opens the screen card before it has anything
+     * to show, and the shape of the answer is the same either way: what the panel is doing now. */
+    if (want_on) {
+        bool on = atoi(on_text) != 0;
+        hal_display_set_power(on);
+        if (on) {
+            s_idle_asleep = false;
+        }
+    }
+
+    if (want_brightness) {
+        int level = atoi(brightness_text);
+        if (level < 0) {
+            level = 0;
+        }
+        if (level > 255) {
+            level = 255;
+        }
+        hal_display_set_brightness((uint8_t)level);
+    }
+
+    if (want_idle) {
+        int minutes = atoi(idle_text);
+        if (minutes < 0) {
+            minutes = 0;
+        }
+        if (minutes > 120) {
+            minutes = 120;
+        }
+
+        s_idle_seconds = minutes * 60;
+
+        if (s_idle_seconds > 0) {
+            if (s_idle_timer == NULL) {
+                esp_timer_create_args_t args = {
+                    .callback = idle_tick,
+                    .name     = "web_idle",
+                };
+                esp_timer_create(&args, &s_idle_timer);
+            }
+
+            if (s_idle_timer != NULL) {
+                esp_timer_start_periodic(s_idle_timer, 1000000);
+            }
+        } else if (s_idle_timer != NULL) {
+            esp_timer_stop(s_idle_timer);
+            idle_sleep_wake();
+        }
+    }
+
+    web_buf_t buf;
+    buf_init(&buf, 256);
+    buf_printf(&buf, "{\"ok\":true,\"on\":%s,\"brightness\":%u,\"idle_seconds\":%d,\"capture\":%s}",
+               hal_display_is_powered() ? "true" : "false",
+               (unsigned)hal_display_get_brightness(),
+               (int)s_idle_seconds,
+               hal_display_has_capture() ? "true" : "false");
+
+    if (buf.full) {
+        buf_free(&buf);
+        return send_busy(req);
+    }
+
+    esp_err_t ret = send_json(req, buf.data);
+    buf_free(&buf);
+
+    return ret;
+}
+
+/* The screen as a picture.
+ *
+ * The panel cannot be read back — the CO5300 has no path that returns its GRAM over QSPI — so the
+ * picture is the shadow copy the display driver keeps on the way past (see `s_shadow` in
+ * board_display.c). What that copy holds is exactly what the panel was last given, which is exactly
+ * what is on the screen.
+ *
+ * BMP and not PNG: twenty-four bits per pixel, bottom-up rows, and no library. It is the one image
+ * format whose header is thirty bytes of arithmetic and whose body is the pixels, and a browser shows
+ * one without being asked twice. */
+static esp_err_t handle_screenshot(httpd_req_t *req)
+{
+    if (!hal_display_has_capture()) {
+        return send_error(req, "501 Not Implemented", "no_capture",
+                          "no PSRAM for the shadow frame");
+    }
+
+    const int width  = BOARD_DISPLAY_WIDTH;
+    const int height = BOARD_DISPLAY_HEIGHT;
+
+    uint16_t *frame = heap_caps_malloc((size_t)width * height * sizeof(uint16_t),
+                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (frame == NULL) {
+        return send_busy(req);
+    }
+
+    if (hal_display_capture(frame, (size_t)width * height) != ESP_OK) {
+        free(frame);
+        return send_error(req, "500 Internal Server Error", "capture_failed", NULL);
+    }
+
+    /* Sent in bands rather than as one buffer: the whole image is 691 KB of a page's answer, and
+     * allocating it twice — once as the shadow, once as the conversion — is PSRAM spent on nothing.
+     * Sixty-four rows is 92 KB, which is a chunk httpd is happy to hand to the socket. */
+    const size_t rows_per_band = 64;
+    const size_t row_bytes     = (size_t)width * 3;
+    const size_t band_bytes    = row_bytes * rows_per_band;
+    const size_t image_bytes   = row_bytes * (size_t)height;
+
+    uint8_t *band = heap_caps_malloc(band_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (band == NULL) {
+        band = malloc(band_bytes);
+    }
+    if (band == NULL) {
+        free(frame);
+        return send_busy(req);
+    }
+
+    uint8_t header[54];
+    memset(header, 0, sizeof header);
+
+    header[0] = 'B';
+    header[1] = 'M';
+    put32(header + 2, (uint32_t)(sizeof header + image_bytes));
+    put32(header + 10, (uint32_t)sizeof header);
+    put32(header + 14, 40);                          /* the DIB header */
+    put32(header + 18, (uint32_t)width);
+    /* Negative height: rows are stored top-down, which is the order the shadow already has them in. */
+    put32(header + 22, (uint32_t)(-height));
+    put16(header + 26, 1);
+    put16(header + 28, 24);
+    put32(header + 34, (uint32_t)image_bytes);
+    put32(header + 38, 2835);                        /* 72 dpi */
+    put32(header + 42, 2835);
+
+    httpd_resp_set_type(req, "image/bmp");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=\"screenshot.bmp\"");
+
+    esp_err_t ret = httpd_resp_send_chunk(req, (const char *)header, sizeof header);
+
+    for (int y = 0; y < height && ret == ESP_OK; y += (int)rows_per_band) {
+        int rows = height - y;
+        if (rows > (int)rows_per_band) {
+            rows = (int)rows_per_band;
+        }
+
+        for (int r = 0; r < rows; r++) {
+            const uint16_t *source = frame + (size_t)(y + r) * width;
+            uint8_t        *target = band + (size_t)r * row_bytes;
+
+            for (int x = 0; x < width; x++) {
+                uint16_t pixel = source[x];
+
+                /* 5-6-5 widened to 8-8-8 by repeating the high bits into the low ones, which is what
+                 * keeps white white and black black. BMP wants blue first. */
+                uint8_t red   = (uint8_t)((pixel >> 11) & 0x1F);
+                uint8_t green = (uint8_t)((pixel >> 5) & 0x3F);
+                uint8_t blue  = (uint8_t)(pixel & 0x1F);
+
+                target[x * 3 + 0] = (uint8_t)((blue << 3) | (blue >> 2));
+                target[x * 3 + 1] = (uint8_t)((green << 2) | (green >> 4));
+                target[x * 3 + 2] = (uint8_t)((red << 3) | (red >> 2));
+            }
+        }
+
+        ret = httpd_resp_send_chunk(req, (const char *)band, (ssize_t)(row_bytes * (size_t)rows));
+    }
+
+    httpd_resp_send_chunk(req, NULL, 0);
+
+    free(band);
+    free(frame);
+
+    return ESP_OK;
+}
+
+/* ---------------------------------------------------------------------------
+ * Driving the box from the page
+ * ------------------------------------------------------------------------- */
+
+/* A finger, from a browser. The event goes into the same queue the panel's own touches arrive on, so
+ * the UI above it cannot tell the difference — which is what makes this a remote control rather than
+ * a second way to talk to the apps. */
+static esp_err_t handle_remote(httpd_req_t *req)
+{
+    char type[8];
+    char text[8];
+
+    if (!query_string(req, "type", type, sizeof type)) {
+        return send_blocked(req, "type is required");
+    }
+
+    int x = 0;
+    int y = 0;
+
+    if (query_string(req, "x", text, sizeof text)) {
+        x = atoi(text);
+    }
+    if (query_string(req, "y", text, sizeof text)) {
+        y = atoi(text);
+    }
+
+    esp_err_t ret;
+
+    if (strcmp(type, "down") == 0) {
+        ret = hal_touch_inject(HAL_TOUCH_EVENT_DOWN, x, y);
+    } else if (strcmp(type, "move") == 0) {
+        ret = hal_touch_inject(HAL_TOUCH_EVENT_MOVE, x, y);
+    } else if (strcmp(type, "up") == 0) {
+        ret = hal_touch_inject(HAL_TOUCH_EVENT_UP, x, y);
+    } else if (strcmp(type, "tap") == 0) {
+        ret = hal_touch_inject(HAL_TOUCH_EVENT_DOWN, x, y);
+        if (ret == ESP_OK) {
+            /* Long enough for the UI to have moved past the press before the release arrives: a
+             * down and an up in the same millisecond is a click in the abstract and nothing at all
+             * in a state machine that wants a frame between them. */
+            vTaskDelay(pdMS_TO_TICKS(60));
+            ret = hal_touch_inject(HAL_TOUCH_EVENT_UP, x, y);
+        }
+    } else {
+        return send_blocked(req, "type is tap, down, move or up");
+    }
+
+    if (ret != ESP_OK && ret != ESP_ERR_TIMEOUT) {
+        return send_error(req, "500 Internal Server Error", "touch_failed", esp_err_to_name(ret));
+    }
+
+    web_buf_t buf;
+    buf_init(&buf, 128);
+    buf_printf(&buf, "{\"ok\":true,\"type\":\"%s\",\"x\":%d,\"y\":%d}", type, x, y);
+
+    esp_err_t answer = send_json(req, buf.data);
+    buf_free(&buf);
+
+    return answer;
+}
+
+/* A tone out of the speaker, which is the "where is it" button: a box on a shelf with no screen
+ * pointed at it and a page that can make it beep is a box you can find. Blocking for as long as the
+ * tone lasts, which is capped well inside the server's patience. */
+static esp_err_t handle_audio(httpd_req_t *req)
+{
+    char text[16];
+
+    int frequency = 880;
+    int duration  = 300;
+    int volume    = 101; /* above 100 means "leave the current volume alone" */
+
+    if (query_string(req, "freq", text, sizeof text)) {
+        frequency = atoi(text);
+    }
+    if (query_string(req, "ms", text, sizeof text)) {
+        duration = atoi(text);
+    }
+    if (query_string(req, "volume", text, sizeof text)) {
+        volume = atoi(text);
+    }
+
+    if (frequency < 1 || frequency > 7000) {
+        return send_blocked(req, "freq must be between 1 and 7000 Hz");
+    }
+
+    if (duration < 1) {
+        duration = 1;
+    }
+    if (duration > 2000) {
+        duration = 2000;
+    }
+
+    if (volume > 100) {
+        volume = 101;
+    }
+    if (volume < 0) {
+        volume = 0;
+    }
+
+    esp_err_t played = hal_audio_tone((uint32_t)frequency, (uint32_t)duration, (uint8_t)volume);
+    if (played != ESP_OK) {
+        return send_error(req, "500 Internal Server Error", "audio_failed", esp_err_to_name(played));
+    }
+
+    web_buf_t buf;
+    buf_init(&buf, 128);
+    buf_printf(&buf, "{\"ok\":true,\"freq\":%d,\"ms\":%d}", frequency, duration);
+
+    esp_err_t answer = send_json(req, buf.data);
+    buf_free(&buf);
+
+    return answer;
+}
+
+/* ---------------------------------------------------------------------------
+ * The clock
+ * ------------------------------------------------------------------------- */
+
+static esp_err_t handle_rtc(httpd_req_t *req)
+{
+    time_t   system_now = time(NULL);
+    time_t   chip_now   = 0;
+    esp_err_t chip_read = hal_rtc_get_epoch(&chip_now);
+
+    web_buf_t buf;
+    buf_init(&buf, 512);
+
+    buf_printf(&buf, "{\"epoch\":%lld,\"valid\":%s,\"uptime\":%lld", (long long)system_now,
+               system_now > 1704067200 ? "true" : "false",
+               (long long)(esp_timer_get_time() / 1000000));
+
+    /* The chip is a thing that may not be there — this board has one, the next revision may not — so
+     * the answer carries it only when it answered, and the object closes either way. */
+    if (chip_read == ESP_OK) {
+        struct tm parts;
+        char      text[32];
+
+        if (gmtime_r(&chip_now, &parts) != NULL &&
+            strftime(text, sizeof text, "%Y-%m-%dT%H:%M:%SZ", &parts) > 0) {
+            buf_puts(&buf, ",\"rtc\":{\"epoch\":");
+            buf_printf(&buf, "%lld,\"iso\":", (long long)chip_now);
+            buf_json(&buf, text);
+            buf_puts(&buf, "}");
+        }
+    }
+
+    buf_puts(&buf, "}");
+
+    if (buf.full) {
+        buf_free(&buf);
+        return send_busy(req);
+    }
+
+    esp_err_t ret = send_json(req, buf.data);
+    buf_free(&buf);
+
+    return ret;
+}
+
+static esp_err_t handle_rtc_set(httpd_req_t *req)
+{
+    char text[24];
+
+    if (!query_string(req, "epoch", text, sizeof text)) {
+        return send_blocked(req, "epoch is required");
+    }
+
+    /* Deliberately a string and not a float: a browser's `Date.now() / 1000` is a number with a
+     * fraction on it if it is careless, and the fraction is the year 2100 somewhere if it is parsed
+     * at the wrong width. Seconds, whole, as text. */
+    long long epoch = strtoll(text, NULL, 10);
+
+    esp_err_t set = hal_rtc_set_epoch((time_t)epoch);
+    if (set == ESP_ERR_INVALID_ARG) {
+        return send_blocked(req, "the time is before 2024");
+    }
+    if (set != ESP_OK) {
+        return send_error(req, "500 Internal Server Error", "rtc_failed", esp_err_to_name(set));
+    }
+
+    /* Read back rather than echo: whether the chip took the write is the answer, and the only way to
+     * know is to ask it. */
+    time_t now = time(NULL);
+
+    web_buf_t buf;
+    buf_init(&buf, 256);
+    buf_printf(&buf, "{\"ok\":true,\"epoch\":%lld}", (long long)now);
+
+    esp_err_t answer = send_json(req, buf.data);
+    buf_free(&buf);
+
+    return answer;
+}
+
+/* ---------------------------------------------------------------------------
+ * Being an app: the manifest, the icon, and the service worker
+ *
+ * All three are only consulted by a browser that considers this a secure origin — HTTPS, or the
+ * `localhost` exception. The box's own page is served over plain HTTP on whatever address the router
+ * handed it, so on a LAN these go unread and the page is a page. Behind a reverse proxy, or on a
+ * network that has been given a certificate, they are what turns it into something installed: the
+ * same routes, answering a question that is only asked in a secure context.
+ * ------------------------------------------------------------------------- */
+
+static esp_err_t handle_manifest(httpd_req_t *req)
+{
+    char running[64];
+    app_name_copy(running, sizeof running);
+
+    /* Built as one string first and escaped once: the app name is whatever the firmware set it to,
+     * and a name with a quote in it would otherwise end the JSON string early. */
+    char title[96];
+    snprintf(title, sizeof title, running[0] ? "Pomelo - %s" : "Pomelo", running);
+
+    web_buf_t buf;
+    buf_init(&buf, 512);
+
+    buf_puts(&buf, "{\"name\":");
+    buf_json(&buf, title);
+    buf_printf(&buf, ",\"short_name\":\"Pomelo\",\"start_url\":\"/\",\"scope\":\"/\","
+                     "\"display\":\"standalone\",\"orientation\":\"any\","
+                     "\"background_color\":\"#0b0b0f\",\"theme_color\":\"#0b0b0f\","
+                     "\"icons\":[{\"src\":\"/icon.svg\",\"sizes\":\"any\","
+                     "\"type\":\"image/svg+xml\",\"purpose\":\"any\"},"
+                     "{\"src\":\"/icon.svg\",\"sizes\":\"any\","
+                     "\"type\":\"image/svg+xml\",\"purpose\":\"maskable\"}]}");
+
+    if (buf.full) {
+        buf_free(&buf);
+        return send_busy(req);
+    }
+
+    httpd_resp_set_type(req, "application/manifest+json; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
+    esp_err_t ret = httpd_resp_send(req, buf.data, HTTPD_RESP_USE_STRLEN);
+    buf_free(&buf);
+
+    return ret;
+}
+
+/* A pomelo: a circle, a leaf, and the two dots that make it a face. Drawn rather than stored as a
+ * bitmap because the box has no image decoder and a browser has an SVG renderer. */
+static const char WEB_ICON_SVG[] =
+    "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 512 512\">"
+    "<rect width=\"512\" height=\"512\" rx=\"96\" fill=\"#0b0b0f\"/>"
+    "<circle cx=\"256\" cy=\"292\" r=\"150\" fill=\"#ffd25f\"/>"
+    "<path d=\"M256 146c0-44 34-78 78-78-6 44-34 78-78 78z\" fill=\"#5ec268\"/>"
+    "<circle cx=\"204\" cy=\"276\" r=\"17\" fill=\"#0b0b0f\"/>"
+    "<circle cx=\"308\" cy=\"276\" r=\"17\" fill=\"#0b0b0f\"/>"
+    "<path d=\"M196 336c34 34 86 34 120 0\" stroke=\"#0b0b0f\" stroke-width=\"20\" "
+    "stroke-linecap=\"round\" fill=\"none\"/>"
+    "</svg>";
+
+static esp_err_t handle_icon(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "image/svg+xml");
+    /* Cached: it is the same circle forever, and it is asked for on every install. */
+    httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=86400");
+
+    return httpd_resp_send(req, WEB_ICON_SVG, HTTPD_RESP_USE_STRLEN);
+}
+
+/* Network first, and the cache is the fallback for the one case it is for: a page opened where the
+ * box cannot be reached. Caching the shell first would serve yesterday's page after a firmware
+ * update, which on a device whose whole point is that its page is generated from its state is a
+ * worse failure than a blank tab. */
+static const char WEB_SERVICE_WORKER_JS[] =
+    "const CACHE = 'pomelo-shell-v1';\n"
+    "self.addEventListener('install', (event) => { self.skipWaiting(); });\n"
+    "self.addEventListener('activate', (event) => {\n"
+    "  event.waitUntil(self.clients.claim());\n"
+    "});\n"
+    "self.addEventListener('fetch', (event) => {\n"
+    "  const request = event.request;\n"
+    "  if (request.method !== 'GET' || new URL(request.url).pathname.startsWith('/api/')) {\n"
+    "    return;\n"
+    "  }\n"
+    "  event.respondWith((async () => {\n"
+    "    try {\n"
+    "      const fresh = await fetch(request);\n"
+    "      if (fresh.ok && fresh.type === 'basic') {\n"
+    "        const copy = fresh.clone();\n"
+    "        caches.open(CACHE).then((cache) => cache.put(request, copy)).catch(() => {});\n"
+    "      }\n"
+    "      return fresh;\n"
+    "    } catch (error) {\n"
+    "      const cached = await caches.match(request);\n"
+    "      if (cached) { return cached; }\n"
+    "      throw error;\n"
+    "    }\n"
+    "  })());\n"
+    "});\n";
+
+static esp_err_t handle_service_worker(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/javascript; charset=utf-8");
+    /* A worker served from a stale cache is a worker that never updates, and a worker that never
+     * updates is a page that never updates. */
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    /* The worker's scope is the directory it is served from, and this one is served from the root —
+     * which is the whole page. */
+    httpd_resp_set_hdr(req, "Service-Worker-Allowed", "/");
+
+    return httpd_resp_send(req, WEB_SERVICE_WORKER_JS, HTTPD_RESP_USE_STRLEN);
 }

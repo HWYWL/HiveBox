@@ -41,6 +41,37 @@ void hal_display_wait_vsync(void);
  */
 void hal_display_set_power(bool on);
 
+/** @brief Whether the panel is currently powered (the last state passed to hal_display_set_power). */
+bool hal_display_is_powered(void);
+
+/**
+ * @brief Set panel brightness via the CO5300's 0x51 register.
+ *
+ * The level is remembered, so waking the display later does not force it back to full.
+ * @param level 0 (off) to 255 (full).
+ */
+esp_err_t hal_display_set_brightness(uint8_t level);
+
+/** @brief The brightness last set, or 255 before anything has been set. */
+uint8_t hal_display_get_brightness(void);
+
+/**
+ * @brief Whether a screenshot can be taken.
+ *
+ * Screenshots come from a shadow copy of the frame the panel was last given, which costs half a
+ * megabyte of PSRAM. When that allocation failed there is no copy and no screenshot.
+ */
+bool hal_display_has_capture(void);
+
+/**
+ * @brief Copy the screen into `out` as RGB565, top row first, `BOARD_DISPLAY_WIDTH` pixels wide.
+ *
+ * @param out    Buffer of at least `BOARD_DISPLAY_WIDTH * BOARD_DISPLAY_HEIGHT` pixels.
+ * @param pixels Size of `out` in pixels, checked against the panel geometry.
+ * @return ESP_OK, ESP_ERR_INVALID_STATE when there is no shadow frame, or ESP_ERR_INVALID_SIZE.
+ */
+esp_err_t hal_display_capture(uint16_t *out, size_t pixels);
+
 /**
  * @brief Poll touch point. Returns true if touched, false if released.
  */
@@ -69,6 +100,23 @@ typedef struct {
  * Returns true if an event was received, false on timeout.
  */
 bool hal_touch_wait_event(hal_touch_event_t *out_event, uint32_t timeout_ms);
+
+/**
+ * @brief Feed a synthetic touch event in, as if a finger had produced it.
+ *
+ * Used by the web page's remote-control pad. Coordinates outside the panel are clamped.
+ * @return ESP_OK, ESP_ERR_INVALID_STATE before touch is up, or ESP_ERR_TIMEOUT if the queue stayed
+ *         full for 50 ms.
+ */
+esp_err_t hal_touch_inject(hal_touch_event_type_t type, int32_t x, int32_t y);
+
+/**
+ * @brief When the glass was last touched, in microseconds since boot, or 0 if never.
+ *
+ * A read-only timestamp for callers that need "has anything happened recently" without consuming an
+ * event the UI is waiting on — the idle sleep is the one.
+ */
+int64_t hal_touch_last_activity_us(void);
 
 /**
  * @brief Button event types for interrupt-driven event queues.
@@ -412,6 +460,45 @@ bool hal_web_is_running(void);
 /** @brief The port it is up on, or 0 when it is down. */
 uint16_t hal_web_get_port(void);
 
+/** @brief Name the app the box is showing, for the page's status panel.
+ *
+ * The page is served by C and the foreground is decided by Rust, so this is the one thing the server
+ * cannot look up: the launcher says what it drew. Called on every switch; the name is copied, so
+ * `name` does not have to outlive the call. Passing NULL or "" leaves it as the firmware's name.
+ */
+void hal_web_set_app_name(const char *name);
+
+/* ---------------------------------------------------------------------------
+ * Log ring.
+ *
+ * The last `HAL_LOG_LINES` lines every `ESP_LOGx` wrote, kept in a ring so the page can show them.
+ * `hal_log_init` installs the hook in front of the console; the console keeps its output unchanged.
+ * ------------------------------------------------------------------------- */
+
+#define HAL_LOG_LINES    128
+#define HAL_LOG_LINE_MAX 160
+
+typedef struct {
+    /** The number the line was given when it was written, ascending from 1. Empty slots are 0. */
+    uint32_t seq;
+    /** When it was written, in microseconds since boot. */
+    int64_t uptime_us;
+    /** The line, without its newline, and truncated to fit. */
+    char text[HAL_LOG_LINE_MAX];
+} hal_log_entry_t;
+
+/** @brief Install the log hook. Call once, early, before anything has anything to say. */
+esp_err_t hal_log_init(void);
+
+/** @brief Read the lines written since `*in_out_since`.
+ *
+ * `out` takes up to `max` entries in the order they were written. On return `*in_out_since` is the
+ * number of the newest line in the ring — what the caller has now seen — so a page can poll with the
+ * value it was given and get only what is new. A caller that has fallen further behind than the ring
+ * is long simply misses the lines that were overwritten.
+ */
+size_t hal_log_read(hal_log_entry_t *out, size_t max, uint32_t *in_out_since);
+
 /* ---------------------------------------------------------------------------
  * ES8311 audio codec and I2S speaker interface (Audio Sink).
  * ------------------------------------------------------------------------- */
@@ -446,6 +533,19 @@ esp_err_t hal_audio_set_volume(uint8_t volume);
  */
 esp_err_t hal_audio_close(void);
 
+/**
+ * @brief Play a short test tone and return once it has finished.
+ *
+ * Blocks for the duration of the tone (capped at 5 s) and reconfigures the codec to 16 kHz mono, so
+ * anything else streaming through it is interrupted — which is the point of a "beep to find the
+ * box" button.
+ *
+ * @param freq_hz Tone pitch, at least 1 Hz and no higher than half the 16 kHz rate.
+ * @param ms      Duration in milliseconds.
+ * @param volume  0-100, or >100 to leave the current volume alone.
+ */
+esp_err_t hal_audio_tone(uint32_t freq_hz, uint32_t ms, uint8_t volume);
+
 /* ---------------------------------------------------------------------------
  * PCF85063A Real-Time Clock (RTC).
  * ------------------------------------------------------------------------- */
@@ -454,6 +554,21 @@ esp_err_t hal_audio_close(void);
  * @brief Initialize PCF85063A RTC on the shared I2C bus and restore POSIX system clock if valid.
  */
 esp_err_t hal_rtc_init(void);
+
+/**
+ * @brief Read the hardware RTC as a Unix epoch.
+ *
+ * @param out_epoch Receives the chip's time, which is UTC.
+ * @return ESP_OK, ESP_ERR_INVALID_STATE when the chip holds no sane time (pre-2024), or a read error.
+ */
+esp_err_t hal_rtc_get_epoch(time_t *out_epoch);
+
+/**
+ * @brief Set the system clock and the hardware RTC together.
+ *
+ * @param epoch Unix time, at least 2024-01-01.
+ */
+esp_err_t hal_rtc_set_epoch(time_t epoch);
 
 
 #ifdef __cplusplus

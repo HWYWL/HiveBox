@@ -15,6 +15,7 @@
 idf_component_register(
     SRCS
         "board_hal.c"
+        "board_log.c"
         "board_event.c"
         "board_display.c"
         "board_touch.c"
@@ -44,6 +45,10 @@ idf_component_register(
         esp_netif
         # The management server (`board_web.c`), and the sockets under it.
         esp_http_server
+        # The network page's own tools: name resolution (`getaddrinfo`), a reachability check
+        # (`esp_ping`), and a fetch the box does itself when a page hands it a URL.
+        lwip
+        esp_http_client
         # The app's own description (name, version, build date) for `/api/system`.
         esp_app_format
         esp_event

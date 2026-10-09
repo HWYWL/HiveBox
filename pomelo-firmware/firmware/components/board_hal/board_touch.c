@@ -1,5 +1,6 @@
 #include "board_hal_internal.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_lcd_touch.h"
 #include "bsp/esp-bsp.h"
 #include "bsp/display.h"
@@ -27,6 +28,13 @@ typedef struct {
 
 static touch_cache_t s_touch_cache = {0};
 static portMUX_TYPE s_touch_spinlock = portMUX_INITIALIZER_UNLOCKED;
+
+/* When the last touch was seen, in microseconds since boot.
+ *
+ * Kept as a timestamp rather than as a flag because the question asked of it is "has anything
+ * happened recently", and the answer is a subtraction. The touch task is the only writer, so a plain
+ * 64-bit store is enough on the one core that reads it back for the idle sleep. */
+static volatile int64_t s_last_touch_us = 0;
 
 /**
  * @brief Hardware ISR callback triggered when touch INT pin asserts.
@@ -80,6 +88,8 @@ static void touch_task(void *arg)
         if (err == ESP_OK && pt_cnt > 0) {
             int32_t x = (int32_t)pt_data.x;
             int32_t y = (int32_t)pt_data.y;
+
+            s_last_touch_us = esp_timer_get_time();
 
             // Clamp coordinates to panel resolution
             if (x < 0) x = 0;
@@ -256,4 +266,44 @@ bool hal_touch_wait_event(hal_touch_event_t *out_event, uint32_t timeout_ms)
     }
     TickType_t ticks = (timeout_ms == 0) ? 0 : pdMS_TO_TICKS(timeout_ms);
     return xQueueReceive(s_touch_event_queue, out_event, ticks) == pdTRUE;
+}
+
+/**
+ * @brief Feed a synthetic touch event in, as if a finger had produced it.
+ *
+ * The web page's remote-control pad uses this: the box is being driven entirely through the same
+ * queue the panel's own touches arrive on, so the UI needs no idea that a tap came from a browser
+ * rather than the glass. Both the queue and the polled cache are updated, exactly as the sampling
+ * task would, so either style of consumer sees it.
+ */
+esp_err_t hal_touch_inject(hal_touch_event_type_t type, int32_t x, int32_t y)
+{
+    if (!s_touch_event_queue) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (x < 0) x = 0;
+    if (x >= BOARD_DISPLAY_WIDTH) x = BOARD_DISPLAY_WIDTH - 1;
+    if (y < 0) y = 0;
+    if (y >= BOARD_DISPLAY_HEIGHT) y = BOARD_DISPLAY_HEIGHT - 1;
+
+    portENTER_CRITICAL(&s_touch_spinlock);
+    s_touch_cache.touched = (type != HAL_TOUCH_EVENT_UP);
+    s_touch_cache.x = x;
+    s_touch_cache.y = y;
+    s_touch_cache.seq++;
+    portEXIT_CRITICAL(&s_touch_spinlock);
+
+    s_last_touch_us = esp_timer_get_time();
+
+    hal_touch_event_t ev = {.type = type, .x = x, .y = y};
+    // Wait a moment rather than dropping: a remote tap is a deliberate act, not a 100 Hz sample, and
+    // a full queue here would silently swallow it.
+    return (xQueueSend(s_touch_event_queue, &ev, pdMS_TO_TICKS(50)) == pdTRUE) ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
+/* Read by the idle sleep, which wants "how long since anything touched the glass" without taking an
+ * event off the queue the UI is waiting on. */
+int64_t hal_touch_last_activity_us(void)
+{
+    return s_last_touch_us;
 }
