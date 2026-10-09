@@ -201,7 +201,6 @@ impl WifiStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn the_bar_scale_is_monotone() {
         // The thresholds, from best to none, and one sample either side of each.
@@ -292,6 +291,79 @@ mod tests {
         // draws is a bar with a hole in it.
         let sum: u32 = layout.regions.iter().map(|region| region.size).sum();
         assert_eq!(sum, layout.total_bytes);
+    }
+
+    /// The address a person types, and the three cases in which there is none.
+    #[test]
+    fn a_page_has_an_address_only_when_there_is_a_network_to_reach_it_on() {
+        let connected = WifiStatus {
+            state: WifiState::Connected,
+            ssid: String::from("hive"),
+            ip: String::from("192.168.1.42"),
+            ..WifiStatus::default()
+        };
+
+        let running = WebStatus {
+            running: true,
+            port: WebStatus::DEFAULT_PORT,
+        };
+
+        // Port 80 is not spelled: it is what typing the address without one means.
+        assert_eq!(running.url(&connected).as_deref(), Some("http://192.168.1.42"));
+
+        let elsewhere = WebStatus { port: 8080, ..running };
+        assert_eq!(elsewhere.url(&connected).as_deref(), Some("http://192.168.1.42:8080"));
+
+        // Stopped, or not on a network: the same answer, because both are "do not tell someone to
+        // open this".
+        assert_eq!(WebStatus::default().url(&connected), None);
+        assert_eq!(running.url(&WifiStatus::default()), None);
+
+        // A connected status that has not been filled in yet has no address either.
+        let no_address = WifiStatus {
+            state: WifiState::Connected,
+            ..WifiStatus::default()
+        };
+        assert_eq!(running.url(&no_address), None);
+    }
+}
+
+/// Whether the management page is being served, and where.
+///
+/// `running` and `port` are one value rather than two questions because the answer to "is it up" is
+/// only usable together with "on what": a page drawn from two calls is a page that can say a server
+/// is up on the port of the one that was stopped a moment ago.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WebStatus {
+    pub running: bool,
+    /// The port it is up on. Zero while it is down, which is also what a backend that has never
+    /// been asked to start reports.
+    pub port: u16,
+}
+
+impl WebStatus {
+    /// The port a browser reaches when the address says nothing about one.
+    ///
+    /// The default because it is the one address a person can read out loud and type: an URL with
+    /// `:8080` in it is a URL that gets mistyped onto a phone keyboard.
+    pub const DEFAULT_PORT: u16 = 80;
+
+    /// The address to open, or `None` while there is nothing that could be opened.
+    ///
+    /// The rule lives here rather than in the app because it is not a preference: a server that is
+    /// down serves nothing and a box that is not on a network has no address a browser on that
+    /// network can reach, so an URL built without asking is a link that fails in the one place
+    /// (someone else's phone) where the person cannot see why.
+    pub fn url(&self, wifi: &WifiStatus) -> Option<String> {
+        if !self.running || wifi.state != WifiState::Connected || wifi.ip.is_empty() {
+            return None;
+        }
+
+        if self.port == Self::DEFAULT_PORT {
+            Some(format!("http://{}", wifi.ip))
+        } else {
+            Some(format!("http://{}:{}", wifi.ip, self.port))
+        }
     }
 }
 

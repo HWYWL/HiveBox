@@ -266,7 +266,7 @@ impl pomelo_hal::PowerBackend for CountingPower {
 
 /// A board whose power backend is [`CountingPower`].
 fn board_that_counts_restarts(restarts: Arc<AtomicUsize>) -> Arc<Board> {
-    use pomelo_hal::sim::{SimAudio, SimImu, SimInput, SimMic, SimStorage, SimWifi};
+    use pomelo_hal::sim::{SimAudio, SimImu, SimInput, SimMic, SimStorage, SimWeb, SimWifi};
 
     Arc::new(Board::from_backends(
         Box::new(CountingPower {
@@ -279,6 +279,7 @@ fn board_that_counts_restarts(restarts: Arc<AtomicUsize>) -> Arc<Board> {
         Box::new(SimImu::new()),
         Box::new(SimInput::new()),
         Box::new(SimStorage::new()),
+        Box::new(SimWeb::new()),
     ))
 }
 
@@ -590,7 +591,7 @@ fn the_battery_page_admits_when_it_has_no_temperature() {
 /// backend that has no card: `Board::from_backends` is the composition root's door, and a test is a
 /// composition root.
 fn board_with_slot(card: bool) -> Arc<Board> {
-    use pomelo_hal::sim::{SimAudio, SimImu, SimInput, SimMic, SimPower, SimStorage, SimWifi};
+    use pomelo_hal::sim::{SimAudio, SimImu, SimInput, SimMic, SimPower, SimStorage, SimWeb, SimWifi};
 
     let storage = if card {
         SimStorage::new()
@@ -606,6 +607,7 @@ fn board_with_slot(card: bool) -> Arc<Board> {
         Box::new(SimImu::new()),
         Box::new(SimInput::new()),
         Box::new(storage),
+        Box::new(SimWeb::new()),
     ))
 }
 

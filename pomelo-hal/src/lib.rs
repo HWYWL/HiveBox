@@ -9,7 +9,7 @@
 //! `firmware/pomelo-hal-esp32`, next to the C drivers it declares, and the composition root
 //! (`rust_main`) builds it and injects the resulting board into the apps.
 //!
-//! Layers, one file per hardware domain (`power`, `wifi`, `audio`, `mic`, `imu`, `storage`):
+//! Layers, one file per hardware domain (`power`, `wifi`, `audio`, `mic`, `imu`, `storage`, `web`):
 //!
 //! * [`traits`] — the hardware **interface** every platform must implement.
 //! * [`sim`]    — the desktop **simulation** backends (non-`espidf` platforms only).
@@ -37,11 +37,12 @@ pub mod sim;
 pub use board::Board;
 pub use error::HalError;
 pub use traits::{
-    AudioBackend, ImuBackend, InputBackend, MicBackend, PowerBackend, StorageBackend, WifiBackend,
+    AudioBackend, ImuBackend, InputBackend, MicBackend, PowerBackend, StorageBackend, WebBackend,
+    WifiBackend,
 };
 pub use types::{
     ApInfo, AudioMeta, FlashLayout, FlashRegion, FlashRegionKind, InputAction, ScanState,
-    SystemEvent, Vec3, VolumeInfo, VolumeKind, WifiState, WifiStatus,
+    SystemEvent, Vec3, VolumeInfo, VolumeKind, WebStatus, WifiState, WifiStatus,
 };
 pub use wifi_credentials::WifiCredentials;
 
@@ -51,11 +52,11 @@ pub mod prelude {
     pub use crate::error::HalError;
     pub use crate::traits::{
         AudioBackend, ImuBackend, InputBackend, MicBackend, PowerBackend, StorageBackend,
-        WifiBackend,
+        WebBackend, WifiBackend,
     };
     pub use crate::types::{
         ApInfo, AudioMeta, FlashLayout, FlashRegion, FlashRegionKind, InputAction, ScanState,
-        SystemEvent, Vec3, VolumeInfo, VolumeKind, WifiState, WifiStatus,
+        SystemEvent, Vec3, VolumeInfo, VolumeKind, WebStatus, WifiState, WifiStatus,
     };
     pub use crate::wifi_credentials::WifiCredentials;
 }

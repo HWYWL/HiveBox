@@ -16,6 +16,7 @@ mod input;
 mod mic;
 mod power;
 mod storage;
+mod web;
 mod wifi;
 
 pub use audio::AudioBackend;
@@ -24,4 +25,5 @@ pub use input::InputBackend;
 pub use mic::MicBackend;
 pub use power::PowerBackend;
 pub use storage::StorageBackend;
+pub use web::WebBackend;
 pub use wifi::WifiBackend;

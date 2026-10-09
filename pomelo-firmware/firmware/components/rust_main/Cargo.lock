@@ -23,6 +23,7 @@ dependencies = [
  "pomelo-widgets",
  "settings",
  "terminal",
+ "web-manager",
 ]
 
 [[package]]
@@ -1962,6 +1963,16 @@ dependencies = [
  "log",
  "once_cell",
  "pkg-config",
+]
+
+[[package]]
+name = "web-manager"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "pomelo-hal",
+ "pomelo-material-symbols",
+ "pomelo-widgets",
 ]
 
 [[package]]

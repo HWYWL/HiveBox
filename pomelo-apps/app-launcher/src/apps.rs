@@ -8,7 +8,7 @@ pub use pomelo_widgets::{AppIcon, AppMeta as Entry};
 
 include!(concat!(env!("OUT_DIR"), "/baked_icons.rs"));
 
-/// Six apps, in the order the grid shows them.
+/// Seven apps, in the order the grid shows them.
 pub const CATALOGUE: &[Entry] = &[
     // Page 1
     Entry {
@@ -47,6 +47,13 @@ pub const CATALOGUE: &[Entry] = &[
         name_zh: "音乐",
         icon: AppIcon::glyph(Icon::MUSIC_NOTE),
         accent: (60, 40, 44),
+    },
+    // Page 2, second row
+    Entry {
+        name: "Web Manager",
+        name_zh: "网页管理",
+        icon: AppIcon::glyph(Icon::PUBLIC),
+        accent: (44, 40, 78),
     },
 ];
 

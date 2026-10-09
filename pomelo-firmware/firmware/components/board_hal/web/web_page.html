@@ -1,0 +1,2299 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="HiveBox">
+<title>HiveBox 网页管理</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='15' fill='%23007aff'/%3E%3Cpath fill='%23fff' fill-rule='evenodd' d='M49 32 40.5 46.7 23.5 46.7 15 32 23.5 17.3 40.5 17.3Z M32 25.6 40 30.2 40 33.8 32 38.4 24 33.8 24 30.2Z'/%3E%3C/svg%3E">
+<script>
+/* Ahead of the first paint, so that a dark screen never flashes white. The choice is the system's
+   unless somebody has made one on this page; `light` is what the stylesheet is written in, so only
+   the other one has to be set. */
+(function () {
+  try {
+    var saved = localStorage.getItem("hivebox.theme");
+    var dark = saved ? saved === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+  } catch (error) { /* private mode: the stylesheet's own choice stands */ }
+})();
+</script>
+<style>
+/* ---------------------------------------------------------------------------
+   One file, no framework. The box serves it out of flash, where it costs nothing at run time: the
+   bytes go out of the image as they are and are never copied into RAM. Every string a person reads
+   lives in this file too, in `ERRORS` below, because the device answers in codes on purpose.
+
+   The look is the one a phone already has: grouped lists on a tinted background, a segmented control
+   at the top, sheets that come up from the bottom, one accent colour. The colours are tokens and only
+   the dark set is written out — the light set is the one the rules below are written in.
+   --------------------------------------------------------------------------- */
+:root {
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB",
+          "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  --bg: #f2f2f7;
+  --bg-blur: rgba(242,242,247,.78);
+  --card: #ffffff;
+  --fill: rgba(120,120,128,.12);
+  --fill-2: rgba(120,120,128,.22);
+  --label: #000000;
+  --label-2: rgba(60,60,67,.6);
+  --label-3: rgba(60,60,67,.3);
+  --sep: rgba(60,60,67,.16);
+  --tint: #007aff;
+  --tint-soft: rgba(0,122,255,.12);
+  --green: #34c759;
+  --orange: #ff9500;
+  --red: #ff3b30;
+  --purple: #af52de;
+  --teal: #30b0c7;
+  --indigo: #5856d6;
+  --shadow: 0 1px 2px rgba(0,0,0,.05), 0 10px 30px rgba(0,0,0,.06);
+  --shadow-sheet: 0 -2px 40px rgba(0,0,0,.2);
+  --radius: 16px;
+  --radius-sm: 11px;
+  --ease: cubic-bezier(.32,.72,0,1);
+  --blur: saturate(180%) blur(22px);
+}
+:root[data-theme="dark"] {
+  --bg: #000000;
+  --bg-blur: rgba(0,0,0,.72);
+  --card: #1c1c1e;
+  --fill: rgba(120,120,128,.24);
+  --fill-2: rgba(120,120,128,.36);
+  --label: #ffffff;
+  --label-2: rgba(235,235,245,.6);
+  --label-3: rgba(235,235,245,.32);
+  --sep: rgba(84,84,88,.65);
+  --tint: #0a84ff;
+  --tint-soft: rgba(10,132,255,.18);
+  --green: #30d158;
+  --orange: #ff9f0a;
+  --red: #ff453a;
+  --purple: #bf5af2;
+  --teal: #40c8e0;
+  --indigo: #5e5ce6;
+  --shadow: 0 1px 2px rgba(0,0,0,.5), 0 12px 30px rgba(0,0,0,.45);
+  --shadow-sheet: 0 -2px 40px rgba(0,0,0,.6);
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; padding: 0; }
+html { background: var(--bg); }
+body {
+  font: 400 15px/1.45 var(--font);
+  color: var(--label);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "tnum" 1;
+  padding-bottom: calc(24px + env(safe-area-inset-bottom));
+}
+h1, h2, h3, p { margin: 0; }
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; border: 0; background: none; }
+a { color: var(--tint); text-decoration: none; }
+[hidden] { display: none !important; }
+.num { font-variant-numeric: tabular-nums; }
+
+.wrap { max-width: 720px; margin: 0 auto; padding: 0 16px; }
+.ic {
+  width: 20px; height: 20px; flex: 0 0 auto; display: block;
+  fill: none; stroke: currentColor; stroke-width: 1.8;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+.ic.sm { width: 15px; height: 15px; }
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* --- the bar at the top: title, status, segmented control ------------------ */
+.bar {
+  position: sticky; top: 0; z-index: 30;
+  background: var(--bg-blur);
+  -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur);
+  border-bottom: .5px solid var(--sep);
+  padding-top: env(safe-area-inset-top);
+}
+.bar-in { max-width: 720px; margin: 0 auto; padding: 12px 16px 8px; }
+.head { display: flex; align-items: center; gap: 12px; }
+.mark {
+  width: 38px; height: 38px; border-radius: 11px; flex: 0 0 auto;
+  background: linear-gradient(160deg, #4ea8ff, var(--tint));
+  color: #fff; display: grid; place-items: center;
+  box-shadow: 0 4px 12px rgba(0,122,255,.28);
+}
+.mark .ic { width: 22px; height: 22px; }
+.head-txt { min-width: 0; flex: 1; }
+.head-title { font-size: 19px; font-weight: 700; letter-spacing: -.4px; }
+.head-sub { font-size: 12.5px; color: var(--label-2); display: flex; align-items: center; gap: 5px; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--label-3); flex: 0 0 auto; }
+.dot.on { background: var(--green); box-shadow: 0 0 0 3px rgba(52,199,89,.18); }
+.dot.off { background: var(--orange); }
+.icon-btn {
+  width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--fill); color: var(--label-2);
+  transition: transform .2s var(--ease), background .2s;
+}
+.icon-btn:active { transform: scale(.9); background: var(--fill-2); }
+
+.seg {
+  position: relative; display: flex; gap: 2px; margin-top: 12px;
+  background: var(--fill); border-radius: var(--radius-sm); padding: 2px;
+}
+.seg-thumb {
+  position: absolute; top: 2px; bottom: 2px; left: 0; border-radius: 9px;
+  background: var(--card); box-shadow: 0 1px 3px rgba(0,0,0,.14), 0 0 0 .5px rgba(0,0,0,.04);
+  transition: transform .32s var(--ease), width .32s var(--ease);
+}
+.seg button {
+  position: relative; flex: 1; z-index: 1; padding: 7px 4px; border-radius: 9px;
+  font-size: 13.5px; font-weight: 600; color: var(--label-2);
+  transition: color .2s;
+}
+.seg button.on { color: var(--label); }
+
+/* --- cards and grouped lists ---------------------------------------------- */
+main { padding-top: 16px; }
+.group { margin: 0 0 16px; }
+.group-title {
+  font-size: 13px; font-weight: 600; color: var(--label-2);
+  text-transform: none; padding: 0 4px 7px; letter-spacing: .2px;
+}
+.card {
+  background: var(--card); border-radius: var(--radius);
+  box-shadow: var(--shadow); overflow: hidden;
+}
+.card + .card { margin-top: 12px; }
+.row {
+  position: relative; display: flex; align-items: center; gap: 12px;
+  padding: 11px 14px; min-height: 60px; width: 100%; text-align: left;
+  transition: background .16s;
+}
+.row + .row::before {
+  content: ""; position: absolute; top: 0; left: 60px; right: 0; height: .5px; background: var(--sep);
+}
+.row.tap:active { background: var(--fill); }
+.row-main { flex: 1; min-width: 0; }
+.row-name {
+  font-size: 15.5px; font-weight: 500; letter-spacing: -.1px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.row-meta {
+  font-size: 12.5px; color: var(--label-2); margin-top: 1px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.row-val { font-size: 14.5px; color: var(--label-2); font-variant-numeric: tabular-nums; }
+.chev { color: var(--label-3); flex: 0 0 auto; }
+.tile {
+  width: 36px; height: 36px; border-radius: 10px; flex: 0 0 auto;
+  display: grid; place-items: center; color: #fff;
+  box-shadow: inset 0 -.5px 0 rgba(0,0,0,.08);
+}
+.tile .ic { width: 20px; height: 20px; }
+.t-dir     { background: linear-gradient(160deg, #5ac8fa, #0a84ff); }
+.t-image   { background: linear-gradient(160deg, #ffd166, #ff9500); }
+.t-video   { background: linear-gradient(160deg, #7d7aff, #5856d6); }
+.t-audio   { background: linear-gradient(160deg, #d17bf5, #af52de); }
+.t-code    { background: linear-gradient(160deg, #56d0e6, #30b0c7); }
+.t-text    { background: linear-gradient(160deg, #b8bfcc, #8e8e93); }
+.t-pdf     { background: linear-gradient(160deg, #ff7a6e, #ff3b30); }
+.t-archive { background: linear-gradient(160deg, #d6a86b, #a2845e); }
+.t-font    { background: linear-gradient(160deg, #7fd48a, #34c759); }
+.t-file    { background: linear-gradient(160deg, #b8bfcc, #8e8e93); }
+
+.row-more {
+  width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center;
+  color: var(--label-3); flex: 0 0 auto;
+}
+.row-more:active { background: var(--fill); }
+.pick {
+  width: 22px; height: 22px; border-radius: 50%; flex: 0 0 auto;
+  border: 1.5px solid var(--label-3); display: grid; place-items: center; color: transparent;
+}
+.pick.on { background: var(--tint); border-color: var(--tint); color: #fff; }
+/* --- buttons, fields, chips ----------------------------------------------- */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 9px 15px; border-radius: 12px; font-size: 14px; font-weight: 600;
+  background: var(--fill); color: var(--label);
+  transition: transform .18s var(--ease), opacity .18s, background .18s;
+}
+.btn:active { transform: scale(.96); opacity: .78; }
+.btn.primary { background: var(--tint); color: #fff; box-shadow: 0 2px 10px rgba(0,122,255,.3); }
+.btn.tinted { background: var(--tint-soft); color: var(--tint); }
+.btn.danger { background: rgba(255,59,48,.12); color: var(--red); }
+.btn.plain { background: transparent; color: var(--tint); }
+.btn.ghost { background: transparent; color: var(--label-2); }
+.btn.sm { padding: 6px 11px; border-radius: 10px; font-size: 13px; }
+.btn.wide { flex: 1; }
+.btn[disabled] { opacity: .45; pointer-events: none; }
+
+.bar-actions { display: flex; gap: 8px; padding: 0 0 12px; flex-wrap: wrap; }
+.chips { display: flex; gap: 8px; overflow-x: auto; padding: 2px 0 12px; scrollbar-width: none; }
+.chips::-webkit-scrollbar { display: none; }
+.chip {
+  display: flex; align-items: center; gap: 8px; padding: 9px 13px; border-radius: 13px;
+  background: var(--card); color: var(--label); box-shadow: var(--shadow); flex: 0 0 auto;
+  transition: transform .18s var(--ease);
+}
+.chip:active { transform: scale(.97); }
+.chip.on { background: var(--tint); color: #fff; box-shadow: 0 4px 14px rgba(0,122,255,.3); }
+.chip.on .chip-sub { color: rgba(255,255,255,.8); }
+.chip-name { font-size: 14px; font-weight: 600; }
+.chip-sub { font-size: 11.5px; color: var(--label-2); }
+
+.field {
+  display: flex; align-items: center; gap: 8px; background: var(--fill);
+  border-radius: var(--radius-sm); padding: 10px 12px;
+}
+.field input {
+  flex: 1; min-width: 0; border: 0; background: none; outline: none;
+  font-size: 15.5px; color: var(--label);
+}
+.field input::placeholder { color: var(--label-3); }
+input[type="search"]::-webkit-search-cancel-button { display: none; }
+
+/* --- files ---------------------------------------------------------------- */
+.pathbar { display: flex; align-items: center; gap: 8px; padding: 0 2px 12px; }
+.crumbs {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 2px;
+  overflow-x: auto; scrollbar-width: none; font-size: 14px;
+}
+.crumbs::-webkit-scrollbar { display: none; }
+.crumb { color: var(--tint); font-weight: 500; padding: 3px 4px; border-radius: 7px; white-space: nowrap; }
+.crumb:active { background: var(--tint-soft); }
+.crumb.last { color: var(--label-2); font-weight: 600; pointer-events: none; }
+.crumb-sep { color: var(--label-3); flex: 0 0 auto; }
+.tools { display: flex; align-items: center; gap: 8px; padding: 0 0 10px; }
+.tools .field { flex: 1; }
+
+.list { min-height: 80px; }
+.sel-on .row-more { display: none; }
+.sel-on .row { padding-left: 10px; }
+.empty { padding: 40px 20px; text-align: center; color: var(--label-2); }
+.empty .ic { width: 42px; height: 42px; margin: 0 auto 12px; color: var(--label-3); }
+.empty-title { font-size: 15.5px; font-weight: 600; color: var(--label); margin-bottom: 4px; }
+.empty-note { font-size: 13px; }
+
+.storage { padding: 12px 14px 14px; }
+.storage-head { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--label-2); margin-bottom: 7px; }
+.meter { height: 7px; border-radius: 4px; background: var(--fill); overflow: hidden; }
+.meter i { display: block; height: 100%; border-radius: 4px; background: var(--tint); transition: width .5s var(--ease); }
+.meter i.warn { background: var(--orange); }
+.meter i.full { background: var(--red); }
+.meter.lg { height: 10px; border-radius: 6px; }
+
+.sk { padding: 14px; display: flex; gap: 12px; align-items: center; }
+.sk i, .sk b { display: block; background: linear-gradient(90deg, var(--fill), var(--fill-2), var(--fill));
+  background-size: 200% 100%; animation: shimmer 1.4s infinite; border-radius: 8px; }
+.sk i { width: 36px; height: 36px; flex: 0 0 auto; }
+.sk b { height: 11px; margin: 5px 0; }
+.sk .l1 { width: 55%; } .sk .l2 { width: 30%; height: 9px; }
+@keyframes shimmer { to { background-position: -200% 0; } }
+
+/* --- selection bar, uploader, drop target --------------------------------- */
+.selbar {
+  position: fixed; z-index: 40; left: 12px; right: 12px;
+  bottom: calc(12px + env(safe-area-inset-bottom));
+  max-width: 696px; margin: 0 auto;
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  background: var(--bg-blur); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur);
+  border-radius: 15px; box-shadow: var(--shadow-sheet), 0 0 0 .5px var(--sep);
+  animation: rise .3s var(--ease);
+}
+.selbar-count { flex: 1; font-size: 13.5px; font-weight: 600; padding-left: 6px; }
+
+.uploader {
+  position: fixed; z-index: 41; right: 12px; width: min(370px, calc(100vw - 24px));
+  bottom: calc(12px + env(safe-area-inset-bottom));
+  background: var(--bg-blur); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur);
+  border-radius: 15px; box-shadow: var(--shadow-sheet), 0 0 0 .5px var(--sep);
+  overflow: hidden; animation: rise .34s var(--ease);
+}
+.up-head { display: flex; align-items: center; gap: 8px; padding: 11px 12px; }
+.up-head .t { flex: 1; font-size: 13.5px; font-weight: 700; }
+.up-list { max-height: 44vh; overflow-y: auto; }
+.up-item { display: flex; align-items: center; gap: 10px; padding: 8px 12px; }
+.up-item + .up-item { border-top: .5px solid var(--sep); }
+.up-info { flex: 1; min-width: 0; }
+.up-name { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.up-meta { font-size: 11.5px; color: var(--label-2); font-variant-numeric: tabular-nums; }
+.up-bar { height: 3px; border-radius: 2px; background: var(--fill); margin-top: 5px; overflow: hidden; }
+.up-bar i { display: block; height: 100%; background: var(--tint); width: 0; transition: width .25s linear; }
+.up-item.done .up-bar i { background: var(--green); }
+.up-item.error .up-bar i { background: var(--red); }
+.up-item.skip .up-bar i { background: var(--label-3); }
+.up-x { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; color: var(--label-3); flex: 0 0 auto; }
+.up-x:active { background: var(--fill); }
+.up-foot { display: flex; gap: 8px; padding: 10px 12px calc(12px + env(safe-area-inset-bottom)); border-top: .5px solid var(--sep); }
+
+.dropzone {
+  position: fixed; inset: 0; z-index: 60; display: none;
+  place-items: center; background: var(--bg-blur);
+  -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur);
+}
+.dropzone.on { display: grid; }
+.dropzone-in {
+  border: 2px dashed var(--tint); border-radius: 24px; padding: 40px 34px; text-align: center;
+  background: var(--tint-soft); color: var(--tint); margin: 20px; max-width: 420px;
+}
+.dropzone-in .ic { width: 46px; height: 46px; margin: 0 auto 12px; }
+.dropzone-in b { display: block; font-size: 17px; margin-bottom: 4px; }
+.dropzone-in span { font-size: 13px; color: var(--label-2); word-break: break-all; }
+
+/* --- wifi and system ------------------------------------------------------ */
+.sig { display: flex; align-items: flex-end; gap: 2px; height: 16px; flex: 0 0 auto; }
+.sig i { width: 3.5px; border-radius: 2px; background: var(--label-3); }
+.sig i:nth-child(1) { height: 5px; } .sig i:nth-child(2) { height: 8px; }
+.sig i:nth-child(3) { height: 12px; } .sig i:nth-child(4) { height: 16px; }
+.sig.s1 i:nth-child(-n+1), .sig.s2 i:nth-child(-n+2),
+.sig.s3 i:nth-child(-n+3), .sig.s4 i:nth-child(-n+4) { background: var(--green); }
+.sig.s1 i:nth-child(-n+1) { background: var(--orange); }
+.sig.on-tint i { background: rgba(255,255,255,.35); }
+.sig.on-tint.s1 i:nth-child(-n+1), .sig.on-tint.s2 i:nth-child(-n+2),
+.sig.on-tint.s3 i:nth-child(-n+3), .sig.on-tint.s4 i:nth-child(-n+4) { background: #fff; }
+
+.radar {
+  width: 60px; height: 60px; border-radius: 50%; margin: 6px auto 10px;
+  border: 2px solid var(--tint-soft); position: relative;
+}
+.radar::after {
+  content: ""; position: absolute; inset: 0; border-radius: 50%;
+  border: 2px solid var(--tint); border-top-color: transparent; border-right-color: transparent;
+  animation: spin 1.1s linear infinite;
+}
+
+.hero { padding: 18px; display: flex; align-items: center; gap: 14px; }
+.hero .tile { width: 52px; height: 52px; border-radius: 15px; }
+.hero .tile .ic { width: 28px; height: 28px; }
+.hero-name { font-size: 18px; font-weight: 700; letter-spacing: -.3px; }
+.hero-sub { font-size: 12.5px; color: var(--label-2); margin-top: 2px; }
+.kv { display: flex; justify-content: space-between; gap: 12px; padding: 10px 14px; font-size: 14px; }
+.kv + .kv { border-top: .5px solid var(--sep); }
+.kv .k { color: var(--label-2); }
+.kv .v { text-align: right; font-variant-numeric: tabular-nums; word-break: break-all; }
+.kv .v.mono { font-family: var(--mono); font-size: 12.5px; }
+
+.battery { padding: 16px 14px; }
+.bat-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
+.bat-num { font-size: 30px; font-weight: 700; letter-spacing: -1px; font-variant-numeric: tabular-nums; }
+.bat-tag { font-size: 13px; color: var(--label-2); }
+.bat-tag.chg { color: var(--green); font-weight: 600; }
+
+.stats { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.stat { background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow); padding: 14px; }
+.stat-k { font-size: 12.5px; color: var(--label-2); display: flex; align-items: center; gap: 5px; }
+.stat-v { font-size: 21px; font-weight: 700; letter-spacing: -.5px; margin-top: 6px; font-variant-numeric: tabular-nums; }
+.stat-n { font-size: 11.5px; color: var(--label-3); margin-top: 2px; }
+
+/* --- sheets, dialogs and toasts ------------------------------------------- */
+dialog {
+  border: 0; padding: 0; background: transparent; color: var(--label);
+  max-width: none; max-height: none;
+}
+dialog::backdrop { background: rgba(0,0,0,.34); -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px); }
+.sheet {
+  margin: auto auto 0; width: 100%; padding: 0;
+}
+.sheet-in {
+  background: var(--card); border-radius: 22px 22px 0 0;
+  padding: 8px 16px calc(16px + env(safe-area-inset-bottom));
+  box-shadow: var(--shadow-sheet); animation: rise .34s var(--ease);
+  max-height: 88vh; overflow-y: auto;
+}
+.grab { width: 38px; height: 5px; border-radius: 3px; background: var(--fill-2); margin: 2px auto 12px; }
+.sheet-title { font-size: 17px; font-weight: 700; text-align: center; letter-spacing: -.3px; }
+.sheet-note { font-size: 13px; color: var(--label-2); text-align: center; margin-top: 5px; word-break: break-all; }
+.sheet-body { margin-top: 14px; }
+.sheet-actions { display: flex; gap: 10px; margin-top: 16px; }
+.sheet-actions .btn { padding: 12px; border-radius: 13px; font-size: 15px; }
+.acts { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
+.act {
+  display: flex; align-items: center; gap: 12px; padding: 13px 14px; border-radius: 13px;
+  background: var(--fill); font-size: 15.5px; font-weight: 500; text-align: left;
+  transition: transform .18s var(--ease);
+}
+.act:active { transform: scale(.98); }
+.act.danger { color: var(--red); }
+.act .ic { color: var(--label-2); }
+.act.danger .ic { color: var(--red); }
+.act-desc { font-size: 12px; color: var(--label-2); font-weight: 400; margin-top: 2px; }
+.remember { display: flex; align-items: center; gap: 10px; padding: 12px 4px 0; font-size: 13.5px; color: var(--label-2); }
+.switch {
+  width: 46px; height: 28px; border-radius: 15px; background: var(--fill-2); position: relative;
+  flex: 0 0 auto; transition: background .25s var(--ease);
+}
+.switch::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 24px; height: 24px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.25); transition: transform .25s var(--ease);
+}
+.switch.on { background: var(--green); }
+.switch.on::after { transform: translateX(18px); }
+
+dialog.full { margin: auto; width: 100%; }
+.pv {
+  background: var(--card); display: flex; flex-direction: column;
+  height: 100dvh; animation: rise .3s var(--ease);
+}
+.pv-head {
+  display: flex; align-items: center; gap: 10px; padding: calc(10px + env(safe-area-inset-top)) 12px 10px;
+  border-bottom: .5px solid var(--sep);
+}
+.pv-title { flex: 1; min-width: 0; }
+.pv-title b { display: block; font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pv-title span { font-size: 12px; color: var(--label-2); }
+.pv-body { flex: 1; overflow: auto; display: grid; place-items: center; background: var(--bg); }
+.pv-body.pre { display: block; padding: 0; }
+.pv-body img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.pv-body img.zoom { max-width: none; max-height: none; width: 200%; cursor: zoom-out; }
+.pv-body pre {
+  margin: 0; padding: 14px; font: 12.5px/1.6 var(--mono); color: var(--label);
+  white-space: pre; tab-size: 4; min-height: 100%;
+}
+.pv-body pre.wrap { white-space: pre-wrap; word-break: break-word; }
+.pv-body audio, .pv-body video { max-width: 100%; max-height: 100%; }
+.pv-body iframe { width: 100%; height: 100%; border: 0; background: #fff; }
+.pv-note { font-size: 12.5px; color: var(--label-2); text-align: center; }
+.pv-void { padding: 30px; text-align: center; color: var(--label-2); }
+.pv-void .ic { width: 46px; height: 46px; margin: 0 auto 12px; color: var(--label-3); }
+.pv-foot { display: flex; gap: 8px; padding: 10px 12px calc(12px + env(safe-area-inset-bottom)); border-top: .5px solid var(--sep); }
+
+.toasts {
+  position: fixed; z-index: 90; left: 0; right: 0;
+  bottom: calc(20px + env(safe-area-inset-bottom));
+  display: flex; flex-direction: column; align-items: center; gap: 8px; pointer-events: none;
+}
+.toast {
+  display: flex; align-items: center; gap: 9px; max-width: min(420px, calc(100vw - 32px));
+  padding: 11px 16px; border-radius: 26px; font-size: 14px; font-weight: 500;
+  background: var(--bg-blur); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur);
+  box-shadow: var(--shadow-sheet), 0 0 0 .5px var(--sep);
+  animation: pop .3s var(--ease);
+}
+.toast .ic { color: var(--tint); }
+.toast.good .ic { color: var(--green); }
+.toast.bad .ic { color: var(--red); }
+.toast.leaving { animation: popout .25s var(--ease) forwards; }
+@keyframes rise { from { transform: translateY(18px); opacity: 0; } }
+@keyframes pop { from { transform: scale(.94) translateY(8px); opacity: 0; } }
+@keyframes popout { to { transform: scale(.96); opacity: 0; } }
+
+@media (min-width: 700px) {
+  .sheet { margin: auto; width: min(420px, 100%); }
+  .sheet-in { border-radius: 20px; padding-bottom: 16px; }
+  dialog.full { width: min(960px, 92vw); }
+  .pv { height: min(88vh, 900px); border-radius: 18px; overflow: hidden; }
+  .pv-head { padding-top: 10px; }
+  .pv-foot { padding-bottom: 10px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
+</style>
+</head>
+<body>
+<!-- The glyphs. Drawn once here and used by reference: an icon is a `<use>`, so the markup stays about
+     what a thing is rather than about its outline. -->
+<svg aria-hidden="true" style="position:absolute;width:0;height:0;overflow:hidden"><defs>
+<symbol id="i-box" viewBox="0 0 24 24"><path d="M12 2.9 20.6 7.5v9L12 21.1 3.4 16.5v-9Z"/><path d="M3.4 7.5 12 12.1l8.6-4.6"/><path d="M12 12.1v9"/></symbol>
+<symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7.6A2.6 2.6 0 0 1 5.6 5h2.9c.7 0 1.3.3 1.8.8l1 1.2h7.1A2.6 2.6 0 0 1 21 9.6v6.8A2.6 2.6 0 0 1 18.4 19H5.6A2.6 2.6 0 0 1 3 16.4Z"/></symbol>
+<symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2.4"/><circle cx="8.6" cy="9.6" r="1.6"/><path d="m3.6 16.4 4.6-4.4 3.9 3.7 2.6-2.5 5.7 5.3"/></symbol>
+<symbol id="i-video" viewBox="0 0 24 24"><rect x="2.5" y="6" width="13.5" height="12" rx="2.4"/><path d="m16.5 12 5-3.2v6.4Z"/></symbol>
+<symbol id="i-music" viewBox="0 0 24 24"><path d="M9 17.6V6.4l9-2v11.2"/><circle cx="6.9" cy="17.8" r="2.2"/><circle cx="15.9" cy="15.8" r="2.2"/></symbol>
+<symbol id="i-code" viewBox="0 0 24 24"><path d="m9 7.5-4.5 4.5L9 16.5"/><path d="m15 7.5 4.5 4.5L15 16.5"/><path d="M13.2 4.6 10.8 19.4"/></symbol>
+<symbol id="i-file" viewBox="0 0 24 24"><path d="M6.2 3.5h7.3l4.3 4.4v12.6H6.2Z"/><path d="M13.3 3.6v4.4h4.4"/></symbol>
+<symbol id="i-archive" viewBox="0 0 24 24"><path d="M3.6 5h16.8v3.4H3.6Z"/><path d="M5.4 8.4v11.1h13.2V8.4"/><path d="M10.4 12h3.2"/></symbol>
+<symbol id="i-font" viewBox="0 0 24 24"><path d="m5 19 7-14 7 14"/><path d="M8.1 14.4h7.8"/></symbol>
+<symbol id="i-dots" viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="5.4" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="18.6" cy="12" r="1.7"/></symbol>
+<symbol id="i-chev" viewBox="0 0 24 24"><path d="m9.5 5.8 6.2 6.2-6.2 6.2"/></symbol>
+<symbol id="i-chev-d" viewBox="0 0 24 24"><path d="m6 9.5 6 6 6-6"/></symbol>
+<symbol id="i-back" viewBox="0 0 24 24"><path d="M19.5 12H4.8"/><path d="m11 5.5-6.3 6.5L11 18.5"/></symbol>
+<symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3.6v11"/><path d="m7.4 10.2 4.6 4.5 4.6-4.5"/><path d="M4.6 19.6h14.8"/></symbol>
+<symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16.6V4.6"/><path d="m7.4 9.2 4.6-4.6 4.6 4.6"/><path d="M4.6 19.6h14.8"/></symbol>
+<symbol id="i-trash" viewBox="0 0 24 24"><path d="M4.6 6.6h14.8"/><path d="M9.4 6.6V4.8A1.6 1.6 0 0 1 11 3.2h2a1.6 1.6 0 0 1 1.6 1.6v1.8"/><path d="m6.7 6.6.8 13a1.6 1.6 0 0 0 1.6 1.5h5.8a1.6 1.6 0 0 0 1.6-1.5l.8-13"/><path d="M10.4 10.6v6.8M13.6 10.6v6.8"/></symbol>
+<symbol id="i-pencil" viewBox="0 0 24 24"><path d="m4 20 1-4.3L16.1 4.5a1.9 1.9 0 0 1 2.7 0l.7.7a1.9 1.9 0 0 1 0 2.7L8.3 19Z"/><path d="m14.7 6 3.3 3.3"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.3"/><path d="m15.5 15.5 4.3 4.3"/></symbol>
+<symbol id="i-x" viewBox="0 0 24 24"><path d="m6.6 6.6 10.8 10.8M17.4 6.6 6.6 17.4"/></symbol>
+<symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12.4A8 8 0 1 1 17.6 6"/><path d="M20.4 4.2v5.6H15"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5.2v13.6M5.2 12h13.6"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.4 4.7 4.6L19 7"/></symbol>
+<symbol id="i-wifi" viewBox="0 0 24 24"><path d="M3.6 8.7a12.7 12.7 0 0 1 16.8 0"/><path d="M6.7 12a8.2 8.2 0 0 1 10.6 0"/><path d="M9.7 15.2a3.9 3.9 0 0 1 4.6 0"/><circle cx="12" cy="18.7" r="1" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.2" width="14" height="10.3" rx="2.4"/><path d="M8.4 10.2V7.8a3.6 3.6 0 0 1 7.2 0v2.4"/></symbol>
+<symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.6 12S6.4 5.6 12 5.6 21.4 12 21.4 12 17.6 18.4 12 18.4 2.6 12 2.6 12Z"/><circle cx="12" cy="12" r="2.9"/></symbol>
+<symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M4 4.5 20 19.5"/><path d="M9.4 6.2A9.5 9.5 0 0 1 12 5.9c5.6 0 9.4 6.1 9.4 6.1a17 17 0 0 1-3.3 3.9"/><path d="M6.2 8.1A17 17 0 0 0 2.6 12s3.8 6.1 9.4 6.1a9.6 9.6 0 0 0 3.7-.7"/><path d="M10.2 10.3a2.9 2.9 0 0 0 4 3.9"/></symbol>
+<symbol id="i-battery" viewBox="0 0 24 24"><rect x="2.6" y="7.6" width="15.4" height="8.8" rx="2.6"/><path d="M20.4 11v2"/><path d="M5.6 10.6h4.6v2.8H5.6Z" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-cpu" viewBox="0 0 24 24"><rect x="6.6" y="6.6" width="10.8" height="10.8" rx="2.2"/><path d="M10 3.4v3.2M14 3.4v3.2M10 17.4v3.2M14 17.4v3.2M3.4 10h3.2M3.4 14h3.2M17.4 10h3.2M17.4 14h3.2"/></symbol>
+<symbol id="i-disk" viewBox="0 0 24 24"><rect x="4.6" y="4.2" width="14.8" height="15.6" rx="2.4"/><path d="M8 4.4v5h8v-5"/><path d="M8.6 15.4h6.8"/></symbol>
+<symbol id="i-power" viewBox="0 0 24 24"><path d="M12 3.4v8.2"/><path d="M7 6.6a8 8 0 1 0 10 0"/></symbol>
+<symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.1"/><path d="M12 2.6v2.2M12 19.2v2.2M4.4 4.4l1.6 1.6M18 18l1.6 1.6M2.6 12h2.2M19.2 12h2.2M4.4 19.6 6 18M18 6l1.6-1.6"/></symbol>
+<symbol id="i-moon" viewBox="0 0 24 24"><path d="M20.2 14.6A8.6 8.6 0 0 1 9.4 3.8a8.6 8.6 0 1 0 10.8 10.8Z"/></symbol>
+<symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6"/><path d="M12 11.2v5.2"/><circle cx="12" cy="8.2" r="1" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3.6 21 19.8H3Z"/><path d="M12 9.6v4.4"/><circle cx="12" cy="17" r="1" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.6" y="8.6" width="11" height="11" rx="2.4"/><path d="M15.4 8.6V6.4A2.4 2.4 0 0 0 13 4H6.4A2.4 2.4 0 0 0 4 6.4V13a2.4 2.4 0 0 0 2.4 2.4h2.2"/></symbol>
+<symbol id="i-folder-plus" viewBox="0 0 24 24"><path d="M3 7.6A2.6 2.6 0 0 1 5.6 5h2.9c.7 0 1.3.3 1.8.8l1 1.2h7.1A2.6 2.6 0 0 1 21 9.6v6.8A2.6 2.6 0 0 1 18.4 19H5.6A2.6 2.6 0 0 1 3 16.4Z"/><path d="M12 11.4v4.6M9.7 13.7h4.6"/></symbol>
+<symbol id="i-cloud" viewBox="0 0 24 24"><path d="M7.2 18.6h9.6a4.1 4.1 0 0 0 .3-8.2 5.6 5.6 0 0 0-10.7-1A3.4 3.4 0 0 0 7.2 18.6Z"/></symbol>
+<symbol id="i-sort" viewBox="0 0 24 24"><path d="M4 7h16M6.8 12h10.4M10 17h4"/></symbol>
+<symbol id="i-link" viewBox="0 0 24 24"><path d="M10.2 13.8a3.6 3.6 0 0 0 5.1 0l3-3a3.6 3.6 0 0 0-5.1-5.1l-1.4 1.4"/><path d="M13.8 10.2a3.6 3.6 0 0 0-5.1 0l-3 3a3.6 3.6 0 0 0 5.1 5.1l1.4-1.4"/></symbol>
+</defs></svg>
+
+<header class="bar">
+  <div class="bar-in">
+    <div class="head">
+      <div class="mark"><svg class="ic"><use href="#i-box"/></svg></div>
+      <div class="head-txt">
+        <div class="head-title">HiveBox</div>
+        <div class="head-sub"><span class="dot" id="statDot"></span><span id="statText">正在读取设备状态…</span></div>
+      </div>
+      <button class="icon-btn" id="themeBtn" aria-label="切换外观">
+        <svg class="ic"><use href="#i-moon" id="themeIcon"/></svg>
+      </button>
+    </div>
+    <nav class="seg" id="seg">
+      <div class="seg-thumb" id="segThumb"></div>
+      <button data-view="files" class="on">文件</button>
+      <button data-view="wifi">网络</button>
+      <button data-view="system">设备</button>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <section id="view-files">
+    <div class="chips" id="volumes"></div>
+    <div class="pathbar">
+      <div class="crumbs" id="crumbs"></div>
+      <button class="icon-btn" id="refreshBtn" aria-label="刷新"><svg class="ic sm"><use href="#i-refresh"/></svg></button>
+    </div>
+    <div class="tools">
+      <label class="field">
+        <svg class="ic sm"><use href="#i-search"/></svg>
+        <input id="search" type="search" placeholder="搜索这个文件夹里的文件" autocomplete="off" spellcheck="false">
+      </label>
+      <button class="icon-btn" id="sortBtn" aria-label="排序"><svg class="ic sm"><use href="#i-sort"/></svg></button>
+    </div>
+    <div class="bar-actions">
+      <button class="btn primary" id="upBtn"><svg class="ic sm"><use href="#i-upload"/></svg>上传文件</button>
+      <button class="btn tinted" id="upDirBtn"><svg class="ic sm"><use href="#i-folder-plus"/></svg>上传文件夹</button>
+      <button class="btn tinted" id="mkdirBtn"><svg class="ic sm"><use href="#i-plus"/></svg>新建文件夹</button>
+      <button class="btn" id="selectBtn"><svg class="ic sm"><use href="#i-check"/></svg>选择</button>
+    </div>
+    <div class="card"><div class="list" id="list"></div></div>
+    <div class="card storage" id="storage" hidden></div>
+  </section>
+
+  <section id="view-wifi" hidden>
+    <div class="group">
+      <div class="group-title">当前连接</div>
+      <div class="card" id="wifiNow"></div>
+    </div>
+    <div class="group">
+      <div class="group-title">附近的网络</div>
+      <div class="card" id="wifiList"></div>
+      <div class="bar-actions" style="padding-top:12px">
+        <button class="btn tinted" id="scanBtn"><svg class="ic sm"><use href="#i-refresh"/></svg>扫描附近的网络</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="view-system" hidden>
+    <div class="card hero" id="hero"></div>
+    <div class="group" style="margin-top:16px"><div class="card" id="sysInfo"></div></div>
+    <div class="group">
+      <div class="group-title">存储</div>
+      <div class="card" id="sysStorage"></div>
+    </div>
+    <div class="bar-actions">
+      <button class="btn" id="sysRefresh"><svg class="ic sm"><use href="#i-refresh"/></svg>刷新</button>
+      <button class="btn danger" id="rebootBtn"><svg class="ic sm"><use href="#i-power"/></svg>重启设备</button>
+    </div>
+  </section>
+</main>
+
+<div class="selbar" id="selbar" hidden>
+  <span class="selbar-count" id="selCount">已选择 0 项</span>
+  <button class="btn sm" id="selAll">全选</button>
+  <button class="btn sm tinted" id="selDownload">下载</button>
+  <button class="btn sm danger" id="selDelete">删除</button>
+  <button class="btn sm primary" id="selDone">完成</button>
+</div>
+
+<div class="uploader" id="uploader" hidden>
+  <div class="up-head">
+    <span class="t" id="upTitle">上传中</span>
+    <button class="icon-btn" id="upHide" aria-label="收起"><svg class="ic sm"><use href="#i-chev-d"/></svg></button>
+  </div>
+  <div class="up-list" id="upList"></div>
+  <div class="up-foot" id="upFoot" hidden>
+    <button class="btn sm tinted" id="upRetry">重试失败的</button>
+    <button class="btn sm primary" id="upDone">完成</button>
+  </div>
+</div>
+
+<div class="dropzone" id="dropzone">
+  <div class="dropzone-in">
+    <svg class="ic"><use href="#i-cloud"/></svg>
+    <b>松手即上传</b>
+    <span id="dropPath">/internal</span>
+  </div>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<input type="file" id="fileInput" multiple hidden>
+<input type="file" id="dirInput" webkitdirectory hidden>
+
+<!-- One sheet per shape of question, so a question is markup that already exists rather than markup that
+     is built and thrown away. `method="dialog"` is what makes Esc and the return key mean "cancel" and
+     "yes" without a line of code. -->
+<dialog id="dlgPrompt" class="sheet">
+  <form method="dialog" class="sheet-in">
+    <div class="grab"></div>
+    <h3 class="sheet-title" id="pTitle">标题</h3>
+    <p class="sheet-note" id="pNote" hidden></p>
+    <div class="sheet-body">
+      <label class="field">
+        <input id="pInput" type="text" autocomplete="off" autocapitalize="off" spellcheck="false">
+        <button type="button" class="icon-btn" id="pEye" hidden aria-label="显示密码"><svg class="ic sm"><use href="#i-eye"/></svg></button>
+      </label>
+    </div>
+    <div class="sheet-actions">
+      <button type="button" class="btn wide" id="pCancel">取消</button>
+      <button type="submit" class="btn primary wide" id="pOk" value="ok">确定</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlgConfirm" class="sheet">
+  <form method="dialog" class="sheet-in">
+    <div class="grab"></div>
+    <h3 class="sheet-title" id="cTitle">确认</h3>
+    <p class="sheet-note" id="cNote" hidden></p>
+    <div class="remember" id="cRemember" hidden>
+      <span class="switch" id="cSwitch"></span><span id="cRememberText"></span>
+    </div>
+    <div class="sheet-actions">
+      <button type="button" class="btn wide" id="cCancel">取消</button>
+      <button type="submit" class="btn wide" id="cOk" value="ok">好</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlgActions" class="sheet">
+  <div class="sheet-in">
+    <div class="grab"></div>
+    <h3 class="sheet-title" id="aTitle">选择操作</h3>
+    <p class="sheet-note" id="aNote" hidden></p>
+    <div class="acts" id="aList"></div>
+    <div class="remember" id="aRemember" hidden>
+      <span class="switch" id="aSwitch"></span><span id="aRememberText"></span>
+    </div>
+    <div class="sheet-actions">
+      <button type="button" class="btn wide" id="aCancel">取消</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="dlgPreview" class="full">
+  <div class="pv">
+    <div class="pv-head">
+      <button class="icon-btn" id="pvBack" aria-label="关闭"><svg class="ic sm"><use href="#i-back"/></svg></button>
+      <div class="pv-title"><b id="pvName"></b><span id="pvMeta"></span></div>
+      <button class="icon-btn" id="pvZoom" aria-label="缩放" hidden><svg class="ic sm"><use href="#i-search"/></svg></button>
+      <button class="icon-btn" id="pvClose" aria-label="关闭"><svg class="ic sm"><use href="#i-x"/></svg></button>
+    </div>
+    <div class="pv-body" id="pvBody"></div>
+    <div class="pv-foot">
+      <button class="btn wide tinted" id="pvDownload"><svg class="ic sm"><use href="#i-download"/></svg>下载</button>
+      <button class="btn wide" id="pvRename"><svg class="ic sm"><use href="#i-pencil"/></svg>重命名</button>
+      <button class="btn wide danger" id="pvDelete"><svg class="ic sm"><use href="#i-trash"/></svg>删除</button>
+    </div>
+  </div>
+</dialog>
+
+<script>
+"use strict";
+
+/* ---------------------------------------------------------------------------
+   This file owns every word a person reads. The box answers with codes — `already_exists`,
+   `no_storage`, `scan_failed` — on purpose, so that the wording of an error can be changed here,
+   in a file, without a firmware build. A code that is not in the table is shown as it came rather
+   than swallowed: an answer nobody expected is worth seeing.
+   --------------------------------------------------------------------------- */
+const ERRORS = {
+  bad_request: "设备没看懂这个请求",
+  not_found: "设备上没有这个路径",
+  too_big: "文件太大，放不下",
+  no_storage: "存储不可用",
+  no_such_file: "文件已经不在了",
+  no_such_directory: "文件夹已经不在了",
+  already_exists: "已经存在同名的项",
+  directory_not_empty: "文件夹不是空的",
+  mkdir_failed: "新建文件夹失败",
+  rename_failed: "重命名失败",
+  remove_failed: "删除失败",
+  write_failed: "写入失败，多半是空间不够",
+  upload_incomplete: "上传中断了，文件没有保存",
+  busy: "设备忙，等一下再试",
+  wifi_unavailable: "无线网络不可用",
+  radio_failed: "无线开关失败",
+  scan_failed: "扫描失败",
+  connect_failed: "连接失败，检查一下密码",
+  disconnect_failed: "断开失败",
+  save_failed: "保存失败",
+  restart_failed: "重启失败",
+  network: "连不上设备，看看是否还在同一个网络里"
+};
+const RESET_REASONS = {
+  power_on: "上电启动", external: "外部复位", software: "软件重启", panic: "程序异常",
+  interrupt_watchdog: "中断看门狗", task_watchdog: "任务看门狗", watchdog: "看门狗",
+  deep_sleep: "深睡唤醒", brownout: "供电跌落", sdio: "SDIO", unknown: "未知"
+};
+const WIFI_STATE = {
+  connected: "已连接", connecting: "正在连接…", scanning: "正在扫描…", disconnected: "未连接"
+};
+const SCAN_STATE = { idle: "还没有扫描过", scanning: "正在扫描…", done: "", error: "扫描失败" };
+
+const $ = (id) => document.getElementById(id);
+const KB = 1024, MB = KB * 1024, GB = MB * 1024;
+
+const state = {
+  view: "files",
+  path: "/internal",
+  entries: [],
+  shown: [],
+  roots: ["/internal"],
+  volumes: [],
+  info: null,            // the last /api/files answer: mount, filesystem, total, free, more
+  system: null,
+  wifi: null,
+  scan: null,
+  query: "",
+  sort: { key: "name", dir: 1 },
+  select: false,
+  picked: new Set(),
+  loading: false,
+  booted: 0,             // Date.now() minus the uptime, so the clock in the hero keeps ticking
+  transfers: [],
+  job: 0,
+  conflict: { asked: false, choice: null, counter: 0 }
+};
+
+/* --- the small things ----------------------------------------------------- */
+function esc(text) {
+  return String(text == null ? "" : text).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function fmtSize(bytes) {
+  if (bytes == null || isNaN(bytes)) return "—";
+  if (bytes < KB) return bytes + " B";
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / KB, unit = 0;
+  while (value >= KB && unit < units.length - 1) { value /= KB; unit++; }
+  return (value < 10 ? value.toFixed(1) : Math.round(value)) + " " + units[unit];
+}
+
+function fmtSpeed(bytesPerSecond) {
+  return bytesPerSecond > 0 ? fmtSize(Math.round(bytesPerSecond)) + "/s" : "";
+}
+
+function fmtUptime(seconds) {
+  const s = Math.max(0, Math.floor(seconds));
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60), rest = s % 60;
+  if (d) return d + " 天 " + h + " 小时";
+  if (h) return h + " 小时 " + m + " 分";
+  if (m) return m + " 分 " + rest + " 秒";
+  return rest + " 秒";
+}
+
+function baseName(path) {
+  const parts = String(path).split("/").filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : "/";
+}
+
+function parentOf(path) {
+  const cut = String(path).replace(/\/+$/, "").lastIndexOf("/");
+  return cut <= 0 ? "/" : path.slice(0, cut);
+}
+
+function joinPath(directory, name) {
+  return (directory === "/" ? "" : directory.replace(/\/+$/, "")) + "/" + name;
+}
+
+function toast(message, kind) {
+  const box = $("toasts");
+  const node = document.createElement("div");
+  node.className = "toast " + (kind || "");
+  const icon = kind === "bad" ? "i-alert" : kind === "good" ? "i-check" : "i-info";
+  node.innerHTML = '<svg class="ic sm"><use href="#' + icon + '"/></svg><span>' + esc(message) + "</span>";
+  box.appendChild(node);
+  while (box.children.length > 3) box.removeChild(box.firstChild);
+  setTimeout(() => {
+    node.classList.add("leaving");
+    setTimeout(() => node.remove(), 260);
+  }, kind === "bad" ? 4600 : 2800);
+}
+
+/* A request that never arrives is not an error the box reported to anybody, so it is worded like one:
+   the page says it cannot reach the box, and the caller decides whether that is worth saying out loud. */
+async function api(endpoint, params, method) {
+  const query = params ? "?" + new URLSearchParams(params).toString() : "";
+  let response;
+  try {
+    response = await fetch(endpoint + query, { method: method || "GET", cache: "no-store" });
+  } catch (error) {
+    const offline = new Error(ERRORS.network);
+    offline.offline = true;
+    throw offline;
+  }
+  let data = {};
+  try { data = await response.json(); } catch (error) { /* see the note in board_web.c: the box always answers JSON */ }
+  if (!response.ok || data.error) {
+    const failure = new Error(ERRORS[data.error] || "设备返回了 " + (data.error || response.status));
+    failure.code = data.error || "http_" + response.status;
+    throw failure;
+  }
+  return data;
+}
+
+/* --- what a file is ------------------------------------------------------- */
+const EXT_KIND = {
+  image: ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "ico", "heic", "heif", "avif", "tiff"],
+  video: ["mp4", "webm", "mov", "m4v", "mkv", "avi", "3gp", "ts"],
+  audio: ["mp3", "wav", "flac", "m4a", "aac", "ogg", "opus", "amr", "wma"],
+  code: ["js", "mjs", "ts", "tsx", "jsx", "rs", "c", "h", "cpp", "hpp", "cc", "py", "sh", "ps1",
+         "json", "xml", "html", "htm", "css", "scss", "toml", "yaml", "yml", "ini", "conf", "cfg",
+         "lua", "go", "java", "kt", "swift", "sql", "vue", "svelte", "gradle", "cmake"],
+  text: ["txt", "log", "md", "markdown", "csv", "tsv", "text", "srt", "vtt", "nfo"],
+  pdf: ["pdf"],
+  archive: ["zip", "rar", "7z", "tar", "gz", "bz2", "xz", "tgz", "zst"],
+  font: ["ttf", "otf", "woff", "woff2"],
+  other: ["bin", "elf", "img", "hex", "dat", "db", "bak"]
+};
+const KIND_TILE = {
+  dir: "t-dir", image: "t-image", video: "t-video", audio: "t-audio", code: "t-code",
+  text: "t-text", pdf: "t-pdf", archive: "t-archive", font: "t-font", other: "t-file"
+};
+const KIND_ICON = {
+  dir: "i-folder", image: "i-image", video: "i-video", audio: "i-music", code: "i-code",
+  text: "i-file", pdf: "i-file", archive: "i-archive", font: "i-font", other: "i-file"
+};
+const KIND_LABEL = {
+  dir: "文件夹", image: "图片", video: "视频", audio: "音频", code: "代码", text: "文本",
+  pdf: "PDF 文档", archive: "压缩包", font: "字体", other: "文件"
+};
+
+function extensionOf(name) {
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+}
+
+function kindOf(name, isDir) {
+  if (isDir) return "dir";
+  const ext = extensionOf(name);
+  for (const kind in EXT_KIND) {
+    if (EXT_KIND[kind].indexOf(ext) >= 0) return kind;
+  }
+  return "other";
+}
+
+function metaText(entry, kind) {
+  if (entry.dir) return "文件夹";
+  const ext = extensionOf(entry.name);
+  return fmtSize(entry.size) + (ext ? " · " + ext.toUpperCase() + " " + KIND_LABEL[kind] : " · " + KIND_LABEL[kind]);
+}
+
+/* --- the file list -------------------------------------------------------- */
+function sortedShown() {
+  const needle = state.query.trim().toLowerCase();
+  const list = state.entries.filter((e) => !needle || e.name.toLowerCase().indexOf(needle) >= 0);
+  const { key, dir } = state.sort;
+  const byName = (a, b) => a.name.localeCompare(b.name, "zh", { numeric: true, sensitivity: "base" });
+  return list.sort((a, b) => {
+    if (a.dir !== b.dir) return a.dir ? -1 : 1;   /* a folder is a place, and places come first */
+    let order = 0;
+    if (key === "size") order = a.size - b.size || byName(a, b);
+    else if (key === "kind") order = KIND_LABEL[kindOf(a.name, a.dir)].localeCompare(KIND_LABEL[kindOf(b.name, b.dir)]) || byName(a, b);
+    else order = byName(a, b);
+    return order * dir;
+  });
+}
+
+function rowHtml(entry, index) {
+  const kind = kindOf(entry.name, entry.dir);
+  const on = state.picked.has(entry.name);
+  const lead = state.select
+    ? '<span class="pick ' + (on ? "on" : "") + '"><svg class="ic sm"><use href="#i-check"/></svg></span>'
+    : '<span class="tile ' + KIND_TILE[kind] + '"><svg class="ic"><use href="#' + KIND_ICON[kind] + '"/></svg></span>';
+  return '<div class="row tap" data-i="' + index + '">' + lead +
+    '<div class="row-main"><div class="row-name">' + esc(entry.name) + "</div>" +
+    '<div class="row-meta">' + esc(metaText(entry, kind)) + "</div></div>" +
+    (entry.dir ? '<svg class="ic sm chev"><use href="#i-chev"/></svg>' : "") +
+    '<button class="row-more" data-more="' + index + '" aria-label="更多操作"><svg class="ic sm"><use href="#i-dots"/></svg></button>' +
+    "</div>";
+}
+
+function skeletonHtml() {
+  let html = "";
+  for (let i = 0; i < 4; i++) {
+    html += '<div class="sk"><i></i><div style="flex:1"><b class="l1"></b><b class="l2"></b></div></div>';
+  }
+  return html;
+}
+
+function renderList() {
+  const box = $("list");
+  box.classList.toggle("sel-on", state.select);
+  if (state.loading) { box.innerHTML = skeletonHtml(); return; }
+
+  state.shown = sortedShown();
+  if (!state.entries.length) {
+    box.innerHTML = '<div class="empty"><svg class="ic"><use href="#i-folder"/></svg>' +
+      '<div class="empty-title">这个文件夹是空的</div>' +
+      '<div class="empty-note">把文件拖进来，或者点上面的「上传文件」</div></div>';
+    return;
+  }
+  if (!state.shown.length) {
+    box.innerHTML = '<div class="empty"><svg class="ic"><use href="#i-search"/></svg>' +
+      '<div class="empty-title">没有找到「' + esc(state.query) + '」</div>' +
+      '<div class="empty-note">换个关键词试试</div></div>';
+    return;
+  }
+  box.innerHTML = state.shown.map(rowHtml).join("");
+}
+
+function renderCrumbs() {
+  const parts = state.path.split("/").filter(Boolean);
+  let walked = "", html = "";
+  parts.forEach((part, index) => {
+    walked += "/" + part;
+    if (index) html += '<svg class="ic sm crumb-sep"><use href="#i-chev"/></svg>';
+    html += '<button class="crumb ' + (index === parts.length - 1 ? "last" : "") +
+            '" data-go="' + esc(walked) + '">' + esc(part) + "</button>";
+  });
+  $("crumbs").innerHTML = html || '<button class="crumb last">/</button>';
+}
+
+function renderVolumes() {
+  const list = state.volumes.length
+    ? state.volumes
+    : state.roots.map((mount) => ({ mount: mount, total: 0, free: 0 }));
+  $("volumes").innerHTML = list.map((volume) => {
+    const here = state.path === volume.mount || state.path.indexOf(volume.mount + "/") === 0;
+    const sub = volume.total ? fmtSize(volume.free) + " 可用" : "";
+    return '<button class="chip ' + (here ? "on" : "") + '" data-go="' + esc(volume.mount) + '">' +
+      '<svg class="ic sm"><use href="#i-disk"/></svg>' +
+      '<span class="chip-txt"><span class="chip-name">' + esc(baseName(volume.mount)) + "</span>" +
+      '<span class="chip-sub">' + esc(sub) + "</span></span></button>";
+  }).join("");
+}
+
+function renderStorage() {
+  const box = $("storage");
+  const info = state.info;
+  if (!info || !info.total) { box.hidden = true; return; }
+  const used = Math.max(0, info.total - info.free);
+  const percent = Math.min(100, (used / info.total) * 100);
+  const level = percent > 92 ? "full" : percent > 75 ? "warn" : "";
+  box.hidden = false;
+  box.innerHTML =
+    '<div class="storage-head"><span>' + esc(baseName(info.mount) + " · " + (info.filesystem || "")) + "</span>" +
+    "<span>" + fmtSize(info.free) + " 可用，共 " + fmtSize(info.total) + "</span></div>" +
+    '<div class="meter lg"><i class="' + level + '" style="width:' + percent.toFixed(1) + '%"></i></div>' +
+    (info.more ? '<div class="row-meta" style="margin-top:8px">文件太多，只列出了前面的 200 项</div>' : "");
+}
+
+/* --- loading, and moving around ------------------------------------------- */
+async function loadFiles(path) {
+  if (path) state.path = path;
+  state.loading = true;
+  state.picked.clear();
+  renderList();
+  try {
+    const info = await api("/api/files", { path: state.path });
+    state.info = info;
+    state.path = info.path;
+    state.entries = info.entries || [];
+    state.roots = info.roots || state.roots;
+    if (!state.volumes.length) renderVolumes();
+  } catch (error) {
+    state.entries = [];
+    state.info = null;
+    $("list").classList.remove("sel-on");
+    $("list").innerHTML = '<div class="empty"><svg class="ic"><use href="#i-alert"/></svg>' +
+      '<div class="empty-title">' + esc(error.message) + "</div>" +
+      '<div class="empty-note">下拉或点刷新再试一次</div></div>';
+    renderStorage();
+    if (!error.offline) toast(error.message, "bad");
+    state.loading = false;
+    syncStatus();
+    return;
+  }
+  state.loading = false;
+  state.query = $("search").value.trim();
+  renderCrumbs();
+  renderVolumes();
+  renderList();
+  renderStorage();
+  syncSelectionBar();
+  if (state.view === "files") window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function go(path) {
+  if (path === state.path) { loadFiles(); return; }
+  exitSelect();
+  state.query = "";
+  $("search").value = "";
+  loadFiles(path);
+}
+
+/* --- selection ------------------------------------------------------------ */
+function syncSelectionBar() {
+  const bar = $("selbar");
+  const on = state.picked.size > 0;
+  $("selCount").textContent = on ? "已选择 " + state.picked.size + " 项" : "选择要处理的文件";
+  $("selDownload").disabled = !on;
+  $("selDelete").disabled = !on;
+  $("selbar").hidden = !state.select;
+  $("selectBtn").classList.toggle("primary", state.select);
+}
+
+function enterSelect() {
+  state.select = true;
+  state.picked.clear();
+  $("selectBtn").innerHTML = '<svg class="ic sm"><use href="#i-x"/></svg>取消';
+  renderList();
+  syncSelectionBar();
+}
+
+function exitSelect() {
+  state.select = false;
+  state.picked.clear();
+  $("selectBtn").innerHTML = '<svg class="ic sm"><use href="#i-check"/></svg>选择';
+  renderList();
+  syncSelectionBar();
+}
+
+function togglePick(entry) {
+  if (state.picked.has(entry.name)) state.picked.delete(entry.name);
+  else state.picked.add(entry.name);
+  renderList();
+  syncSelectionBar();
+}
+
+/* --- one file at a time --------------------------------------------------- */
+function download(name) {
+  const link = document.createElement("a");
+  link.href = "/api/download?" + new URLSearchParams({ path: joinPath(state.path, name) }).toString();
+  link.rel = "noopener";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
+async function removeOne(name) {
+  const full = joinPath(state.path, name);
+  try {
+    await api("/api/delete", { path: full }, "POST");
+    return true;
+  } catch (error) {
+    toast(error.message, "bad");
+    return false;
+  }
+}
+
+async function makeFolder() {
+  const name = await askText({
+    title: "新建文件夹",
+    note: "在 " + state.path + " 里",
+    placeholder: "文件夹名称",
+    ok: "创建"
+  });
+  if (!name) return;
+  try {
+    await api("/api/mkdir", { path: state.path, name: name }, "POST");
+    toast("已创建 " + name, "good");
+    loadFiles();
+  } catch (error) {
+    toast(error.message, "bad");
+  }
+}
+
+async function renameOne(name) {
+  const next = await askText({
+    title: "重命名",
+    note: name,
+    value: name,
+    ok: "保存"
+  });
+  if (!next || next === name) return;
+  try {
+    await api("/api/rename", { path: joinPath(state.path, name), name: next }, "POST");
+    toast("已重命名为 " + next, "good");
+    loadFiles();
+  } catch (error) {
+    toast(error.message, "bad");
+  }
+}
+
+async function deleteOne(name, isDir) {
+  const sure = await confirmSheet({
+    title: "删除" + (isDir ? "文件夹" : "文件"),
+    note: name,
+    hint: isDir ? "里面的内容会一起删除。" : "删除后无法恢复。",
+    ok: "删除",
+    danger: true
+  });
+  if (!sure) return;
+  if (await removeOne(name)) {
+    toast("已删除 " + name, "good");
+    loadFiles();
+  }
+}
+
+/* The row's own menu, so that a long press is not the only way to find these. */
+function rowMenu(entry) {
+  const index = state.shown.indexOf(entry);
+  actionSheet({
+    title: entry.name,
+    note: entry.dir ? "文件夹" : fmtSize(entry.size),
+    items: [
+      entry.dir ? { label: "打开", value: "open", icon: "i-folder" }
+                 : { label: "预览", value: "preview", icon: "i-eye" },
+      { label: "下载", value: "download", icon: "i-download" },
+      { label: "重命名", value: "rename", icon: "i-pencil" },
+      { label: "删除", value: "delete", icon: "i-trash", danger: true }
+    ]
+  }).then((answer) => {
+    if (state.shown[index] !== entry) return;   /* the list moved under us: the menu is about a memory */
+    const value = answer && answer.value;
+    if (value === "open") go(joinPath(state.path, entry.name));
+    else if (value === "preview") preview(entry);
+    else if (value === "download") download(entry.name);
+    else if (value === "rename") renameOne(entry.name);
+    else if (value === "delete") deleteOne(entry.name, entry.dir);
+  });
+}
+
+async function deletePicked() {
+  const names = state.shown.filter((e) => state.picked.has(e.name));
+  if (!names.length) return;
+  const sure = await confirmSheet({
+    title: "删除 " + names.length + " 项",
+    note: names.slice(0, 3).map((e) => e.name).join("、") + (names.length > 3 ? " 等" : ""),
+    hint: "删除后无法恢复。",
+    ok: "删除",
+    danger: true
+  });
+  if (!sure) return;
+  let done = 0;
+  for (const entry of names) {
+    if (await removeOne(entry.name)) done++;
+  }
+  toast("已删除 " + done + " 项" + (done < names.length ? "，其余失败" : ""), done < names.length ? "bad" : "good");
+  exitSelect();
+  loadFiles();
+}
+
+/* A browser will not open ten downloads at once, so they are handed over one at a time, slowly enough
+   that the one before has been answered for. */
+function downloadPicked() {
+  const names = state.shown.filter((e) => state.picked.has(e.name) && !e.dir).map((e) => e.name);
+  if (!names.length) { toast("选中的都是文件夹", "bad"); return; }
+  toast("开始下载 " + names.length + " 个文件，浏览器可能会询问是否允许");
+  names.forEach((name, index) => setTimeout(() => download(name), index * 400));
+}
+
+/* ---------------------------------------------------------------------------
+   The three shapes of question this page ever asks. Each one is a sheet that already exists in the
+   markup and is filled in here, and each answers with a promise, so that the code asking reads the
+   way the question does: `if (await confirmSheet(...))`.
+
+   `returnValue` is cleared before every `showModal`, or Esc would answer with the last answer.
+   --------------------------------------------------------------------------- */
+function askText(options) {
+  const dialog = $("dlgPrompt");
+  const input = $("pInput");
+  const eye = $("pEye");
+
+  $("pTitle").textContent = options.title || "输入";
+  $("pNote").textContent = options.note || "";
+  $("pNote").hidden = !options.note;
+  $("pOk").textContent = options.ok || "确定";
+
+  input.type = options.secret ? "password" : "text";
+  input.value = options.value || "";
+  input.placeholder = options.placeholder || "";
+
+  eye.hidden = !options.secret;
+  eye.innerHTML = '<svg class="ic sm"><use href="#i-eye"/></svg>';
+  eye.onclick = () => {
+    const shown = input.type === "text";
+    input.type = shown ? "password" : "text";
+    eye.innerHTML = '<svg class="ic sm"><use href="#' + (shown ? "i-eye" : "i-eye-off") + '"/></svg>';
+  };
+
+  $("pCancel").onclick = () => { dialog.returnValue = "cancel"; dialog.close(); };
+  dialog.returnValue = "";
+  dialog.showModal();
+  setTimeout(() => { input.focus(); input.select(); }, 80);
+
+  return new Promise((resolve) => {
+    dialog.onclose = () => resolve(dialog.returnValue === "ok" ? input.value.trim() : null);
+  });
+}
+
+function confirmSheet(options) {
+  const dialog = $("dlgConfirm");
+  const ok = $("cOk");
+
+  $("cTitle").textContent = options.title || "确认";
+  $("cNote").innerHTML = esc(options.note || "") + (options.hint ? "<br>" + esc(options.hint) : "");
+  $("cNote").hidden = !options.note && !options.hint;
+  ok.textContent = options.ok || "好";
+  ok.className = "btn wide " + (options.danger ? "danger" : "primary");
+
+  const remember = $("cRemember");
+  remember.hidden = !options.remember;
+  $("cRememberText").textContent = options.remember || "";
+  let switched = false;
+  $("cSwitch").onclick = () => {
+    switched = !switched;
+    $("cSwitch").classList.toggle("on", switched);
+  };
+  $("cSwitch").classList.remove("on");
+
+  $("cCancel").onclick = () => { dialog.returnValue = "cancel"; dialog.close(); };
+  dialog.returnValue = "";
+  dialog.showModal();
+
+  return new Promise((resolve) => {
+    dialog.onclose = () => resolve(dialog.returnValue === "ok" ? { remember: switched } : null);
+  });
+}
+
+/* Resolves to `{ value, remember }`, or null when the sheet was dismissed. Every caller takes `.value`
+   and only the ones that offered the switch look at `.remember`. */
+function actionSheet(options) {
+  const dialog = $("dlgActions");
+  const items = options.items || [];
+
+  $("aTitle").textContent = options.title || "选择操作";
+  $("aNote").textContent = options.note || "";
+  $("aNote").hidden = !options.note;
+
+  $("aList").innerHTML = items.map((item, index) =>
+    '<button class="act ' + (item.danger ? "danger" : "") + '" data-v="' + index + '">' +
+    '<svg class="ic sm"><use href="#' + (item.icon || "i-info") + '"/></svg>' +
+    "<span>" + esc(item.label) +
+    (item.desc ? '<span class="act-desc">' + esc(item.desc) + "</span>" : "") +
+    "</span></button>").join("");
+
+  const remember = $("aRemember");
+  remember.hidden = !options.remember;
+  $("aRememberText").textContent = options.remember || "";
+  let switched = false;
+  $("aSwitch").onclick = () => {
+    switched = !switched;
+    $("aSwitch").classList.toggle("on", switched);
+  };
+  $("aSwitch").classList.remove("on");
+
+  $("aCancel").onclick = () => { dialog.returnValue = "cancel"; dialog.close(); };
+  $("aList").onclick = (event) => {
+    const button = event.target.closest("[data-v]");
+    if (!button) return;
+    dialog.returnValue = items[Number(button.dataset.v)].value;
+    dialog.close();
+  };
+
+  dialog.returnValue = "";
+  dialog.showModal();
+
+  return new Promise((resolve) => {
+    dialog.onclose = () => {
+      const chosen = items.find((item) => item.value === dialog.returnValue);
+      resolve(chosen ? { value: chosen.value, remember: switched } : null);
+    };
+  });
+}
+
+/* ---------------------------------------------------------------------------
+   Preview. The box hands out the bytes with a type that says what they are (`inline=1`), and the
+   browser is better at drawing a picture, a recording or a PDF than this file could ever be, so for
+   those the work is to point an element at the URL and get out of the way.
+
+   Text is the one worth reading in pieces: a log can be megabytes, and megabytes of text held in a
+   phone to be scrolled past once is a waste of the phone. So the first part of it is read and the
+   rest of the response is dropped — with a line saying so, because a preview that quietly stops is a
+   preview that lies.
+   --------------------------------------------------------------------------- */
+let previewTarget = null;
+
+async function readFirst(url, cap) {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) throw new Error(ERRORS.not_found);
+  if (!response.body || !response.body.getReader) {
+    const whole = new Uint8Array(await response.arrayBuffer());
+    return { bytes: whole.subarray(0, cap), truncated: whole.length > cap };
+  }
+
+  const reader = response.body.getReader();
+  const parts = [];
+  let size = 0, truncated = false;
+  for (;;) {
+    const step = await reader.read();
+    if (step.done) break;
+    if (size + step.value.length >= cap) {
+      parts.push(step.value.subarray(0, cap - size));
+      size = cap;
+      truncated = true;
+      reader.cancel().catch(() => { /* the box will notice the hang-up and stop sending */ });
+      break;
+    }
+    parts.push(step.value);
+    size += step.value.length;
+  }
+
+  const bytes = new Uint8Array(size);
+  let at = 0;
+  for (const part of parts) { bytes.set(part, at); at += part.length; }
+  return { bytes: bytes, truncated: truncated };
+}
+
+function decode(bytes) {
+  const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  const broken = (text.match(/\uFFFD/g) || []).length;
+  return {
+    text: text,
+    binary: text.indexOf("\u0000") >= 0 || broken > Math.max(2, text.length * 0.03)
+  };
+}
+
+function showVoid(message) {
+  const body = $("pvBody");
+  body.className = "pv-body";
+  body.innerHTML = '<div class="pv-void"><svg class="ic"><use href="#i-alert"/></svg>' +
+    "<div>" + esc(message) + "</div>" +
+    '<div class="pv-note" style="margin-top:10px">下载后可以在本机打开它</div></div>';
+}
+
+function showText(bytes, truncated) {
+  const body = $("pvBody");
+  const text = bytes && bytes.length ? decode(bytes) : { text: "", binary: false };
+  if (text.binary) { showVoid("这个文件不是文本，写在这里只会是一堆乱码"); return; }
+  body.className = "pv-body pre";
+  const longLines = text.text.split("\n").some((line) => line.length > 120);
+  body.innerHTML = '<pre class="' + (longLines ? "" : "wrap") + '">' + esc(text.text) + "</pre>" +
+    (truncated ? '<div class="pv-note" style="padding:12px">文件较大，只预览了前面的一部分</div>' : "");
+}
+
+async function preview(entry) {
+  const path = joinPath(state.path, entry.name);
+  const url = "/api/download?" + new URLSearchParams({ path: path, inline: "1" }).toString();
+  const kind = kindOf(entry.name, false);
+
+  previewTarget = { path: path, name: entry.name, dir: false, url: url };
+  $("pvName").textContent = entry.name;
+  $("pvMeta").textContent = fmtSize(entry.size) + " · " + KIND_LABEL[kind];
+  $("pvZoom").hidden = kind !== "image";
+
+  const body = $("pvBody");
+  body.className = "pv-body";
+  body.innerHTML = skeletonHtml();
+
+  const dialog = $("dlgPreview");
+  dialog.returnValue = "";
+  dialog.showModal();
+
+  if (kind === "image") {
+    body.innerHTML = '<img src="' + esc(url) + '" alt="">';
+    const image = body.querySelector("img");
+    image.onerror = () => showVoid("这张图打不开");
+    $("pvZoom").onclick = () => image.classList.toggle("zoom");
+  } else if (kind === "video") {
+    body.innerHTML = '<video controls playsinline preload="metadata" src="' + esc(url) + '"></video>';
+    body.querySelector("video").onerror = () => showVoid("这段视频播不了，可能是编码不受支持");
+  } else if (kind === "audio") {
+    body.innerHTML = '<audio controls preload="metadata" src="' + esc(url) + '"></audio>';
+  } else if (kind === "pdf") {
+    body.innerHTML = '<iframe src="' + esc(url) + '" title="PDF"></iframe>';
+  } else if (kind === "text" || kind === "code") {
+    try {
+      const head = await readFirst(url, 400 * KB);
+      showText(head.bytes, head.truncated);
+    } catch (error) { showVoid(error.message); }
+  } else {
+    /* No extension said what this is, so its first few kilobytes are asked instead: text reading as
+       text is the common case for the files people put on a box like this. */
+    try {
+      const head = await readFirst(url, 128 * KB);
+      if (decode(head.bytes).binary) showVoid(KIND_LABEL[kind] + "不支持预览");
+      else showText(head.bytes, head.truncated || entry.size > 128 * KB);
+    } catch (error) { showVoid(error.message); }
+  }
+}
+
+function closePreview() {
+  previewTarget = null;
+  $("pvBody").innerHTML = "";
+  $("dlgPreview").close();
+}
+
+/* ---------------------------------------------------------------------------
+   Uploads. One at a time, because the box is one small flash chip and four parallel bodies would only
+   make each of them slower; a queue also gives the page somewhere to put "waiting for your answer"
+   while a name that is taken is being asked about.
+
+   A name that is taken is the box's 409 and the page's question. The question is asked once and can
+   be answered for the rest of the batch — a folder of fifty files dropped onto fifty files with the
+   same names is one decision, not fifty.
+   --------------------------------------------------------------------------- */
+function variantName(name, round) {
+  const dot = name.lastIndexOf(".");
+  const base = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : "";
+  return base + " (" + round + ")" + ext;
+}
+
+function enqueueUploads(items) {
+  if (!items.length) return;
+  state.conflict = { asked: false, choice: null, counter: 0 };
+  for (const item of items) {
+    state.transfers.push({
+      id: ++state.job,
+      file: item.file,
+      dir: item.dir,
+      name: item.name || item.file.name,
+      loaded: 0,
+      total: item.file.size,
+      speed: 0,
+      state: "wait",
+      note: "",
+      cancel: null
+    });
+  }
+  renderUploader();
+  pump();
+}
+
+function putFile(job, name, overwrite) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const query = new URLSearchParams({
+      path: job.dir, name: name, overwrite: overwrite ? "1" : "0"
+    }).toString();
+
+    xhr.open("POST", "/api/upload?" + query, true);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    job.cancel = () => xhr.abort();
+
+    let lastAt = Date.now(), lastLoaded = 0;
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) return;
+      job.loaded = event.loaded;
+      job.total = event.total;
+      const now = Date.now();
+      if (now - lastAt > 400) {
+        job.speed = ((event.loaded - lastLoaded) * 1000) / (now - lastAt);
+        lastAt = now;
+        lastLoaded = event.loaded;
+        paintJob(job);
+      }
+    };
+
+    xhr.onload = () => {
+      job.cancel = null;
+      let data = {};
+      try { data = JSON.parse(xhr.responseText || "{}"); } catch (error) { /* the status says why */ }
+      if (xhr.status >= 200 && xhr.status < 300 && !data.error) { resolve(data); return; }
+      const failure = new Error(ERRORS[data.error] || "设备返回了 " + (data.error || xhr.status));
+      failure.code = data.error || "http_" + xhr.status;
+      reject(failure);
+    };
+    xhr.onerror = () => {
+      job.cancel = null;
+      const failure = new Error(ERRORS.network);
+      failure.offline = true;
+      reject(failure);
+    };
+    xhr.onabort = () => {
+      job.cancel = null;
+      const failure = new Error("已取消");
+      failure.aborted = true;
+      reject(failure);
+    };
+
+    xhr.send(job.file);
+  });
+}
+
+async function runJob(job) {
+  job.state = "up";
+  job.loaded = 0;
+  job.speed = 0;
+  renderUploader();
+
+  let name = job.name;
+  let overwrite = false;
+
+  for (let round = 0; round < 40; round++) {
+    try {
+      await putFile(job, name, overwrite);
+      job.name = name;
+      job.state = "done";
+      job.loaded = job.total;
+      job.speed = 0;
+      return;
+    } catch (error) {
+      if (error.aborted) { job.state = "error"; job.note = "已取消"; return; }
+      job.speed = 0;
+
+      if (error.code !== "already_exists") { job.state = "error"; job.note = error.message; return; }
+      if (overwrite) { job.state = "error"; job.note = "同名的文件夹挡在这里"; return; }
+
+      if (!state.conflict.choice) {
+        job.state = "waiting";
+        renderUploader();
+        const answer = await actionSheet({
+          title: "已经存在同名的项",
+          note: item2label(job),
+          items: [
+            { label: "覆盖", value: "overwrite", icon: "i-upload", danger: true,
+              desc: "用上传的文件替换它" },
+            { label: "两个都保留", value: "keep", icon: "i-copy",
+              desc: "上传的文件会带一个 (1) 这样的编号" },
+            { label: "跳过这一个", value: "skip", icon: "i-x", desc: "不动已经在那里的文件" }
+          ],
+          remember: "本次上传里其余同名的都这样处理"
+        });
+        job.state = "up";
+        renderUploader();
+        if (!answer) { job.state = "skip"; job.note = "已跳过"; return; }
+        if (answer.remember) { state.conflict.choice = answer.value; state.conflict.counter = 0; }
+        if (answer.value === "skip") { job.state = "skip"; job.note = "已跳过"; return; }
+        if (answer.value === "overwrite") { overwrite = true; continue; }
+      } else if (state.conflict.choice === "skip") {
+        job.state = "skip";
+        job.note = "已跳过";
+        return;
+      } else if (state.conflict.choice === "overwrite") {
+        overwrite = true;
+        continue;
+      }
+
+      name = variantName(job.name, ++state.conflict.counter);
+    }
+  }
+
+  job.state = "error";
+  job.note = "同名文件太多，换个名字吧";
+}
+
+function item2label(job) {
+  return (job.dir === state.path ? "" : job.dir + " 里") + job.name;
+}
+
+async function pump() {
+  if (pump.busy) return;
+  pump.busy = true;
+  for (;;) {
+    const next = state.transfers.find((job) => job.state === "wait");
+    if (!next) break;
+    await runJob(next);
+    renderUploader();
+    paintJob(next);
+  }
+  pump.busy = false;
+  renderUploader();
+
+  const done = state.transfers.filter((job) => job.state === "done").length;
+  const skipped = state.transfers.filter((job) => job.state === "skip").length;
+  const failed = state.transfers.filter((job) => job.state === "error" && job.note !== "已取消").length;
+  if (done || skipped || failed) {
+    toast("上传结束：成功 " + done + (skipped ? "，跳过 " + skipped : "") + (failed ? "，失败 " + failed : ""),
+          failed ? "bad" : "good");
+  }
+  loadFiles();
+}
+
+function jobHtml(job) {
+  const percent = job.total ? Math.min(100, (job.loaded / job.total) * 100) : 0;
+  const meta = job.state === "done" ? fmtSize(job.total) + " · 已完成"
+    : job.state === "error" || job.state === "skip" ? job.note
+    : job.state === "waiting" ? "等待你的选择…"
+    : fmtSize(job.loaded) + " / " + fmtSize(job.total) + (job.speed ? " · " + fmtSpeed(job.speed) : "");
+
+  const tail = job.state === "up"
+    ? '<button class="up-x" data-cancel="' + job.id + '" aria-label="取消"><svg class="ic sm"><use href="#i-x"/></svg></button>'
+    : job.state === "done" ? '<span class="up-x" style="color:var(--green)"><svg class="ic sm"><use href="#i-check"/></svg></span>'
+    : job.state === "error" ? '<span class="up-x" style="color:var(--red)"><svg class="ic sm"><use href="#i-alert"/></svg></span>'
+    : job.state === "skip" ? '<span class="up-x"><svg class="ic sm"><use href="#i-x"/></svg></span>' : "";
+
+  return '<div class="up-item ' + job.state + '" id="job-' + job.id + '">' +
+    '<div class="up-info"><div class="up-name">' + esc(job.name) + "</div>" +
+    '<div class="up-meta">' + esc(meta) + "</div>" +
+    '<div class="up-bar"><i style="width:' + percent.toFixed(1) + '%"></i></div></div>' + tail + "</div>";
+}
+
+function paintJob(job) {
+  const node = $("job-" + job.id);
+  if (!node) { renderUploader(); return; }
+  const percent = job.total ? Math.min(100, (job.loaded / job.total) * 100) : 0;
+  node.querySelector(".up-bar i").style.width = percent.toFixed(1) + "%";
+  if (job.state === "up") {
+    node.querySelector(".up-meta").textContent =
+      fmtSize(job.loaded) + " / " + fmtSize(job.total) + (job.speed ? " · " + fmtSpeed(job.speed) : "");
+  }
+}
+
+function renderUploader() {
+  const jobs = state.transfers;
+  const box = $("uploader");
+  if (!jobs.length) { box.hidden = true; return; }
+  box.hidden = false;
+
+  const finished = jobs.filter((job) => job.state !== "up" && job.state !== "wait" && job.state !== "waiting");
+  const done = jobs.filter((job) => job.state === "done").length;
+  const skipped = jobs.filter((job) => job.state === "skip").length;
+  const failed = jobs.filter((job) => job.state === "error" && job.note !== "已取消").length;
+
+  $("upTitle").textContent = finished.length < jobs.length
+    ? "正在上传 " + (finished.length + 1) + " / " + jobs.length
+    : "上传结束 · 成功 " + done + (skipped ? " · 跳过 " + skipped : "") + (failed ? " · 失败 " + failed : "");
+  $("upList").innerHTML = jobs.map(jobHtml).join("");
+  $("upFoot").hidden = finished.length < jobs.length;
+  $("upRetry").hidden = !failed;
+}
+
+/* --- getting files in: the pickers, and the drop ----------------------------------------------- */
+function pickedFolder(file, base) {
+  const relative = file.webkitRelativePath || "";
+  const parts = relative.split("/");
+  parts.pop();
+  const directory = [base].concat(parts).join("/").replace(/\/+/g, "/");
+  return { file: file, dir: directory || state.path, name: file.name };
+}
+
+/* A folder dropped on the page is walked, not flattened: what is being copied is a folder, and the
+   box makes the folders it needs on the way in. */
+async function droppedItems(dataTransfer) {
+  const roots = [];
+  if (dataTransfer.items && dataTransfer.items.length && dataTransfer.items[0].webkitGetAsEntry) {
+    for (const item of dataTransfer.items) {
+      const entry = item.webkitGetAsEntry();
+      if (entry) roots.push(entry);
+    }
+  }
+  if (!roots.length) {
+    return Array.from(dataTransfer.files).map((file) => ({ file: file, dir: state.path, name: file.name }));
+  }
+
+  const out = [];
+  const walk = async (entry, dir) => {
+    if (entry.isFile) {
+      const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+      out.push({ file: file, dir: dir, name: file.name });
+      return;
+    }
+    if (!entry.isDirectory) return;
+    const reader = entry.createReader();
+    const inner = joinPath(dir, entry.name);
+    for (;;) {
+      const batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+      if (!batch.length) break;
+      for (const child of batch) await walk(child, inner);
+    }
+  };
+
+  for (const root of roots) await walk(root, state.path);
+  return out;
+}
+
+function showDrop(on) {
+  $("dropzone").classList.toggle("on", on);
+  if (on) $("dropPath").textContent = state.path;
+}
+
+function wireDrop() {
+  const carries = (event) => event.dataTransfer &&
+    Array.from(event.dataTransfer.types || []).indexOf("Files") >= 0;
+
+  window.addEventListener("dragenter", (event) => {
+    if (!carries(event)) return;
+    event.preventDefault();
+    showDrop(true);
+  });
+  window.addEventListener("dragover", (event) => {
+    if (!carries(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    showDrop(true);
+  });
+  window.addEventListener("dragleave", (event) => {
+    /* Only when the pointer has actually left the window: every child element fires one of these. */
+    if (event.clientX <= 0 || event.clientY <= 0 ||
+        event.clientX >= window.innerWidth || event.clientY >= window.innerHeight) showDrop(false);
+  });
+  window.addEventListener("drop", async (event) => {
+    if (!carries(event)) return;
+    event.preventDefault();
+    const dropped = event.dataTransfer;
+    showDrop(false);
+    const items = await droppedItems(dropped);
+    if (!items.length) return;
+    if (state.view !== "files") setView("files");
+    toast("收到 " + items.length + " 个文件");
+    enqueueUploads(items);
+  });
+}
+
+/* --- the wifi sheet -------------------------------------------------------- */
+const WIFI_STATE_TAG = { connected: "已连接", connecting: "正在连接…", scanning: "正在扫描…", disconnected: "未连接" };
+
+function rssiBars(rssi) {
+  if (rssi >= -60) return 4;
+  if (rssi >= -70) return 3;
+  if (rssi >= -80) return 2;
+  return 1;
+}
+
+function rssiWords(rssi) {
+  if (rssi >= -55) return "极好";
+  if (rssi >= -65) return "很好";
+  if (rssi >= -75) return "一般";
+  return "较弱";
+}
+
+function kvRow(key, value, mono) {
+  return '<div class="kv"><span class="k">' + esc(key) + "</span>" +
+    '<span class="v' + (mono ? " mono" : "") + '">' + esc(value) + "</span></div>";
+}
+
+function renderWifi() {
+  const wifi = state.wifi;
+  const box = $("wifiNow");
+
+  if (!wifi) {
+    box.innerHTML = '<div class="sk"><i></i><div style="flex:1"><b class="l1"></b><b class="l2"></b></div></div>';
+  } else if (!wifi.enabled) {
+    box.innerHTML = '<div class="empty" style="padding:30px 20px">' +
+      '<svg class="ic"><use href="#i-wifi"/></svg>' +
+      '<div class="empty-title">无线网络已关闭</div>' +
+      '<div class="empty-note">在设备屏幕的「设置 - 无线网络」里打开它</div></div>';
+  } else if (wifi.state !== "connected") {
+    box.innerHTML =
+      '<div class="row"><span class="tile t-file"><svg class="ic"><use href="#i-wifi"/></svg></span>' +
+      '<div class="row-main"><div class="row-name">' + esc(WIFI_STATE_TAG[wifi.state] || "未连接") + "</div>" +
+      '<div class="row-meta">' + (wifi.saved ? "记住的网络：" + esc(wifi.saved) : "还没有记住的网络") + "</div></div></div>" +
+      '<div class="bar-actions" style="padding:12px 14px 14px">' +
+      (wifi.state === "connecting" ? '<button class="btn" id="wifiCancel">取消连接</button>' : "") +
+      '<button class="btn tinted" id="wifiScan">扫描附近的网络</button>' +
+      (wifi.saved ? '<button class="btn" id="wifiForget">忘记「' + esc(wifi.saved) + "」</button>" : "") +
+      "</div>";
+  } else {
+    const bars = rssiBars(wifi.rssi);
+    box.innerHTML =
+      '<div class="row"><span class="tile t-dir" style="background:linear-gradient(160deg,#5ac8fa,#0a84ff)">' +
+      '<svg class="ic"><use href="#i-wifi"/></svg></span>' +
+      '<div class="row-main"><div class="row-name">' + esc(wifi.ssid) + "</div>" +
+      '<div class="row-meta">' + esc(wifi.ip) + " · 信号" + esc(rssiWords(wifi.rssi)) + "</div></div>" +
+      '<span class="sig s' + bars + '"><i></i><i></i><i></i><i></i></span></div>' +
+      kvRow("状态", WIFI_STATE_TAG[wifi.state]) +
+      kvRow("信号强度", wifi.rssi + " dBm") +
+      kvRow("地址", wifi.ip, true) +
+      kvRow("网关", wifi.gateway || "—", true) +
+      kvRow("子网掩码", wifi.netmask || "—", true) +
+      kvRow("记住的网络", wifi.saved || "无") +
+      '<div class="bar-actions" style="padding:12px 14px 14px">' +
+      '<button class="btn tinted" id="wifiDisconnect">断开连接</button>' +
+      (wifi.saved ? '<button class="btn" id="wifiForget">忘记这个网络</button>' : "") +
+      "</div>";
+  }
+
+  renderScan();
+}
+
+function renderScan() {
+  const box = $("wifiList");
+  const scan = state.scan;
+  if (!scan || scan.state === "scanning") {
+    box.innerHTML = '<div style="padding:26px 20px;text-align:center">' +
+      '<div class="radar"></div><div class="pv-note">正在扫描附近的网络…</div></div>';
+    return;
+  }
+  if (scan.state === "error") {
+    box.innerHTML = '<div class="empty" style="padding:30px 20px"><svg class="ic"><use href="#i-alert"/></svg>' +
+      '<div class="empty-title">扫描失败</div><div class="empty-note">再试一次吧</div></div>';
+    return;
+  }
+
+  const seen = new Map();
+  for (const net of scan.networks || []) {
+    const before = seen.get(net.ssid);
+    if (!before || net.rssi > before.rssi) seen.set(net.ssid, net);
+  }
+  const networks = Array.from(seen.values()).sort((a, b) => b.rssi - a.rssi);
+  if (!networks.length) {
+    box.innerHTML = '<div class="empty" style="padding:30px 20px"><svg class="ic"><use href="#i-wifi"/></svg>' +
+      '<div class="empty-title">没有发现网络</div><div class="empty-note">把设备挪近一点，或者再扫描一次</div></div>';
+    return;
+  }
+
+  const here = state.wifi && state.wifi.ssid;
+  box.innerHTML = networks.map((net) =>
+    '<div class="row tap" data-ssid="' + esc(net.ssid) + '" data-secure="' + (net.secure ? "1" : "0") + '">' +
+    '<span class="tile ' + (net.ssid === here ? "t-dir" : "t-file") + '"><svg class="ic"><use href="#' +
+      (net.secure ? "i-lock" : "i-wifi") + '"/></svg></span>' +
+    '<div class="row-main"><div class="row-name">' + esc(net.ssid || "隐藏的网络") + "</div>" +
+    '<div class="row-meta">' + (net.ssid === here ? "当前连接 · " : "") +
+      (net.secure ? "需要密码" : "开放网络") + (net.channel ? " · 信道 " + net.channel : "") + "</div></div>" +
+    '<span class="sig s' + rssiBars(net.rssi) + '"><i></i><i></i><i></i><i></i></span>' +
+    '<svg class="ic sm chev"><use href="#i-chev"/></svg></div>').join("");
+}
+
+async function refreshWifi(quiet) {
+  try {
+    state.wifi = await api("/api/wifi");
+    state.wifiAt = Date.now();
+  } catch (error) {
+    if (!quiet) toast(error.message, "bad");
+    return;
+  }
+  syncStatus();
+  if (state.view === "wifi") renderWifi();
+}
+
+/* --- the device itself ---------------------------------------------------- */
+function volumeHtml(volume) {
+  const used = Math.max(0, volume.total - volume.free);
+  const percent = volume.total ? Math.min(100, (used / volume.total) * 100) : 0;
+  const level = percent > 92 ? "full" : percent > 75 ? "warn" : "";
+  return '<div class="storage">' +
+    '<div class="storage-head"><span>' + esc(baseName(volume.mount) + " · " + (volume.filesystem || "")) + "</span>" +
+    "<span>" + fmtSize(volume.free) + " 可用，共 " + fmtSize(volume.total) + "</span></div>" +
+    '<div class="meter lg"><i class="' + level + '" style="width:' + percent.toFixed(1) + '%"></i></div></div>';
+}
+
+function renderSystem() {
+  const sys = state.system;
+  if (!sys) return;
+
+  $("hero").innerHTML =
+    '<span class="tile t-dir"><svg class="ic"><use href="#i-box"/></svg></span>' +
+    '<div class="row-main"><div class="hero-name">HiveBox</div>' +
+    '<div class="hero-sub">固件 ' + esc(sys.version) + " · " + esc(sys.build) + "</div></div>";
+
+  const battery = sys.battery || {};
+  const rows = [
+    kvRow("设备名称", sys.app || "firmware"),
+    kvRow("芯片", (sys.chip || "—") + " · " + (sys.cores || 1) + " 核"),
+    kvRow("ESP-IDF", sys.idf || "—"),
+    kvRow("构建时间", sys.build || "—"),
+    '<div class="kv"><span class="k">运行时长</span><span class="v" data-uptime>—</span></div>',
+    kvRow("复位原因", RESET_REASONS[sys.reset] || sys.reset || "—"),
+    kvRow("空闲内存", fmtSize(sys.heap_free) + "（历史最低 " + fmtSize(sys.heap_min) + "）"),
+    sys.psram_free ? kvRow("PSRAM 空闲", fmtSize(sys.psram_free)) : ""
+  ].join("");
+
+  const percent = battery.percent == null ? -1 : battery.percent;
+  const meter = percent >= 0
+    ? '<div class="battery"><div class="bat-head"><span class="bat-num">' + percent + '%</span>' +
+      '<span class="bat-tag' + (battery.charging ? " chg" : "") + '">' +
+      (battery.charging ? "正在充电" : percent >= 100 ? "已充满" : "电池供电") + "</span></div>" +
+      '<div class="meter lg"><i class="' + (percent <= 10 ? "full" : percent <= 25 ? "warn" : "") +
+      '" style="width:' + percent + '%"></i></div>' +
+      '<div class="row-meta" style="margin-top:8px">电池电压 ' +
+      (battery.voltage_mv ? (battery.voltage_mv / 1000).toFixed(2) + " V" : "—") + "</div></div>"
+    : '<div class="kv"><span class="k">电池</span><span class="v">没有读到电量</span></div>';
+
+  $("sysInfo").innerHTML = rows + meter +
+    '<div class="kv"><span class="k">页面地址</span><span class="v mono">' +
+    esc("http://" + location.host + "/") + "</span></div>" +
+    '<div class="bar-actions" style="padding:12px 14px 14px">' +
+    '<button class="btn sm tinted" id="copyUrl"><svg class="ic sm"><use href="#i-copy"/></svg>复制这个地址</button></div>';
+
+  $("sysStorage").innerHTML = (sys.volumes || []).map(volumeHtml).join("");
+  tickUptime();
+}
+
+function tickUptime() {
+  const node = document.querySelector("[data-uptime]");
+  if (node && state.booted) node.textContent = fmtUptime((Date.now() - state.booted) / 1000);
+}
+
+async function refreshSystem(quiet) {
+  try {
+    const sys = await api("/api/system");
+    state.system = sys;
+    state.volumes = sys.volumes || [];
+    state.booted = Date.now() - (sys.uptime || 0) * 1000;
+  } catch (error) {
+    if (!quiet) toast(error.message, "bad");
+    return;
+  }
+  renderVolumes();
+  if (state.view === "system") renderSystem();
+}
+
+function syncStatus() {
+  const dot = $("statDot"), text = $("statText"), wifi = state.wifi;
+  if (!wifi) { dot.className = "dot"; text.textContent = "正在读取设备状态…"; return; }
+  if (!wifi.enabled) { dot.className = "dot off"; text.textContent = "无线网络已关闭"; return; }
+  if (wifi.state === "connected") { dot.className = "dot on"; text.textContent = wifi.ssid + " · " + wifi.ip; return; }
+  dot.className = "dot off";
+  text.textContent = (WIFI_STATE_TAG[wifi.state] || "未连接") + " · " + (location.hostname || "本机");
+}
+
+async function copyText(text) {
+  try {
+    if (!navigator.clipboard || !window.isSecureContext) throw new Error("no clipboard here");
+    await navigator.clipboard.writeText(text);
+    toast("已复制到剪贴板", "good");
+  } catch (error) {
+    /* Over plain http on a LAN there is no clipboard API, and the old way still works. */
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    let copied = false;
+    try { copied = document.execCommand("copy"); } catch (inner) { copied = false; }
+    area.remove();
+    toast(copied ? "已复制到剪贴板" : "复制不了，请手动选中地址", copied ? "good" : "bad");
+  }
+}
+
+/* --- the three views ------------------------------------------------------ */
+function setView(view) {
+  state.view = view;
+  for (const name of ["files", "wifi", "system"]) $("view-" + name).hidden = name !== view;
+
+  const buttons = Array.from($("seg").querySelectorAll("button"));
+  for (const button of buttons) button.classList.toggle("on", button.dataset.view === view);
+
+  const active = buttons.find((button) => button.dataset.view === view);
+  const thumb = $("segThumb");
+  thumb.style.width = active.offsetWidth + "px";
+  thumb.style.transform = "translateX(" + active.offsetLeft + "px)";
+
+  try { localStorage.setItem("hivebox.view", view); } catch (error) { /* private mode */ }
+  if (view === "wifi") { renderWifi(); refreshWifi(true); }
+  if (view === "system") renderSystem();
+}
+
+function paintTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  $("themeIcon").setAttribute("href", theme === "dark" ? "#i-sun" : "#i-moon");
+}
+
+async function scanWifi() {
+  state.scan = { state: "scanning", networks: [] };
+  renderScan();
+  try {
+    await api("/api/wifi/scan", null, "POST");
+  } catch (error) {
+    state.scan = { state: "error", networks: [] };
+    renderScan();
+    toast(error.message, "bad");
+    return;
+  }
+  for (let round = 0; round < 30; round++) {
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    try { state.scan = await api("/api/wifi/scan"); } catch (error) { continue; }
+    if (state.scan.state !== "scanning") break;
+    if (state.view === "wifi") renderScan();
+  }
+  if (state.scan.state === "scanning") state.scan = { state: "error", networks: [] };
+  renderScan();
+  if (state.scan.state === "done") {
+    const found = (state.scan.networks || []).length;
+    toast(found ? "发现 " + found + " 个网络" : "没有发现网络", found ? "" : "bad");
+  }
+}
+
+async function waitForWifi(ssid, seconds) {
+  for (let round = 0; round < seconds * 2; round++) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    try { state.wifi = await api("/api/wifi"); } catch (error) { continue; }
+    syncStatus();
+    if (state.view === "wifi") renderWifi();
+    if (state.wifi.state === "connected" && state.wifi.ssid === ssid) return true;
+    if (round > 6 && state.wifi.state === "disconnected") return false;
+  }
+  return false;
+}
+
+async function connectTo(ssid, secure) {
+  let password = "";
+  if (secure) {
+    const typed = await askText({
+      title: "加入「" + ssid + "」",
+      note: "密码只会发到这台设备",
+      placeholder: "网络密码",
+      secret: true,
+      ok: "下一步"
+    });
+    if (typed === null) return;
+    password = typed;
+  }
+  const answer = await confirmSheet({
+    title: "连接到「" + ssid + "」",
+    note: secure ? "设备会切换到这个网络" : "这是一个不需要密码的网络",
+    ok: "连接",
+    remember: "记住它，开机自动连接"
+  });
+  if (!answer) return;
+
+  try {
+    await api("/api/wifi/connect", { ssid: ssid, password: password }, "POST");
+  } catch (error) {
+    toast(error.message, "bad");
+    return;
+  }
+  toast("正在连接 " + ssid + "…");
+  const joined = await waitForWifi(ssid, 20);
+  toast(joined ? "已经连上 " + ssid : "没能连上，检查一下密码", joined ? "good" : "bad");
+  if (joined && answer.remember) {
+    try {
+      await api("/api/wifi/remember", { ssid: ssid, password: password }, "POST");
+      toast("已记住这个网络", "good");
+    } catch (error) { toast(error.message, "bad"); }
+  }
+  refreshWifi(true);
+}
+
+async function forgetWifi() {
+  const sure = await confirmSheet({
+    title: "忘记这个网络",
+    note: state.wifi && state.wifi.saved ? state.wifi.saved : "已保存的网络",
+    hint: "设备下次开机不会再自动连接它。",
+    ok: "忘记",
+    danger: true
+  });
+  if (!sure) return;
+  try {
+    await api("/api/wifi/forget", null, "POST");
+    toast("已忘记", "good");
+  } catch (error) { toast(error.message, "bad"); }
+  refreshWifi(true);
+}
+
+function sortSheet() {
+  const key = state.sort.key, dir = state.sort.dir;
+  const mark = (name) => key === name ? (dir > 0 ? "当前 · 正序" : "当前 · 倒序") : "";
+  actionSheet({
+    title: "排序方式",
+    items: [
+      { label: "按名称", value: "name", icon: "i-sort", desc: mark("name") },
+      { label: "按大小", value: "size", icon: "i-sort", desc: mark("size") },
+      { label: "按类型", value: "kind", icon: "i-sort", desc: mark("kind") },
+      { label: "反转排列顺序", value: "flip", icon: "i-refresh" }
+    ]
+  }).then((answer) => {
+    if (!answer) return;
+    if (answer.value === "flip") state.sort.dir = -dir;
+    else if (answer.value === key) state.sort.dir = -dir;
+    else { state.sort.key = answer.value; state.sort.dir = 1; }
+    renderList();
+  });
+}
+
+async function reboot() {
+  const sure = await confirmSheet({
+    title: "重启设备",
+    note: "屏幕会黑一下再亮起来",
+    hint: "这台设备的网页会断开，几秒后刷新本页即可。",
+    ok: "重启",
+    danger: true
+  });
+  if (!sure) return;
+  try {
+    await api("/api/restart", null, "POST");
+    toast("设备正在重启，稍后刷新本页");
+  } catch (error) { toast(error.message, "bad"); }
+}
+
+/* --- everything that listens ---------------------------------------------- */
+$("list").onclick = (event) => {
+  const more = event.target.closest("[data-more]");
+  if (more) { rowMenu(state.shown[Number(more.dataset.more)]); return; }
+  const row = event.target.closest(".row");
+  if (!row) return;
+  const entry = state.shown[Number(row.dataset.i)];
+  if (!entry) return;
+  if (state.select) togglePick(entry);
+  else if (entry.dir) go(joinPath(state.path, entry.name));
+  else preview(entry);
+};
+
+$("crumbs").onclick = (event) => {
+  const crumb = event.target.closest("[data-go]");
+  if (crumb) go(crumb.dataset.go);
+};
+
+$("volumes").onclick = (event) => {
+  const chip = event.target.closest("[data-go]");
+  if (chip) go(chip.dataset.go);
+};
+
+$("seg").onclick = (event) => {
+  const button = event.target.closest("button");
+  if (button && button.dataset.view) setView(button.dataset.view);
+};
+
+$("search").oninput = () => { state.query = $("search").value; renderList(); };
+$("refreshBtn").onclick = () => loadFiles();
+$("sortBtn").onclick = sortSheet;
+$("mkdirBtn").onclick = makeFolder;
+$("selectBtn").onclick = () => { if (state.select) exitSelect(); else enterSelect(); };
+$("selAll").onclick = () => {
+  const all = state.shown.every((entry) => state.picked.has(entry.name));
+  state.picked.clear();
+  if (!all) state.shown.forEach((entry) => state.picked.add(entry.name));
+  renderList();
+  syncSelectionBar();
+};
+$("selDone").onclick = exitSelect;
+$("selDelete").onclick = deletePicked;
+$("selDownload").onclick = downloadPicked;
+
+$("upBtn").onclick = () => $("fileInput").click();
+$("upDirBtn").onclick = () => $("dirInput").click();
+$("fileInput").onchange = (event) => {
+  const files = Array.from(event.target.files);
+  event.target.value = "";
+  if (files.length) enqueueUploads(files.map((file) => ({ file: file, dir: state.path, name: file.name })));
+};
+$("dirInput").onchange = (event) => {
+  const files = Array.from(event.target.files);
+  event.target.value = "";
+  if (files.length) enqueueUploads(files.map((file) => pickedFolder(file, state.path)));
+};
+$("upHide").onclick = () => {
+  state.transfers = [];
+  renderUploader();
+};
+$("upDone").onclick = () => {
+  state.transfers = [];
+  renderUploader();
+};
+$("upRetry").onclick = () => {
+  let again = false;
+  for (const job of state.transfers) {
+    if (job.state === "error" && job.note !== "已取消") { job.state = "wait"; job.note = ""; job.loaded = 0; again = true; }
+  }
+  if (again) { renderUploader(); pump(); }
+};
+$("upList").onclick = (event) => {
+  const cancel = event.target.closest("[data-cancel]");
+  if (!cancel) return;
+  const job = state.transfers.find((item) => item.id === Number(cancel.dataset.cancel));
+  if (job && job.cancel) job.cancel();
+};
+
+$("pvClose").onclick = closePreview;
+$("pvBack").onclick = closePreview;
+$("pvDownload").onclick = () => { if (previewTarget) download(previewTarget.name); };
+$("pvRename").onclick = () => { if (previewTarget) { const name = previewTarget.name; closePreview(); renameOne(name); } };
+$("pvDelete").onclick = () => { if (previewTarget) { const name = previewTarget.name; closePreview(); deleteOne(name, false); } };
+
+$("wifiNow").onclick = (event) => {
+  if (event.target.closest("#wifiScan")) scanWifi();
+  else if (event.target.closest("#wifiForget")) forgetWifi();
+  else if (event.target.closest("#wifiCancel")) {
+    api("/api/wifi/disconnect", null, "POST").then(() => refreshWifi(true)).catch((error) => toast(error.message, "bad"));
+  } else if (event.target.closest("#wifiDisconnect")) {
+    api("/api/wifi/disconnect", null, "POST").then(() => { toast("已断开", "good"); refreshWifi(true); })
+      .catch((error) => toast(error.message, "bad"));
+  }
+};
+$("wifiList").onclick = (event) => {
+  const row = event.target.closest("[data-ssid]");
+  if (!row) return;
+  const ssid = row.dataset.ssid;
+  if (ssid === (state.wifi && state.wifi.ssid) && state.wifi.state === "connected") { toast("已经连上这个网络了"); return; }
+  connectTo(ssid, row.dataset.secure === "1");
+};
+$("scanBtn").onclick = scanWifi;
+
+$("sysInfo").onclick = (event) => {
+  if (event.target.closest("#copyUrl")) copyText("http://" + location.host + "/");
+};
+$("sysRefresh").onclick = () => refreshSystem(false);
+$("rebootBtn").onclick = reboot;
+
+$("themeBtn").onclick = () => {
+  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  paintTheme(next);
+  try { localStorage.setItem("hivebox.theme", next); } catch (error) { /* private mode */ }
+};
+
+for (const dialog of document.querySelectorAll("dialog")) {
+  dialog.addEventListener("click", (event) => {
+    /* The backdrop is the dialog itself: anything inside it is a child element. */
+    if (event.target !== dialog) return;
+    dialog.returnValue = "cancel";
+    dialog.close();
+  });
+}
+
+window.addEventListener("resize", () => {
+  const active = Array.from($("seg").querySelectorAll("button")).find((button) => button.classList.contains("on"));
+  if (active) {
+    $("segThumb").style.width = active.offsetWidth + "px";
+    $("segThumb").style.transform = "translateX(" + active.offsetLeft + "px)";
+  }
+});
+
+/* A page that is halfway through an upload is a page that should not be closed by a stray tap. */
+window.addEventListener("beforeunload", (event) => {
+  const busy = state.transfers.some((job) => job.state === "up" || job.state === "wait" || job.state === "waiting");
+  if (!busy) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
+
+function tick() {
+  if (document.hidden) return;
+  if (state.view === "wifi") refreshWifi(true);
+  else if (state.view === "system") refreshSystem(true);
+  if (!state.wifi || Date.now() - (state.wifiAt || 0) > 30000) refreshWifi(true);
+}
+
+function start() {
+  paintTheme(document.documentElement.dataset.theme === "dark" ? "dark" : "light");
+  wireDrop();
+
+  let view = "files";
+  try { view = localStorage.getItem("hivebox.view") || "files"; } catch (error) { /* private mode */ }
+  if (["files", "wifi", "system"].indexOf(view) < 0) view = "files";
+  setView(view);
+
+  refreshSystem(true);
+  refreshWifi(true);
+  loadFiles();
+
+  setInterval(tick, 5000);
+  setInterval(tickUptime, 1000);
+}
+
+start();
+
+
+
+
+
+
+
+</script>
+</body>
+</html>

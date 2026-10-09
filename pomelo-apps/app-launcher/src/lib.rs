@@ -9,7 +9,7 @@
 //!
 //! # Hosting an app is merging its subscription
 //!
-//! The six apps are hosted as **widgets**: this launcher calls their `view` and `update` itself, so
+//! The seven apps are hosted as **widgets**: this launcher calls their `view` and `update` itself, so
 //! their state is its state. What a widget cannot carry is an app's *subscriptions* — the two that
 //! animate (`hello`, `music-player`) and the one whose *layout* follows the screen (`terminal`) all
 //! express that as a `Subscription`, and a subscription belongs to whoever owns the loop.
@@ -37,7 +37,7 @@
 //!
 //! # The grid is paged, and the pager is this file's
 //!
-//! A page is [`PER_PAGE`] apps, one to a quadrant, so the six the catalogue has are two pages. A
+//! A page is [`PER_PAGE`] apps, one to a quadrant, so the seven the catalogue has are two pages. A
 //! finger turning one is a **drag**: down on the grid, across, up. iced has no widget for that — a
 //! `button` captures the press it is given, and `Scrollable` scrolls for a wheel, a touch or its own
 //! scrollbar and for nothing else — so the gesture is read here.
@@ -71,6 +71,7 @@ use music_player::Player;
 use pomelo_hal::Board;
 use settings::Settings;
 use terminal::Terminal;
+use web_manager::WebManager;
 
 pub use apps::{Entry, CATALOGUE};
 pub use pomelo_material_symbols::Icon;
@@ -116,7 +117,7 @@ enum Screen {
 ///
 /// Indices, because that is what the grid hands over when a tile is tapped. The tests assert that
 /// each of these still names the app it says it does, and every entry has one: the catalogue and
-/// the list of apps are the same six things.
+/// the list of apps are the same seven things.
 pub const TERMINAL: usize = 0;
 pub const CALCULATOR: usize = 1;
 pub const DEMO_COUNTER: usize = 2;
@@ -124,6 +125,7 @@ pub const COUNTER: usize = DEMO_COUNTER;
 pub const HELLO: usize = 3;
 pub const SETTINGS: usize = 4;
 pub const MUSIC: usize = 5;
+pub const WEB_MANAGER: usize = 6;
 
 /// What the launcher reacts to.
 ///
@@ -158,6 +160,7 @@ pub enum Message {
     Settings(settings::Message),
     Music(music_player::Message),
     Terminal(terminal::Message),
+    WebManager(web_manager::Message),
 }
 
 /// The launcher.
@@ -169,6 +172,7 @@ pub struct Launcher {
     settings: Option<Settings>,
     music: Option<Player>,
     terminal: Option<Terminal>,
+    web_manager: Option<WebManager>,
     /// Apps currently running in memory (foreground or background).
     running_apps: Vec<usize>,
     board: Arc<Board>,
@@ -206,6 +210,7 @@ impl Launcher {
             settings: None,
             music: None,
             terminal: None,
+            web_manager: None,
             running_apps: Vec::new(),
             board,
             // What the screen is until the platform says: the design panel. The first `Resized`
@@ -262,6 +267,9 @@ impl Launcher {
             app.set_preferences(prefs);
         }
         if let Some(app) = &mut self.terminal {
+            app.set_preferences(prefs);
+        }
+        if let Some(app) = &mut self.web_manager {
             app.set_preferences(prefs);
         }
     }
@@ -343,6 +351,18 @@ impl Launcher {
         self.terminal.as_mut().unwrap()
     }
 
+    /// The web manager is the one app here whose state outlives the app: the server it switches is
+    /// the board's, so an app opened onto a server that is already up reads that from the board
+    /// rather than assuming it is down — see `WebManager::new`.
+    pub fn get_or_create_web_manager(&mut self) -> &mut WebManager {
+        if self.web_manager.is_none() {
+            let mut app = WebManager::new(Arc::clone(&self.board));
+            app.set_preferences(self.preferences);
+            self.web_manager = Some(app);
+        }
+        self.web_manager.as_mut().unwrap()
+    }
+
     /// The hosted apps, for the host and the tests.
     pub fn calculator(&mut self) -> &Calculator {
         self.get_or_create_calculator()
@@ -366,6 +386,10 @@ impl Launcher {
 
     pub fn terminal(&mut self) -> &Terminal {
         self.get_or_create_terminal()
+    }
+
+    pub fn web_manager(&mut self) -> &WebManager {
+        self.get_or_create_web_manager()
     }
 
     /// Sets what the status bar shows.
@@ -414,6 +438,7 @@ impl Launcher {
             HELLO => self.hello = None,
             SETTINGS => self.settings = None,
             MUSIC => self.music = None,
+            WEB_MANAGER => self.web_manager = None,
             _ => {}
         }
 
@@ -573,6 +598,14 @@ impl Launcher {
     fn terminal_screen(&self) -> Element<'_, Message> {
         if let Some(app) = &self.terminal {
             app.view().map(Message::Terminal)
+        } else {
+            Space::new().into()
+        }
+    }
+
+    fn web_manager_screen(&self) -> Element<'_, Message> {
+        if let Some(app) = &self.web_manager {
+            app.view().map(Message::WebManager)
         } else {
             Space::new().into()
         }
@@ -829,6 +862,9 @@ impl Launcher {
                     MUSIC => {
                         self.get_or_create_music();
                     }
+                    WEB_MANAGER => {
+                        self.get_or_create_web_manager();
+                    }
                     _ => {}
                 }
 
@@ -865,6 +901,7 @@ impl Launcher {
             Message::Hello(message) => self.get_or_create_hello().update(message),
             Message::Music(message) => self.get_or_create_music().update(message),
             Message::Terminal(message) => self.get_or_create_terminal().update(message),
+            Message::WebManager(message) => self.get_or_create_web_manager().update(message),
             Message::Settings(settings::Message::Back) => return self.go_back(),
             Message::Settings(message) => {
                 let (task, new_prefs) = {
@@ -967,6 +1004,7 @@ impl Launcher {
             Screen::App(HELLO) => self.hello_screen(),
             Screen::App(SETTINGS) => self.settings_screen(),
             Screen::App(MUSIC) => self.music_screen(),
+            Screen::App(WEB_MANAGER) => self.web_manager_screen(),
             // An index the catalogue does not have. The grid cannot produce one, but `usize` is not
             // exhaustible, so the arm exists and shows the only screen that is always there.
             Screen::App(_) => self.launcher(),
@@ -1262,6 +1300,7 @@ mod tests {
         assert_eq!(CATALOGUE[HELLO].localized_name(Language::Chinese), "你好");
         assert_eq!(CATALOGUE[SETTINGS].localized_name(Language::Chinese), "设置");
         assert_eq!(CATALOGUE[MUSIC].localized_name(Language::Chinese), "音乐");
+        assert_eq!(CATALOGUE[WEB_MANAGER].localized_name(Language::Chinese), "网页管理");
     }
 
     #[test]
@@ -1572,6 +1611,7 @@ mod tests {
         assert!(launcher.settings.is_none());
         assert!(launcher.music.is_none());
         assert!(launcher.terminal.is_none());
+        assert!(launcher.web_manager.is_none());
 
         // Opening Calculator instantiates only Calculator
         launcher.update(Message::Open(CALCULATOR));
@@ -1581,6 +1621,7 @@ mod tests {
         assert!(launcher.settings.is_none());
         assert!(launcher.music.is_none());
         assert!(launcher.terminal.is_none());
+        assert!(launcher.web_manager.is_none());
 
         // Backgrounding Calculator (Back) preserves instance
         launcher.update(Message::Back);

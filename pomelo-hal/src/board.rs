@@ -12,7 +12,8 @@ use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
 use crate::traits::{
-    AudioBackend, ImuBackend, InputBackend, MicBackend, PowerBackend, StorageBackend, WifiBackend,
+    AudioBackend, ImuBackend, InputBackend, MicBackend, PowerBackend, StorageBackend, WebBackend,
+    WifiBackend,
 };
 use crate::types::{SystemEvent, WifiStatus};
 
@@ -41,6 +42,7 @@ pub struct Board {
     imu: Mutex<Box<dyn ImuBackend>>,
     input: Mutex<Box<dyn InputBackend>>,
     storage: Mutex<Box<dyn StorageBackend>>,
+    web: Mutex<Box<dyn WebBackend>>,
     listeners: Mutex<Vec<EventListener>>,
     events: Mutex<VecDeque<SystemEvent>>,
     event_condvar: Condvar,
@@ -51,9 +53,9 @@ pub struct Board {
 impl Board {
     /// Assemble a board from one backend per subsystem.
     ///
-    /// The order is `power`, `wifi`, `audio`, `mic`, `imu`, `input`, `storage` — the same order the
-    /// accessors appear in. It takes boxes rather than generics so the caller can mix concrete types
-    /// and, in a test, its own fakes.
+    /// The order is `power`, `wifi`, `audio`, `mic`, `imu`, `input`, `storage`, `web` — the same order
+    /// the accessors appear in. It takes boxes rather than generics so the caller can mix concrete
+    /// types and, in a test, its own fakes.
     pub fn from_backends(
         power: Box<dyn PowerBackend>,
         wifi: Box<dyn WifiBackend>,
@@ -62,6 +64,7 @@ impl Board {
         imu: Box<dyn ImuBackend>,
         input: Box<dyn InputBackend>,
         storage: Box<dyn StorageBackend>,
+        web: Box<dyn WebBackend>,
     ) -> Self {
         Self {
             power: Mutex::new(power),
@@ -71,6 +74,7 @@ impl Board {
             imu: Mutex::new(imu),
             input: Mutex::new(input),
             storage: Mutex::new(storage),
+            web: Mutex::new(web),
             listeners: Mutex::new(Vec::new()),
             events: Mutex::new(VecDeque::with_capacity(MAX_EVENT_QUEUE_SIZE)),
             event_condvar: Condvar::new(),
@@ -81,7 +85,7 @@ impl Board {
     /// A board of desktop simulator backends.
     #[cfg(not(target_os = "espidf"))]
     pub fn simulated() -> Self {
-        use crate::sim::{SimAudio, SimImu, SimInput, SimMic, SimPower, SimStorage, SimWifi};
+        use crate::sim::{SimAudio, SimImu, SimInput, SimMic, SimPower, SimStorage, SimWeb, SimWifi};
         Self::from_backends(
             Box::new(SimPower::new()),
             Box::new(SimWifi::new()),
@@ -90,6 +94,7 @@ impl Board {
             Box::new(SimImu::new()),
             Box::new(SimInput::new()),
             Box::new(SimStorage::new()),
+            Box::new(SimWeb::new()),
         )
     }
 
@@ -183,6 +188,14 @@ impl Board {
     /// Lock the storage backend.
     pub fn storage(&self) -> MutexGuard<'_, Box<dyn StorageBackend>> {
         lock(&self.storage)
+    }
+
+    /// Lock the management-server backend.
+    ///
+    /// The app of the same name holds this to start and stop the server; nothing else does, and no
+    /// part of the page it serves comes through here.
+    pub fn web(&self) -> MutexGuard<'_, Box<dyn WebBackend>> {
+        lock(&self.web)
     }
 
     /// Advance every time-driven subsystem (Wi-Fi scan progress, audio EOF

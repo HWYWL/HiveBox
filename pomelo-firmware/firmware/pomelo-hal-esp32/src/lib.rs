@@ -41,6 +41,7 @@ mod input;
 mod mic;
 mod power;
 mod storage;
+mod web;
 mod wifi;
 mod event;
 
@@ -54,6 +55,7 @@ pub use input::EspInput;
 pub use mic::EspMic;
 pub use power::EspPower;
 pub use storage::EspStorage;
+pub use web::EspWeb;
 pub use wifi::EspWifi;
 
 /// Assemble this board's backends into the shared handle the apps take.
@@ -70,6 +72,7 @@ pub fn board() -> Arc<Board> {
         Box::new(imu::EspImu::new()),
         Box::new(input::EspInput::new()),
         Box::new(storage::EspStorage::new()),
+        Box::new(web::EspWeb::new()),
     ));
     event::start_event_pump(Arc::clone(&board));
     board

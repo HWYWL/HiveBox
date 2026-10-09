@@ -4,8 +4,8 @@ The board-level hardware **interface** for [Pomelo OS](https://github.com/pomelo
 plus the desktop simulator that implements it.
 
 Here "HAL" means *board-level services* — the peripherals this board has: power, Wi-Fi, audio, mic,
-IMU, storage. Not the register-level HAL that [`esp-hal`](https://github.com/esp-rs/esp-hal) means;
-nothing in this crate talks to a register.
+IMU, storage, and the management server that puts the box on the network. Not the register-level HAL
+that [`esp-hal`](https://github.com/esp-rs/esp-hal) means; nothing in this crate talks to a register.
 
 ```text
 vendor/pomelo-apps/*                the iced applications
@@ -23,7 +23,7 @@ firmware/components/board_hal/      the C drivers
 Which backends a board has is an argument rather than a `#[cfg]`:
 
 ```rust
-Board::from_backends(power, wifi, audio, mic, imu, input, storage)   // the composition root decides
+Board::from_backends(power, wifi, audio, mic, imu, input, storage, web)  // the composition root decides
 Board::simulated()                                                   // the desktop simulator
 ```
 
@@ -41,12 +41,17 @@ a desktop test builds `Arc::new(Board::simulated())` and hands it to the same la
 ## The traits
 
 One file per hardware domain, one trait each — `PowerBackend`, `WifiBackend`, `AudioBackend`,
-`MicBackend`, `ImuBackend`, `StorageBackend`. All of them are `Send + Sync` (they live behind a mutex
-inside `Board`) and object-safe (the `Board` fields are `Box<dyn …>`). Long-running work follows a
-*start + poll* rule: the caller kicks it off and then polls a status method that never blocks.
+`MicBackend`, `ImuBackend`, `StorageBackend`, `WebBackend`. All of them are `Send + Sync` (they live
+behind a mutex inside `Board`) and object-safe (the `Board` fields are `Box<dyn …>`). Long-running work
+follows a *start + poll* rule: the caller kicks it off and then polls a status method that never
+blocks.
 
-`Board::from_backends` takes the seven backends in the order `power, wifi, audio, mic, imu, input,
-storage`; boxes rather than generics, so a caller can mix concrete backends and a test can pass fakes.
+`WebBackend` follows that rule too, and it is the one trait with no data in it: what the server serves
+is the C side's page, so all that crosses here is a switch and a port.
+
+`Board::from_backends` takes the eight backends in the order `power, wifi, audio, mic, imu, input,
+storage, web`; boxes rather than generics, so a caller can mix concrete backends and a test can pass
+fakes.
 `Board::init` and `Board::tick` are the two lifecycle calls: initialise once at boot, tick once per
 frame.
 
@@ -102,6 +107,7 @@ subsystem lands:
 | `AudioBackend` | P2 | `host_audio_*` — done, legacy names (the `hal_*` rename is pending) |
 | `WifiBackend` | P3 | `hal_wifi_*` — done |
 | `StorageBackend` | P4 | `hal_storage_*` — done, the `internal` partition and the microSD slot |
+| `WebBackend` | P4 | `hal_web_*` — done, `esp_http_server` with the page in the image |
 | `MicBackend` / `ImuBackend` | P5 | `hal_mic_*` / `hal_imu_*` — to write (ES7210 / QMI8658) |
 
 The display and the touch controller are still deliberately not abstracted: those are the UI engine's

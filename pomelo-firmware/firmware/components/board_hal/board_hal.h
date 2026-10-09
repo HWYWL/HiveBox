@@ -382,6 +382,37 @@ typedef struct {
 esp_err_t hal_storage_get_flash(hal_flash_layout_t *out);
 
 /* ---------------------------------------------------------------------------
+ * Web management server (`esp_http_server`).
+ *
+ * Started and stopped by the app of the same name and by nothing else: the box carries no server until
+ * a finger asks for one. `board_web.c` holds the page and the routes; this is the whole of what the
+ * Rust side sees of it.
+ *
+ * There is no authentication. The server is bound to every interface and the page it serves can read
+ * and write the filesystem and change the network — see the note at the top of `board_web.c`, which is
+ * the reason it is off by default rather than the reason it is missing a password.
+ * ------------------------------------------------------------------------- */
+
+/** @brief Bring the server up on `port`, registering the page and its API.
+ *
+ * Idempotent: already up on the same port is ESP_OK and nothing is restarted. A different port stops
+ * the old server and starts the new one.
+ *
+ * @return ESP_OK, ESP_ERR_INVALID_ARG for port 0, or what `httpd_start` / `httpd_register_uri_handler`
+ *         said.
+ */
+esp_err_t hal_web_start(uint16_t port);
+
+/** @brief Take the server down, closing every socket it owns. Down already is ESP_OK. */
+esp_err_t hal_web_stop(void);
+
+/** @brief Whether the server is up. Safe to call from any task. */
+bool hal_web_is_running(void);
+
+/** @brief The port it is up on, or 0 when it is down. */
+uint16_t hal_web_get_port(void);
+
+/* ---------------------------------------------------------------------------
  * ES8311 audio codec and I2S speaker interface (Audio Sink).
  * ------------------------------------------------------------------------- */
 

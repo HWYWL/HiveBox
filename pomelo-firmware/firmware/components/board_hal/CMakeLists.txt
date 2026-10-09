@@ -24,8 +24,13 @@ idf_component_register(
         "board_wifi.c"
         "board_rtc.c"
         "board_storage.c"
+        "board_web.c"
     INCLUDE_DIRS "."
     WHOLE_ARCHIVE
+    # The management page, as bytes in the image: it has to be there before anything can ask for it,
+    # and the filesystem it manages is not a place it can live (see the top of `board_web.c`).
+    # `EMBED_FILES` and not `EMBED_TXTFILES`: the length served is `end - start`, exactly.
+    EMBED_FILES "web/web_page.html"
     REQUIRES
         waveshare__esp32_s3_touch_amoled_2_16
         waveshare__pcf85063a
@@ -37,6 +42,10 @@ idf_component_register(
         vfs
         esp_wifi
         esp_netif
+        # The management server (`board_web.c`), and the sockets under it.
+        esp_http_server
+        # The app's own description (name, version, build date) for `/api/system`.
+        esp_app_format
         esp_event
         nvs_flash
         esp_timer

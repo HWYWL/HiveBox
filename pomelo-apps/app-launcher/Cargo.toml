@@ -6,7 +6,7 @@ description = "A standard iced program: the launcher, hosting the other apps as 
 license = "GPL-3.0-only"
 
 # A member of the workspace at the root of this repository (`Cargo.toml`): that is what lets
-# `cargo test --workspace` run all seven apps against one lock while each stays its own crate, with
+# `cargo test --workspace` run all eight apps against one lock while each stays its own crate, with
 # its own `main.rs` and its own `desktop` feature. Nothing in this graph patches anything, so
 # `cargo run` here builds against iced from crates.io, exactly like any other iced program.
 #
@@ -37,6 +37,7 @@ hello = { path = "../hello", default-features = false }
 music-player = { path = "../music-player", default-features = false }
 settings = { path = "../settings", default-features = false }
 terminal = { path = "../terminal", default-features = false }
+web-manager = { path = "../web-manager", default-features = false }
 
 # The icons the grid draws. A crate of its own -- a font and a table of `Icon` constants, with no
 # widgets in it -- so that this app does not have to depend on `pomelo-widgets` to draw a picture:
