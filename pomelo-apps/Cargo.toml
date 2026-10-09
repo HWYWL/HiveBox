@@ -1,4 +1,4 @@
-# The eight applications, as one project.
+# The six applications, as one project.
 #
 # Each app is its own crate — its own `main.rs`, its own test suite, its own `desktop` feature — and
 # this table is what makes them one project: one `Cargo.lock`, `cargo test --workspace` in one
@@ -18,8 +18,6 @@ resolver = "2"
 members = [
     "app-launcher",
     "calculator",
-    "demo-counter",
-    "hello",
     "music-player",
     "settings",
     "terminal",

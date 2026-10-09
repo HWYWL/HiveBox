@@ -31,8 +31,9 @@
 //! # What is not here yet
 //!
 //! Canvas text. `Frame::fill_text` and `Frame::stroke_text` are `todo!()` rather than silently
-//! dropped, because iced's canvas text needs a `Paragraph` and a `blit_mask` replay, and neither
-//! the launcher nor hello draws canvas text. When it lands it will be a [`Text`](crate::layer::Text)
+//! dropped, because iced's canvas text needs a `Paragraph` and a `blit_mask` replay, and no canvas
+//! in this tree draws text — the one on the board stacks its numbers over the ring as widgets
+//! instead. When it lands it will be a [`Text`](crate::layer::Text)
 //! in the layer's own `text` vector, the way `iced_tiny_skia` records it — which is why there is no
 //! text case in [`Primitive`] at all: a widget's label is a text *item*, not a canvas command.
 

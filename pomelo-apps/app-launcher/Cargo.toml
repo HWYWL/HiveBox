@@ -6,7 +6,7 @@ description = "A standard iced program: the launcher, hosting the other apps as 
 license = "GPL-3.0-only"
 
 # A member of the workspace at the root of this repository (`Cargo.toml`): that is what lets
-# `cargo test --workspace` run all eight apps against one lock while each stays its own crate, with
+# `cargo test --workspace` run all five apps against one lock while each stays its own crate, with
 # its own `main.rs` and its own `desktop` feature. Nothing in this graph patches anything, so
 # `cargo run` here builds against iced from crates.io, exactly like any other iced program.
 #
@@ -32,8 +32,6 @@ pomelo-hal = { git = "https://github.com/pomelos-on-sale/pomelo-hal.git", rev = 
 # project's or the firmware's choice and never a child's: their `desktop` default would otherwise
 # decide it from inside a dependency.
 calculator = { path = "../calculator", default-features = false }
-demo-counter = { path = "../demo-counter", default-features = false }
-hello = { path = "../hello", default-features = false }
 music-player = { path = "../music-player", default-features = false }
 settings = { path = "../settings", default-features = false }
 terminal = { path = "../terminal", default-features = false }

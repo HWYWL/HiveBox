@@ -9,9 +9,9 @@
 //!
 //! # Hosting an app is merging its subscription
 //!
-//! The seven apps are hosted as **widgets**: this launcher calls their `view` and `update` itself, so
-//! their state is its state. What a widget cannot carry is an app's *subscriptions* — the two that
-//! animate (`hello`, `music-player`) and the one whose *layout* follows the screen (`terminal`) all
+//! The five apps are hosted as **widgets**: this launcher calls their `view` and `update` itself, so
+//! their state is its state. What a widget cannot carry is an app's *subscriptions* — the one that
+//! runs a clock (`music-player`) and the one whose *layout* follows the screen (`terminal`) both
 //! express that as a `Subscription`, and a subscription belongs to whoever owns the loop.
 //!
 //! So the launcher, which owns the loop for its children as far as they are concerned, says in
@@ -37,7 +37,8 @@
 //!
 //! # The grid is paged, and the pager is this file's
 //!
-//! A page is [`PER_PAGE`] apps, one to a quadrant, so the seven the catalogue has are two pages. A
+//! A page is [`PER_PAGE`] apps, one to a quadrant, so the five the catalogue has are two pages: four
+//! and one. A
 //! finger turning one is a **drag**: down on the grid, across, up. iced has no widget for that — a
 //! `button` captures the press it is given, and `Scrollable` scrolls for a wheel, a touch or its own
 //! scrollbar and for nothing else — so the gesture is read here.
@@ -65,8 +66,6 @@ use iced::{
 };
 
 use calculator::Calculator;
-use demo_counter::Counter;
-use hello::Hello;
 use music_player::Player;
 use pomelo_hal::Board;
 use settings::Settings;
@@ -117,15 +116,12 @@ enum Screen {
 ///
 /// Indices, because that is what the grid hands over when a tile is tapped. The tests assert that
 /// each of these still names the app it says it does, and every entry has one: the catalogue and
-/// the list of apps are the same seven things.
-pub const TERMINAL: usize = 0;
-pub const CALCULATOR: usize = 1;
-pub const DEMO_COUNTER: usize = 2;
-pub const COUNTER: usize = DEMO_COUNTER;
-pub const HELLO: usize = 3;
-pub const SETTINGS: usize = 4;
-pub const MUSIC: usize = 5;
-pub const WEB_MANAGER: usize = 6;
+/// the list of apps are the same five things, in the same order.
+pub const MUSIC: usize = 0;
+pub const WEB_MANAGER: usize = 1;
+pub const TERMINAL: usize = 2;
+pub const SETTINGS: usize = 3;
+pub const CALCULATOR: usize = 4;
 
 /// What the launcher reacts to.
 ///
@@ -162,8 +158,6 @@ pub enum Message {
     Resized(Size),
     /// A message from one of the apps this launcher hosts.
     Calculator(calculator::Message),
-    Counter(demo_counter::Message),
-    Hello(hello::Message),
     Settings(settings::Message),
     Music(music_player::Message),
     Terminal(terminal::Message),
@@ -174,8 +168,6 @@ pub enum Message {
 pub struct Launcher {
     screen: Screen,
     calculator: Option<Calculator>,
-    counter: Option<Counter>,
-    hello: Option<Hello>,
     settings: Option<Settings>,
     music: Option<Player>,
     terminal: Option<Terminal>,
@@ -212,8 +204,6 @@ impl Launcher {
         Self {
             screen: Screen::Grid,
             calculator: None,
-            counter: None,
-            hello: None,
             settings: None,
             music: None,
             terminal: None,
@@ -261,12 +251,6 @@ impl Launcher {
         if let Some(app) = &mut self.calculator {
             app.set_preferences(prefs);
         }
-        if let Some(app) = &mut self.counter {
-            app.set_preferences(prefs);
-        }
-        if let Some(app) = &mut self.hello {
-            app.set_preferences(prefs);
-        }
         if let Some(app) = &mut self.settings {
             app.set_preferences(prefs);
         }
@@ -299,24 +283,6 @@ impl Launcher {
             self.calculator = Some(app);
         }
         self.calculator.as_mut().unwrap()
-    }
-
-    pub fn get_or_create_counter(&mut self) -> &mut Counter {
-        if self.counter.is_none() {
-            let mut app = Counter::new();
-            app.set_preferences(self.preferences);
-            self.counter = Some(app);
-        }
-        self.counter.as_mut().unwrap()
-    }
-
-    pub fn get_or_create_hello(&mut self) -> &mut Hello {
-        if self.hello.is_none() {
-            let mut app = Hello::new();
-            app.set_preferences(self.preferences);
-            self.hello = Some(app);
-        }
-        self.hello.as_mut().unwrap()
     }
 
     pub fn get_or_create_settings(&mut self) -> &mut Settings {
@@ -373,14 +339,6 @@ impl Launcher {
     /// The hosted apps, for the host and the tests.
     pub fn calculator(&mut self) -> &Calculator {
         self.get_or_create_calculator()
-    }
-
-    pub fn counter(&mut self) -> &Counter {
-        self.get_or_create_counter()
-    }
-
-    pub fn hello(&mut self) -> &Hello {
-        self.get_or_create_hello()
     }
 
     pub fn settings(&mut self) -> &Settings {
@@ -441,8 +399,6 @@ impl Launcher {
         match index {
             TERMINAL => self.terminal = None,
             CALCULATOR => self.calculator = None,
-            COUNTER => self.counter = None,
-            HELLO => self.hello = None,
             SETTINGS => self.settings = None,
             MUSIC => self.music = None,
             WEB_MANAGER => self.web_manager = None,
@@ -567,28 +523,6 @@ impl Launcher {
     fn calculator_screen(&self) -> Element<'_, Message> {
         if let Some(app) = &self.calculator {
             app.view().map(Message::Calculator)
-        } else {
-            Space::new().into()
-        }
-    }
-
-    fn counter_screen(&self) -> Element<'_, Message> {
-        if let Some(app) = &self.counter {
-            app.view().map(Message::Counter)
-        } else {
-            Space::new().into()
-        }
-    }
-
-    /// The signature, hosted -- and the only app here whose picture is a function of the clock.
-    ///
-    /// A hosted app cannot ask for frames itself — a widget has no subscription — so the launcher
-    /// merges the one it *does* have in [`Launcher::subscription`], and only while that app is on
-    /// screen: an animation behind the grid would keep the loop awake to draw something nobody can
-    /// see.
-    fn hello_screen(&self) -> Element<'_, Message> {
-        if let Some(app) = &self.hello {
-            app.view().map(Message::Hello)
         } else {
             Space::new().into()
         }
@@ -789,11 +723,6 @@ impl Launcher {
         ];
 
         match self.screen {
-            Screen::App(HELLO) => {
-                if let Some(hello) = &self.hello {
-                    subs.push(hello.subscription().map(Message::Hello));
-                }
-            }
             Screen::App(TERMINAL) => {
                 if let Some(terminal) = &self.terminal {
                     subs.push(terminal.subscription().map(Message::Terminal));
@@ -856,13 +785,6 @@ impl Launcher {
                     CALCULATOR => {
                         self.get_or_create_calculator();
                     }
-                    COUNTER => {
-                        self.get_or_create_counter();
-                    }
-                    HELLO => {
-                        let hello = self.get_or_create_hello();
-                        hello.restart();
-                    }
                     SETTINGS => {
                         self.get_or_create_settings();
                     }
@@ -912,8 +834,6 @@ impl Launcher {
                 self.hand_over_size();
             }
             Message::Calculator(message) => self.get_or_create_calculator().update(message),
-            Message::Counter(message) => self.get_or_create_counter().update(message),
-            Message::Hello(message) => self.get_or_create_hello().update(message),
             // The player navigates inside itself too — the list and the track — so its back is asked
             // before it is handled like any other message, exactly as the settings app's is. Both the
             // button on the playing screen and the hardware key arrive here as this one message.
@@ -1026,8 +946,6 @@ impl Launcher {
             Screen::Grid => self.launcher(),
             Screen::App(TERMINAL) => self.terminal_screen(),
             Screen::App(CALCULATOR) => self.calculator_screen(),
-            Screen::App(COUNTER) => self.counter_screen(),
-            Screen::App(HELLO) => self.hello_screen(),
             Screen::App(SETTINGS) => self.settings_screen(),
             Screen::App(MUSIC) => self.music_screen(),
             Screen::App(WEB_MANAGER) => self.web_manager_screen(),
@@ -1319,28 +1237,49 @@ mod tests {
     #[test]
     fn catalogue_entries_are_localized_in_both_languages() {
         for entry in CATALOGUE {
-            if entry.name != "demo-counter" {
-                assert_ne!(entry.localized_name(Language::Chinese), entry.localized_name(Language::English));
-            }
+            assert_ne!(
+                entry.localized_name(Language::Chinese),
+                entry.localized_name(Language::English)
+            );
             assert!(!entry.localized_name(Language::Chinese).is_empty());
             assert!(!entry.localized_name(Language::English).is_empty());
         }
 
-        assert_eq!(CATALOGUE[TERMINAL].localized_name(Language::Chinese), "终端");
-        assert_eq!(CATALOGUE[CALCULATOR].localized_name(Language::Chinese), "计算器");
-        assert_eq!(CATALOGUE[COUNTER].localized_name(Language::Chinese), "demo-counter");
-        assert_eq!(CATALOGUE[HELLO].localized_name(Language::Chinese), "你好");
-        assert_eq!(CATALOGUE[SETTINGS].localized_name(Language::Chinese), "设置");
         assert_eq!(CATALOGUE[MUSIC].localized_name(Language::Chinese), "音乐");
         assert_eq!(CATALOGUE[WEB_MANAGER].localized_name(Language::Chinese), "网页管理");
+        assert_eq!(CATALOGUE[TERMINAL].localized_name(Language::Chinese), "终端");
+        assert_eq!(CATALOGUE[SETTINGS].localized_name(Language::Chinese), "设置");
+        assert_eq!(CATALOGUE[CALCULATOR].localized_name(Language::Chinese), "计算器");
+    }
+
+    /// The grid's two pages, in the order they are drawn: the four the box is for, then the one it
+    /// is not.
+    ///
+    /// Written out rather than derived, because the order *is* the interface: a page and a position
+    /// are what a finger learns, and a reshuffle that left this test green would be the one kind of
+    /// change nobody would notice until they were holding the box.
+    #[test]
+    fn the_catalogue_is_two_pages_in_the_order_the_grid_shows_them() {
+        let names: Vec<&str> = CATALOGUE.iter().map(|entry| entry.name).collect();
+
+        assert_eq!(
+            names,
+            ["Music", "Web Manager", "Terminal", "Settings", "Calculator"]
+        );
+        assert_eq!(CATALOGUE.len(), 5, "and the five are all the tiles there are");
+        assert_eq!(
+            Launcher::new(Arc::new(Board::simulated())).pages(),
+            2,
+            "four on the first page leaves the fifth on the second"
+        );
     }
 
     #[test]
     fn tile_label_truncation_and_single_line() {
-        // "demo-counter" fits completely in the wider tile line width
+        // The longest name the catalogue has fits the wider tile line width
         assert_eq!(
-            style::truncate_label("demo-counter", style::LABEL_MAX_WIDTH, style::LABEL),
-            "demo-counter"
+            style::truncate_label("Web Manager", style::LABEL_MAX_WIDTH, style::LABEL),
+            "Web Manager"
         );
         assert_eq!(
             style::truncate_label("Terminal", style::LABEL_MAX_WIDTH, style::LABEL),
@@ -1353,8 +1292,8 @@ mod tests {
 
         // Strips any potential newline to guarantee single line
         assert_eq!(
-            style::truncate_label("demo-counter\nsecond-line", style::LABEL_MAX_WIDTH, style::LABEL),
-            "demo-counter"
+            style::truncate_label("Web Manager\nsecond-line", style::LABEL_MAX_WIDTH, style::LABEL),
+            "Web Manager"
         );
 
         // Very long name truncates and appends "..."
@@ -1387,8 +1326,6 @@ mod tests {
         launcher.update(Message::Settings(settings::Message::SetTheme(ThemeMode::Light)));
         assert_eq!(launcher.preferences().theme, ThemeMode::Light);
         assert_eq!(launcher.calculator().theme_mode(), ThemeMode::Light);
-        assert_eq!(launcher.counter().theme_mode(), ThemeMode::Light);
-        assert_eq!(launcher.hello().theme_mode(), ThemeMode::Light);
         assert_eq!(launcher.music().theme_mode(), ThemeMode::Light);
         assert_eq!(launcher.terminal().theme_mode(), ThemeMode::Light);
 
@@ -1415,13 +1352,9 @@ mod tests {
         assert_eq!(launcher.preferences(), custom_prefs);
         assert_eq!(launcher.settings().preferences(), custom_prefs);
         assert_eq!(launcher.calculator().preferences(), custom_prefs);
-        assert_eq!(launcher.counter().preferences(), custom_prefs);
-        assert_eq!(launcher.hello().preferences(), custom_prefs);
         assert_eq!(launcher.music().preferences(), custom_prefs);
         assert_eq!(launcher.terminal().preferences(), custom_prefs);
         assert_eq!(launcher.calculator().theme_mode(), ThemeMode::Dark);
-        assert_eq!(launcher.counter().theme_mode(), ThemeMode::Dark);
-        assert_eq!(launcher.hello().theme_mode(), ThemeMode::Dark);
         assert_eq!(launcher.music().theme_mode(), ThemeMode::Dark);
         assert_eq!(launcher.terminal().theme_mode(), ThemeMode::Dark);
     }
@@ -1673,8 +1606,6 @@ mod tests {
 
         // At boot, all sub-apps are None (0 boot CPU time / 0 heap allocations for apps)
         assert!(launcher.calculator.is_none());
-        assert!(launcher.counter.is_none());
-        assert!(launcher.hello.is_none());
         assert!(launcher.settings.is_none());
         assert!(launcher.music.is_none());
         assert!(launcher.terminal.is_none());
@@ -1683,8 +1614,6 @@ mod tests {
         // Opening Calculator instantiates only Calculator
         launcher.update(Message::Open(CALCULATOR));
         assert!(launcher.calculator.is_some());
-        assert!(launcher.counter.is_none());
-        assert!(launcher.hello.is_none());
         assert!(launcher.settings.is_none());
         assert!(launcher.music.is_none());
         assert!(launcher.terminal.is_none());

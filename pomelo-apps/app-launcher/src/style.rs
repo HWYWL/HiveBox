@@ -32,7 +32,11 @@ pub const ICON: f32 = 118.0;
 pub const ICON_RADIUS: f32 = 33.0;
 pub const GLYPH: f32 = 54.0;
 
-/// The app tile container width, expanded to 160 px so longer app names (like "demo-counter") fit on one line.
+/// The app tile container width: wider than the icon, and wider than most names need.
+///
+/// 160 px, so that the longest name the catalogue has stays on one line beside it. What happens to
+/// one that does not is [`LABEL_MAX_WIDTH`]'s: a tile's label is a single line and is cut with an
+/// ellipsis, because a label that wrapped would be a row a different height from the row beside it.
 pub const TILE_WIDTH: f32 = 160.0;
 
 /// The app grid icon label font size: sourced from the 18px system tier.

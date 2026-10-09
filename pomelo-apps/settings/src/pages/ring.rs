@@ -10,8 +10,8 @@
 //!
 //! That layer is available on the board: `iced-pomelo-gfx` implements iced's full
 //! `geometry::Renderer`, so a `Path` a canvas builds arrives at `pomelo-gfx` as a real path and is
-//! stroked by its own rasteriser. `pomelo-apps/hello` draws its signature the same way, which is
-//! what makes this a port of a shape rather than a new capability.
+//! stroked by its own rasteriser — whose own tests stroke a cubic the same way, which is what makes
+//! this a port of a shape rather than a new capability.
 //!
 //! # The number is not drawn here
 //!

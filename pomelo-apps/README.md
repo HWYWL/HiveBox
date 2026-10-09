@@ -8,7 +8,7 @@ same source is what the firmware image hosts on the panel — which layer answer
 graph root that builds it, not by the app.
 
 ```bash
-cargo run -p calculator            # any of the seven, by name
+cargo run -p calculator            # any of the six, by name
 cargo test --workspace             # every app's own suite
 ```
 
@@ -19,10 +19,8 @@ A window that feels slow is a *debug* build — iced's tiny-skia rasteriser is s
 
 | app | what it is |
 | :--- | :--- |
-| `app-launcher` | the home screen: a paged grid of tiles, and the one app that is not a leaf — it hosts the other six as widgets (`view`/`update` called by the launcher, so their state is its state) and merges the subscription of whichever one is on screen |
+| `app-launcher` | the home screen: a paged grid of tiles, and the one app that is not a leaf — it hosts the other five as widgets (`view`/`update` called by the launcher, so their state is its state) and merges the subscription of whichever one is on screen |
 | `calculator` | keys, a display and the arithmetic |
-| `demo-counter` | one button that counts: the smallest complete program here |
-| `hello` | a canvas stroke animation, drawn in a `canvas::Program` |
 | `music-player` | a playlist, a transport and a readout, over the HAL's audio backend |
 | `settings` | a list of sections, one of which is a live Wi-Fi page with a password prompt |
 | `terminal` | a shell over LittleFS, with its own on-screen keyboard |
@@ -39,7 +37,7 @@ revision, because this repository has to build on its own:
 | [`pomelo-widgets`](https://github.com/pomelos-on-sale/pomelo-widgets) | `settings`, `terminal` | the widgets two or more apps draw: today the on-screen keyboard, so that a password prompt and a shell cannot drift apart |
 | [`pomelo-material-symbols`](https://github.com/pomelos-on-sale/pomelo-material-symbols) | `app-launcher` | one font of the whole Material Symbols catalogue, and one `const` per icon |
 
-Being a *member* of this workspace is what lets the seven be one project; it is also what keeps the
+Being a *member* of this workspace is what lets the six be one project; it is also what keeps the
 firmware from listing them as members in turn (a package cannot be a member of two workspaces), so
 `rust_main` and the panel tests over there depend on them by path. Same manifests, a different
 graph.

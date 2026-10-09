@@ -13,8 +13,6 @@ name = "app-launcher"
 version = "0.1.0"
 dependencies = [
  "calculator",
- "demo-counter",
- "hello",
  "iced",
  "image",
  "music-player",
@@ -227,14 +225,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "83cf0d42651b16c6dfe68685716d18480d18a9c39c62d76e8cf3eb6ed5d8bcbf"
 dependencies = [
  "dtor",
-]
-
-[[package]]
-name = "demo-counter"
-version = "0.1.0"
-dependencies = [
- "iced",
- "pomelo-widgets",
 ]
 
 [[package]]
@@ -563,14 +553,6 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
-
-[[package]]
-name = "hello"
-version = "0.1.0"
-dependencies = [
- "iced",
- "pomelo-widgets",
-]
 
 [[package]]
 name = "hexf-parse"

@@ -91,8 +91,6 @@ name = "app-launcher"
 version = "0.1.0"
 dependencies = [
  "calculator",
- "demo-counter",
- "hello",
  "iced",
  "image",
  "music-player",
@@ -631,15 +629,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
-name = "demo-counter"
-version = "0.1.0"
-dependencies = [
- "iced",
- "iced_test",
- "pomelo-widgets",
-]
-
-[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1113,14 +1102,6 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
-
-[[package]]
-name = "hello"
-version = "0.1.0"
-dependencies = [
- "iced",
- "pomelo-widgets",
-]
 
 [[package]]
 name = "hermit-abi"
