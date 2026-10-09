@@ -136,6 +136,17 @@ impl SystemPanel {
         }
     }
 
+    /// The image as the board described it, for the one other page that says what this box is.
+    ///
+    /// The system page's `OS` row is the same fact this panel's firmware card shows, and it is read
+    /// from here rather than from the board a second time — which is the whole reason the readout is
+    /// where the identity is kept. Two surfaces drawing one reading from one source cannot come to
+    /// disagree about it, and both of them being told what the image calls itself is what stops the
+    /// page going on saying "Pomelo OS v0.2.0" about an image whose version is a git hash.
+    pub(crate) fn firmware(&self) -> Option<&FirmwareInfo> {
+        self.identity.as_ref().map(|identity| &identity.firmware)
+    }
+
     /// Reads the chip and the image, keeping what the last read found if this one fails.
     fn read_identity(&mut self, board: &Board) {
         let system = board.system();
@@ -217,7 +228,7 @@ pub(crate) fn summary_panel<'a>(preferences: SystemPreferences, panel: &SystemPa
         info_card(
             Icon::DEVELOPER_BOARD,
             IconColor::Blue,
-            language.text(Key::Model),
+            language.text(Key::ChipModel),
             panel
                 .identity
                 .as_ref()

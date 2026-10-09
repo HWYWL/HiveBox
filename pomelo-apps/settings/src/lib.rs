@@ -594,7 +594,7 @@ impl Settings {
             SettingsSection::Memory => memory_page(self.preferences),
             SettingsSection::Storage => storage_page(self.preferences, &self.storage),
             SettingsSection::Battery => battery_page(self.preferences, self.battery),
-            SettingsSection::SystemInfo => system_page(self.preferences),
+            SettingsSection::SystemInfo => system_page(self.preferences, &self.system),
             SettingsSection::Theme => theme_page(self.preferences),
             SettingsSection::Time => time_page(self.preferences, self.is_24h_format),
         };

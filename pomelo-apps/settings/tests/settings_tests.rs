@@ -1468,6 +1468,41 @@ fn a_gauges_three_parts_share_a_centre_line() {
     );
 }
 
+/// The system page says what the image calls itself, and the readout at the top of the list says the
+/// same thing — one reading, one source.
+///
+/// The regression this is for is a sentence about an image nobody has: the OS row was the literal
+/// `Pomelo OS v0.2.0 (Build 2026.09)` while the panel's firmware card read the version out of the
+/// image, so the same box was two different firmwares depending on which screen was up.
+#[test]
+fn the_system_page_names_the_image_that_is_running() {
+    let settings = english();
+    let mut ui = screen(&settings, TALL);
+
+    // The card on the main list, and then the row behind the `System` tile.
+    assert!(ui.find("0.1.0 (simulator)").is_ok(), "the readout");
+    assert!(
+        ui.find("Pomelo OS v0.2.0 (Build 2026.09)").is_err(),
+        "and the literal the page used to draw is gone from the list too"
+    );
+
+    let mut settings = english();
+    settings.update(Message::Open(SettingsSection::SystemInfo));
+    let mut ui = screen(&settings, TALL);
+
+    assert!(
+        ui.find("pomelo-os 0.1.0 (simulator)").is_ok(),
+        "the page names the image the board described"
+    );
+    assert!(
+        ui.find("Pomelo OS v0.2.0 (Build 2026.09)").is_err(),
+        "and not the version this code was written against"
+    );
+
+    // The rows that are specifications stay written down, and are not turned into readings.
+    assert!(ui.find("Waveshare ESP32-S3 AMOLED 2.16\"").is_ok());
+}
+
 /// A second is when the readout looks again, and it only looks while it is on screen.
 ///
 /// The whole of `Settings::refresh_system`: the tick arrives every second, and what it must not do

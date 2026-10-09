@@ -87,6 +87,10 @@ pub enum Key {
     ChipTemperature,
     Firmware,
     Uptime,
+    // `Model` is the *board's* name — "Waveshare ESP32-S3 AMOLED 2.16\"" — and it heads a row on the
+    // system page. This one is the chip's part number, which is a different fact with the same word
+    // for it, and a card and a row labelled alike are two things a reader takes for one.
+    ChipModel,
 
     // The Wi-Fi page.
     Toggle,
@@ -217,6 +221,7 @@ impl Key {
             Self::ChipTemperature => "芯片温度",
             Self::Firmware => "固件版本",
             Self::Uptime => "已启动",
+            Self::ChipModel => "芯片型号",
 
             Self::Toggle => "开关",
             Self::Network => "网络",
@@ -327,6 +332,7 @@ impl Key {
             Self::ChipTemperature => "Chip temp",
             Self::Firmware => "Firmware",
             Self::Uptime => "Uptime",
+            Self::ChipModel => "Chip model",
 
             Self::Toggle => "Switch",
             Self::Network => "Network",
@@ -462,7 +468,7 @@ mod tests {
 
     /// Every key, for the tests above. Kept beside them so a new variant is a compile error here
     /// too.
-    const ALL: [Key; 96] = [
+    const ALL: [Key; 97] = [
         Key::Settings,
         Key::Back,
         Key::Wifi,
@@ -486,6 +492,7 @@ mod tests {
         Key::ChipTemperature,
         Key::Firmware,
         Key::Uptime,
+        Key::ChipModel,
         Key::Toggle,
         Key::Network,
         Key::Signal,
