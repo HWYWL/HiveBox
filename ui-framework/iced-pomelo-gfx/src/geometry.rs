@@ -694,7 +694,17 @@ fn convert_path(path: &Path, transform: &Transform) -> Option<GfxPath> {
                 let to = transform.map_point(point(&to));
                 builder.cubic_to(ctrl1.x, ctrl1.y, ctrl2.x, ctrl2.y, to.x, to.y);
             }
-            lyon_path::PathEvent::End { .. } => builder.close(),
+            // `close` and not every `End`: a subpath that does not close is one a canvas drew
+            // open — a dial's arc, a signature's stroke — and closing it here would add a line
+            // from where the curve ended back to where it began. On a ring that line is a chord
+            // across the dial; on a signature it is a stroke through the letters. Upstream's
+            // `tiny_skia` backend asks the same question (`iced_tiny_skia/src/geometry.rs`), and
+            // the point of this renderer is that the same `canvas` draws the same picture on it.
+            lyon_path::PathEvent::End { close, .. } => {
+                if close {
+                    builder.close();
+                }
+            }
         }
 
         drew = true;
@@ -926,6 +936,59 @@ mod tests {
             pomelo_gfx::Color::WHITE.to_rgb565(),
             "the middle of a filled rectangle is filled"
         );
+    }
+
+    /// A stroked arc is an arc, and not an arc with a line back across it.
+    ///
+    /// The regression this exists for: every subpath a canvas drew arrived closed, so the first
+    /// ring gauge on the board — an arc from twelve o'clock — was drawn with a chord from its far
+    /// end back to its start, and a 41 % ring came out as a wedge with a straight edge through the
+    /// middle of the dial.
+    ///
+    /// A half turn is the case that says it in one pixel: its two ends are diametrically opposite,
+    /// so the closing line *is* the diameter, and the centre of the ring is the one place it is
+    /// certainly painted. Everything the fix must keep is asserted beside it — the arc itself, and
+    /// the fact that a stroke is a band rather than a disc.
+    #[test]
+    fn an_open_arc_is_not_closed_behind_the_canvas_back() {
+        /// The dial: 24 px radius about the middle of the 64 px panel, with a 6 px band.
+        const RADIUS: f32 = 24.0;
+        const WIDTH: f32 = 6.0;
+
+        let mut frame = frame();
+
+        frame.stroke(
+            &Path::new(|builder| {
+                builder.arc(iced_graphics::geometry::path::Arc {
+                    center: Point::new(32.0, 32.0),
+                    radius: RADIUS,
+                    // Twelve o'clock, clockwise, half way round.
+                    start_angle: Radians(-std::f32::consts::FRAC_PI_2),
+                    end_angle: Radians(std::f32::consts::FRAC_PI_2),
+                });
+            }),
+            Stroke {
+                style: Style::Solid(IcedColor::WHITE),
+                width: WIDTH,
+                line_cap: geometry::stroke::LineCap::Round,
+                line_join: geometry::stroke::LineJoin::Round,
+                line_dash: Default::default(),
+            },
+        );
+
+        let pixmap = render(&frame.into_geometry());
+        let white = pomelo_gfx::Color::WHITE.to_rgb565();
+
+        // The arc: three o'clock is half way along it.
+        assert_eq!(at(&pixmap, 56, 32), white, "the arc is drawn");
+
+        // And it is a band, not a disc.
+        assert_eq!(at(&pixmap, 48, 32), 0, "the width of a stroke is a width");
+
+        // The whole point: the diameter the closing line would have been drawn on, and the centre
+        // it passes through.
+        assert_eq!(at(&pixmap, 32, 32), 0, "nothing is drawn across the dial");
+        assert_eq!(at(&pixmap, 32, 48), 0, "the arc's own end is not joined to its start");
     }
 
     #[test]
