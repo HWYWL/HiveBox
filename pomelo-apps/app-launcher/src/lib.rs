@@ -151,6 +151,13 @@ pub enum Message {
     /// Produced periodically by [`status_stream`] and whenever underlying
     /// hardware events occur (battery level, charging state, Wi-Fi status changes, clock minute updates).
     Status(String, u8, bool, u8),
+    /// A second has passed on the board ([`pomelo_hal::SystemEvent::Tick`]).
+    ///
+    /// The launcher has no clock of its own to advance: the status bar's minute arrives with the
+    /// battery push. This exists for the one hosted app that shows a *running* time — the settings
+    /// list's readout — which is told to look at the board again rather than being handed a value
+    /// to draw. Nothing else here reacts, and an app that was never opened makes this one match arm.
+    Tick,
     /// The screen changed size: a window on a desktop, the panel on the board.
     Resized(Size),
     /// A message from one of the apps this launcher hosts.
@@ -892,6 +899,14 @@ impl Launcher {
             Message::Status(clock, battery, charging, wifi) => {
                 self.set_status(clock, battery, charging, wifi)
             }
+            Message::Tick => {
+                // The call itself decides whether anything is worth reading — see
+                // `Settings::refresh_system`, which does nothing at all while some other page is
+                // up. This is not the launcher's business, so it is not asked here.
+                if let Some(settings) = &mut self.settings {
+                    settings.refresh_system();
+                }
+            }
             Message::Resized(size) => {
                 self.size = size;
                 self.hand_over_size();
@@ -1271,6 +1286,12 @@ fn status_stream(sub: &StatusSubscription) -> impl iced::futures::Stream<Item = 
                     pomelo_hal::InputAction::Exit => Message::Exit,
                 };
                 let _ = tx.try_send(msg);
+            }
+            pomelo_hal::SystemEvent::Tick => {
+                // Once a second, and `try_send` rather than `send`: this runs on the pump thread,
+                // and a queue that is momentarily full is a pulse nobody needed — the next one is a
+                // second away, and blocking here would stall the hardware events behind it.
+                let _ = tx.try_send(Message::Tick);
             }
         }
     });

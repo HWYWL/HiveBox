@@ -23,8 +23,8 @@ firmware/components/board_hal/      the C drivers
 Which backends a board has is an argument rather than a `#[cfg]`:
 
 ```rust
-Board::from_backends(power, wifi, audio, mic, imu, input, storage, web)  // the composition root decides
-Board::simulated()                                                   // the desktop simulator
+Board::from_backends(power, wifi, audio, mic, imu, input, storage, web, system)  // the composition root decides
+Board::simulated()                                                             // the desktop simulator
 ```
 
 That is deliberate, and it is the whole point of the split. The implementation lives next to the C
@@ -41,17 +41,23 @@ a desktop test builds `Arc::new(Board::simulated())` and hands it to the same la
 ## The traits
 
 One file per hardware domain, one trait each — `PowerBackend`, `WifiBackend`, `AudioBackend`,
-`MicBackend`, `ImuBackend`, `StorageBackend`, `WebBackend`. All of them are `Send + Sync` (they live
-behind a mutex inside `Board`) and object-safe (the `Board` fields are `Box<dyn …>`). Long-running work
-follows a *start + poll* rule: the caller kicks it off and then polls a status method that never
-blocks.
+`MicBackend`, `ImuBackend`, `StorageBackend`, `WebBackend`, `SystemBackend`. All of them are
+`Send + Sync` (they live behind a mutex inside `Board`) and object-safe (the `Board` fields are
+`Box<dyn …>`). Long-running work follows a *start + poll* rule: the caller kicks it off and then
+polls a status method that never blocks.
 
 `WebBackend` follows that rule too, and it is the one trait with no data in it: what the server serves
 is the C side's page, so all that crosses here is a switch and a port.
 
-`Board::from_backends` takes the eight backends in the order `power, wifi, audio, mic, imu, input,
-storage, web`; boxes rather than generics, so a caller can mix concrete backends and a test can pass
-fakes.
+`SystemBackend` is the one trait with nothing to bring up. It answers what the chip and the image say
+about *themselves* — the part number, the version, the heap, the uptime and the clock — so there is no
+`init`, no `tick`, and no device behind it. It is also the source of the one thing a readout cannot
+read: `SystemEvent::Tick`, a once-a-second pulse from the firmware's event pump, which is what a page
+showing a running time waits for instead of asking for frames.
+
+`Board::from_backends` takes the nine backends in the order `power, wifi, audio, mic, imu, input,
+storage, web, system`; boxes rather than generics, so a caller can mix concrete backends and a test can
+pass fakes.
 `Board::init` and `Board::tick` are the two lifecycle calls: initialise once at boot, tick once per
 frame.
 

@@ -9,7 +9,8 @@
 //! `firmware/pomelo-hal-esp32`, next to the C drivers it declares, and the composition root
 //! (`rust_main`) builds it and injects the resulting board into the apps.
 //!
-//! Layers, one file per hardware domain (`power`, `wifi`, `audio`, `mic`, `imu`, `storage`, `web`):
+//! Layers, one file per hardware domain (`power`, `wifi`, `audio`, `mic`, `imu`, `storage`, `web`,
+//! `system`):
 //!
 //! * [`traits`] — the hardware **interface** every platform must implement.
 //! * [`sim`]    — the desktop **simulation** backends (non-`espidf` platforms only).
@@ -47,12 +48,13 @@ pub use board::Board;
 pub use error::HalError;
 pub use music_settings::MusicSettings;
 pub use traits::{
-    AudioBackend, ImuBackend, InputBackend, MicBackend, PowerBackend, StorageBackend, WebBackend,
-    WifiBackend,
+    AudioBackend, ImuBackend, InputBackend, MicBackend, PowerBackend, StorageBackend, SystemBackend,
+    WebBackend, WifiBackend,
 };
 pub use types::{
-    ApInfo, AudioMeta, FlashLayout, FlashRegion, FlashRegionKind, InputAction, ScanState,
-    SystemEvent, Vec3, VolumeInfo, VolumeKind, WebStatus, WifiState, WifiStatus,
+    ApInfo, AudioMeta, ChipInfo, FirmwareInfo, FlashLayout, FlashRegion, FlashRegionKind,
+    InputAction, MemoryInfo, ScanState, SystemEvent, Vec3, VolumeInfo, VolumeKind, WebStatus,
+    WifiState, WifiStatus,
 };
 pub use wifi_credentials::WifiCredentials;
 
@@ -62,11 +64,12 @@ pub mod prelude {
     pub use crate::error::HalError;
     pub use crate::traits::{
         AudioBackend, ImuBackend, InputBackend, MicBackend, PowerBackend, StorageBackend,
-        WebBackend, WifiBackend,
+        SystemBackend, WebBackend, WifiBackend,
     };
     pub use crate::types::{
-        ApInfo, AudioMeta, FlashLayout, FlashRegion, FlashRegionKind, InputAction, ScanState,
-        SystemEvent, Vec3, VolumeInfo, VolumeKind, WebStatus, WifiState, WifiStatus,
+        ApInfo, AudioMeta, ChipInfo, FirmwareInfo, FlashLayout, FlashRegion, FlashRegionKind,
+        InputAction, MemoryInfo, ScanState, SystemEvent, Vec3, VolumeInfo, VolumeKind, WebStatus,
+        WifiState, WifiStatus,
     };
     pub use crate::music_settings::MusicSettings;
     pub use crate::wifi_credentials::WifiCredentials;

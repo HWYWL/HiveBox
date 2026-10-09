@@ -18,10 +18,11 @@ license = "GPL-3.0-only"
 # The facade, like any other iced program. No platform layer and no renderer: `desktop` below picks
 # iced's software renderer, and the board's root turns that off and supplies its own.
 #
-# No `advanced`, either. That feature opens iced's widget internals (`tree`, `Widget`, the renderer
-# trait) to a *custom* widget, and this app builds its pages out of the widgets iced already ships.
-# It was here for `src/page.rs`, which is gone — nothing here names `iced::advanced`.
-iced = { version = "0.14", default-features = false, features = ["thread-pool", "x11", "wayland"] }
+# `canvas` and `advanced` are for the readout at the top of the list, and they are the two features
+# `hello` already needs for the same reason: a ring is a curve, iced's widgets draw rectangles, and
+# a `canvas::Program` of one's own is behind `advanced`. Everything else in this app is still built
+# out of the widgets iced ships — see `pages::ring` for why this one shape is not.
+iced = { version = "0.14", default-features = false, features = ["advanced", "canvas", "thread-pool", "x11", "wayland"] }
 
 # The board. The app is handed one by whoever builds it (the launcher shares the one it already
 # has with every app it hosts; `main.rs` builds the desktop simulator), the same shape

@@ -430,6 +430,105 @@ typedef struct {
 esp_err_t hal_storage_get_flash(hal_flash_layout_t *out);
 
 /* ---------------------------------------------------------------------------
+ * System information (`board_system.c`).
+ *
+ * What the machine *is*, as opposed to what it is doing with a device: the chip's
+ * own account of itself, the image's description of itself, and the two numbers
+ * that move while it runs. None of it is a peripheral — there is nothing to bring
+ * up and nothing to poll — so every call here is a read that returns.
+ *
+ * The buffer sizes below are a promise in two languages: the arrays here and the
+ * ones in `pomelo-hal-esp32/src/system.rs` have to agree. Every one of them is
+ * filled by copying at most `size - 1` bytes into a zeroed struct, so a name that
+ * stops fitting is a name that gets cut short, not a buffer that overruns — and
+ * the sizes are generous because of it.
+ * ------------------------------------------------------------------------- */
+
+#define HAL_SYSTEM_CHIP_MODEL_MAX_LEN    16
+#define HAL_SYSTEM_FIRMWARE_NAME_MAX_LEN 24
+#define HAL_SYSTEM_VERSION_MAX_LEN       32
+
+typedef struct {
+    char     model[HAL_SYSTEM_CHIP_MODEL_MAX_LEN];
+    uint8_t  cores;
+    uint16_t revision;
+} hal_system_chip_t;
+
+typedef struct {
+    char name[HAL_SYSTEM_FIRMWARE_NAME_MAX_LEN];
+    char version[HAL_SYSTEM_VERSION_MAX_LEN];
+} hal_system_firmware_t;
+
+typedef struct {
+    uint64_t total_bytes;
+    uint64_t free_bytes;
+} hal_system_memory_t;
+
+/**
+ * @brief Read the chip: the part number it reports, its cores and its revision.
+ *
+ * @return
+ *      - ESP_OK on success
+ *      - ESP_ERR_INVALID_ARG if out is NULL
+ */
+esp_err_t hal_system_get_chip(hal_system_chip_t *out);
+
+/**
+ * @brief Read the running image's own description: its project name and version.
+ *
+ * These are the strings the build stamped into the image, so a page showing them
+ * is showing what is actually running rather than a literal someone typed.
+ *
+ * @return
+ *      - ESP_OK on success
+ *      - ESP_ERR_INVALID_ARG if out is NULL
+ *      - ESP_ERR_NOT_FOUND when the image carries no description at all
+ */
+esp_err_t hal_system_get_firmware(hal_system_firmware_t *out);
+
+/**
+ * @brief Microseconds since the board booted.
+ *
+ * `int64_t`, the same type `esp_timer_get_time` reports, so the value crosses the
+ * FFI without a cast to disagree about.
+ */
+int64_t hal_system_get_uptime_us(void);
+
+/**
+ * @brief Read the heap: every byte of it, and what is left.
+ *
+ * The *default* heap — what `malloc()` without a capability hands out — and not
+ * the 8 MB of PSRAM beside it. PSRAM is only ever given to a caller that asks for
+ * it by name, so folding it into this total would describe a pool the kernel's own
+ * allocations never draw on, and would report a board that is nearly out of memory
+ * as one with two thirds free. See the note in `board_system.c`.
+ *
+ * Fragmented space counts as free: the allocator can hand it out.
+ *
+ * @return
+ *      - ESP_OK on success
+ *      - ESP_ERR_INVALID_ARG if out is NULL
+ */
+esp_err_t hal_system_get_memory(hal_system_memory_t *out);
+
+/**
+ * @brief Read the board's clock as a Unix epoch.
+ *
+ * The hardware RTC's time, which the firmware restores into the POSIX system clock
+ * at boot and writes back whenever the system clock is set (`board_rtc.c` wraps
+ * `settimeofday` for exactly that), so the two are one clock and not two.
+ *
+ * @param out_epoch Receives the chip's time, which is UTC.
+ *
+ * @return
+ *      - ESP_OK on success
+ *      - ESP_ERR_INVALID_ARG if out is NULL
+ *      - ESP_ERR_INVALID_STATE when the board has no time yet — the chip came up
+ *        holding nothing sane and nothing has set it since
+ */
+esp_err_t hal_system_get_epoch(int64_t *out_epoch);
+
+/* ---------------------------------------------------------------------------
  * Web management server (`esp_http_server`).
  *
  * Started and stopped by the app of the same name and by nothing else: the box carries no server until

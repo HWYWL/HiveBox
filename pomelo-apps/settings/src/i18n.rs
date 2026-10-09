@@ -72,6 +72,22 @@ pub enum Key {
     Restart,
     RestartQuestion,
 
+    // The readout at the top of that list.
+    //
+    // Its four words are its own and none of them is a row's, which is not tidiness: a gauge and a
+    // row labelled the same are two things a finger and a test cannot tell apart, and the row is
+    // the one that has to be pressable. So the two usage gauges say what the number *is* — a share
+    // in use — and the row under them goes on naming the thing.
+    //
+    // `ChipTemperature` is short in English by necessity: the three gauges share one row, and a
+    // cell of a 480 px panel is 134 px wide. It is the PMIC's die temperature, which is what the
+    // battery page calls it at the length a detail row has.
+    MemoryUsed,
+    StorageUsed,
+    ChipTemperature,
+    Firmware,
+    Uptime,
+
     // The Wi-Fi page.
     Toggle,
     Network,
@@ -196,6 +212,11 @@ impl Key {
             Self::FontSize => "字体大小",
             Self::Restart => "重启",
             Self::RestartQuestion => "设备将立即重新启动。",
+            Self::MemoryUsed => "内存占用",
+            Self::StorageUsed => "存储占用",
+            Self::ChipTemperature => "芯片温度",
+            Self::Firmware => "固件版本",
+            Self::Uptime => "已启动",
 
             Self::Toggle => "开关",
             Self::Network => "网络",
@@ -301,6 +322,11 @@ impl Key {
             Self::FontSize => "Text Size",
             Self::Restart => "Restart",
             Self::RestartQuestion => "The device will restart now.",
+            Self::MemoryUsed => "Memory used",
+            Self::StorageUsed => "Storage used",
+            Self::ChipTemperature => "Chip temp",
+            Self::Firmware => "Firmware",
+            Self::Uptime => "Uptime",
 
             Self::Toggle => "Switch",
             Self::Network => "Network",
@@ -436,7 +462,7 @@ mod tests {
 
     /// Every key, for the tests above. Kept beside them so a new variant is a compile error here
     /// too.
-    const ALL: [Key; 91] = [
+    const ALL: [Key; 96] = [
         Key::Settings,
         Key::Back,
         Key::Wifi,
@@ -455,6 +481,11 @@ mod tests {
         Key::FontSize,
         Key::Restart,
         Key::RestartQuestion,
+        Key::MemoryUsed,
+        Key::StorageUsed,
+        Key::ChipTemperature,
+        Key::Firmware,
+        Key::Uptime,
         Key::Toggle,
         Key::Network,
         Key::Signal,

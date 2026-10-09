@@ -1,5 +1,21 @@
 //! Strongly-typed data structures shared across HAL backends.
 
+/// How much of `total` is taken by `used`, in `0.0..=100.0`.
+///
+/// The one place this arithmetic lives. A heap and a volume are both "some of a whole", and two
+/// copies of the two guards below — a total of zero, and a used larger than it — would be two
+/// chances for the two readings to disagree about what an empty one looks like.
+///
+/// Zero for a total of zero, and not a division: a thing that reports no size at all is not full,
+/// and a bar drawn from a division by it is not a number.
+fn percent(used: u64, total: u64) -> f32 {
+    if total == 0 {
+        return 0.0;
+    }
+
+    (used.min(total) as f64 / total as f64 * 100.0) as f32
+}
+
 /// Which of the board's two kinds of storage a [`VolumeInfo`] describes.
 ///
 /// The two are not interchangeable to a person: one is soldered to the board and always there, the
@@ -43,11 +59,7 @@ impl VolumeInfo {
     /// Zero for a volume that reports no size at all: an unmounted or unformatted filesystem is not
     /// full, and a division by it is not a number a bar can draw.
     pub fn used_percent(&self) -> f32 {
-        if self.total_bytes == 0 {
-            return 0.0;
-        }
-
-        (self.used_bytes() as f64 / self.total_bytes as f64 * 100.0) as f32
+        percent(self.used_bytes(), self.total_bytes)
     }
 }
 
@@ -394,6 +406,61 @@ impl Vec3 {
     }
 }
 
+/// The heap the firmware runs on: what there is, and what is left of it.
+///
+/// The two counts and not a percentage. A percentage is a share of *something*, and which something
+/// is the reader's question to answer: the same bytes are a comfortable margin on a chip with 8 MB
+/// of PSRAM beside them, and nearly nothing on one without. So the backend reports what it measured
+/// and [`MemoryInfo::used_percent`] is the arithmetic a caller does with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryInfo {
+    /// Every byte the allocator was given.
+    pub total_bytes: u64,
+    /// What is still free. Fragmented space is free and counted: the allocator can hand it out, even
+    /// when no single allocation is small enough to take it.
+    pub free_bytes: u64,
+}
+
+impl MemoryInfo {
+    /// How many bytes are handed out.
+    pub fn used_bytes(&self) -> u64 {
+        self.total_bytes.saturating_sub(self.free_bytes)
+    }
+
+    /// How full the heap is, in `0.0..=100.0`.
+    pub fn used_percent(&self) -> f32 {
+        percent(self.used_bytes(), self.total_bytes)
+    }
+}
+
+/// The chip the firmware is running on.
+///
+/// The three facts a "what is this machine" card has room for, and all three are the silicon's own
+/// account of itself rather than a board's marketing name: `ESP32-S3` is what the chip answers when
+/// it is asked, and no part of this stack can answer for the board it is soldered to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChipInfo {
+    /// The part number as the chip reports it.
+    pub model: String,
+    /// How many cores it has.
+    pub cores: u8,
+    /// Its silicon revision.
+    pub revision: u16,
+}
+
+/// The firmware that is running, as it names itself.
+///
+/// Read out of the image's own description — the same strings the build stamped into it — and not
+/// from a literal in whichever page is drawing them. A version written down twice is a version that
+/// is wrong once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirmwareInfo {
+    /// The project's name.
+    pub name: String,
+    /// The version string built into the image.
+    pub version: String,
+}
+
 /// An abstract user input action (physical button, gesture, or navigation command).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputAction {
@@ -416,6 +483,22 @@ pub enum SystemEvent {
     WifiStatusChanged(WifiStatus),
     /// User input action.
     InputAction(InputAction),
+    /// A second has passed.
+    ///
+    /// The only event here that nothing *happened* to produce, and it exists for the one thing a
+    /// readout cannot get any other way: a clock that moves. A page showing how long the board has
+    /// been up has no hardware interrupt to wait on, and this platform has no timer subscription to
+    /// ask for — `iced::time::every` needs an async runtime the board has not got — so the pulse
+    /// comes from the thread that is already awake every second anyway.
+    ///
+    /// No payload: what a reader wants at the tick is whatever it is showing, and a struct carrying
+    /// every reading would be this event deciding which ones matter. The board itself is the thing
+    /// to ask, and [`crate::Board`] is where it is.
+    ///
+    /// Once a second, out of the thread that already waits a second between hardware interrupts —
+    /// see `firmware/pomelo-hal-esp32/src/event.rs`. A consumer with nothing that needs a clock
+    /// drops it, which is every consumer but one.
+    Tick,
 }
 
 

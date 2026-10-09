@@ -2,6 +2,10 @@
 //!
 //! Reads events from `board_hal`'s FreeRTOS queue (`hal_event_wait`) with 0% CPU
 //! when idle, and dispatches them directly to `pomelo_hal::Board::emit_event`.
+//!
+//! It also emits one event nothing on the board produced — [`SystemEvent::Tick`], once a second —
+//! because it is the only thread here that is awake on a schedule at all. See
+//! [`start_event_pump`].
 
 use std::sync::Arc;
 use pomelo_hal::{Board, InputAction, SystemEvent};
@@ -140,18 +144,35 @@ impl HalEvent {
 ///
 /// Blocks on `hal_event_wait` (0% CPU via FreeRTOS queue) and
 /// dispatches `SystemEvent` instances directly into `board.emit_event()`.
+///
+/// The second thing it does is keep time: this thread is the only one on the board that is already
+/// awake once a second, so the pulse a readout needs in order to have a clock comes from here rather
+/// than from a timer of its own. See [`SystemEvent::Tick`].
 pub fn start_event_pump(board: Arc<Board>) {
     std::thread::Builder::new()
         .name("hal_event_pump".into())
         .spawn(move || {
             let mut ev = HalEvent::default();
             let mut last_minute = u32::MAX;
+            let mut last_second = board.system().uptime().map_or(0, |up| up.as_secs());
             loop {
                 // Blocks in FreeRTOS xQueueReceive with 0% CPU!
                 // Wakes instantly on any hardware interrupt, or every 1 second to check clock.
                 if unsafe { ffi::hal_event_wait(&mut ev, 1000) } {
                     if let Some(sys_ev) = ev.to_system_event(&board) {
                         board.emit_event(sys_ev);
+                    }
+                }
+
+                // The second pulse. Gated on the uptime and not on the loop having come round:
+                // `hal_event_wait` also returns the moment an interrupt arrives, so a board being
+                // touched would otherwise tick hundreds of times a second — and the whole point of
+                // this event is that it is a clock rather than a count of frames.
+                if let Ok(uptime) = board.system().uptime() {
+                    let second = uptime.as_secs();
+                    if second != last_second {
+                        last_second = second;
+                        board.emit_event(SystemEvent::Tick);
                     }
                 }
 

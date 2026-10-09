@@ -25,6 +25,7 @@ idf_component_register(
         "board_wifi.c"
         "board_rtc.c"
         "board_storage.c"
+        "board_system.c"
         "board_web.c"
     INCLUDE_DIRS "."
     WHOLE_ARCHIVE

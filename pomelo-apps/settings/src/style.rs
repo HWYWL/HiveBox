@@ -157,6 +157,61 @@ pub const BAR_GAP: f32 = 10.0;
 pub const BAR_HEIGHT: f32 = 10.0;
 pub const BAR_RADIUS: f32 = 5.0;
 
+/// The readout at the top of the main list: its three rings, and the room around them.
+///
+/// One diameter and one thickness, because three gauges on one row are one picture: a ring drawn
+/// thicker than the two beside it would read as the one that matters, which is a claim nothing here
+/// is making. The thickness is a *tenth* of the diameter — thick enough that the arc's colour is
+/// what the eye catches, thin enough that the hole in the middle still holds a percentage.
+///
+/// Fitting three of them is arithmetic, not taste: a 480 px panel less the page's two margins is
+/// 440, the card's own padding takes 36 of that, and three 108 px rings leave 26 px between each
+/// pair — which is why this is the size it is and not a rounder number.
+pub const RING_DIAMETER: f32 = 108.0;
+pub const RING_THICKNESS: f32 = 10.0;
+
+/// The readout's own room: inside its card, and between the blocks of it.
+pub const SUMMARY_PADDING: f32 = 18.0;
+pub const SUMMARY_GAP: f32 = 16.0;
+
+/// The glyph, the percentage, and the word under one.
+///
+/// The value is a step above the label and a step below a page title: it is a reading, and a
+/// reading that is the same size as the word naming it has to be read twice. The glyph sits above
+/// the value and is smaller than both, because it is not a reading — it is which reading this is,
+/// and the word under the ring says that too.
+pub const RING_GLYPH: f32 = FONT_SMALL;
+pub const RING_VALUE_FONT: f32 = FONT_STANDARD;
+pub const RING_LABEL_FONT: f32 = FONT_EXTRA_SMALL;
+
+/// The gap between a ring's bottom edge and the word under it.
+pub const RING_LABEL_GAP: f32 = 6.0;
+
+/// The two information cards under the gauges: their height, the gap between them, and the room
+/// inside one.
+///
+/// A fixed height rather than the content's, because the two hold a name and a value each and the
+/// two values are not the same length: left to themselves the pair would be two different heights
+/// on one row, which is the one thing a row of cards must not be.
+///
+/// The number is the card's own two lines, the gap between them and the padding either side:
+/// `SUMMARY_CARD_LABEL_FONT × 1.3 + SUMMARY_CARD_GAP_V + SUMMARY_CARD_VALUE_FONT × 1.3` is 53.4
+/// and [`SUMMARY_CARD_PADDING`] twice is 20 more. Rounded up, because the 1.3 line-box ratio is
+/// this font's and not this file's to know exactly.
+pub const SUMMARY_CARD_H: f32 = 78.0;
+pub const SUMMARY_CARD_GAP: f32 = 12.0;
+pub const SUMMARY_CARD_PADDING: f32 = 10.0;
+/// The glyph in a card's heading, and the gap under that heading.
+pub const SUMMARY_CARD_GLYPH: f32 = 22.0;
+pub const SUMMARY_CARD_GAP_V: f32 = 4.0;
+/// The two lines of a card: its name, and its value.
+///
+/// The value is a step larger, which is the reference's own contrast and the reason the name gets
+/// the smallest tier this app has: a label as loud as the thing it labels is a card that has to be
+/// read twice.
+pub const SUMMARY_CARD_LABEL_FONT: f32 = FONT_EXTRA_SMALL;
+pub const SUMMARY_CARD_VALUE_FONT: f32 = FONT_SMALL;
+
 /// The flash map's key: the square beside a region's name, and how far the name stands from it.
 ///
 /// The same height as the bar it is a key to, so a row and its segment are recognisably the same
@@ -417,6 +472,40 @@ pub fn memory_bar() -> Color {
 /// The storage bar, and its badge.
 pub fn storage_bar() -> Color {
     rgb((255, 149, 0))
+}
+
+/// The temperature ring.
+///
+/// Its own red and not [`error`]'s, which is the same family a shade apart: a temperature is a
+/// *reading*, and every value it can take is one this board is happy with — a ring drawn in the
+/// colour that means "something has gone wrong" would be saying that at 20 °C. Warm, then, and not
+/// alarming; whether a given number deserves a warning is a judgement the readout does not make.
+pub fn temperature_ring() -> Color {
+    rgb((255, 99, 71))
+}
+
+/// A card's surface with a little of an entry's colour in it.
+///
+/// A blend and not the colour itself: a tile *filled* with [`IconColor::Blue`] is a button as far as
+/// the eye is concerned — it is the fill this app already puts on the one pressable card on the
+/// storage page — and the two cards under the gauges are not pressable. A wash of the same hue over
+/// the card's own surface says "these two are about different things" without saying "press me".
+///
+/// Denser in the dark, where a near-black surface has further to travel before a hue shows at all.
+pub fn tint_for(color: IconColor, theme: ThemeMode) -> Color {
+    let surface = card_for(theme);
+    let tint = color.color();
+    let share = match theme {
+        ThemeMode::Dark => 0.22,
+        ThemeMode::Light => 0.14,
+    };
+
+    Color::from_rgba(
+        surface.r + (tint.r - surface.r) * share,
+        surface.g + (tint.g - surface.g) * share,
+        surface.b + (tint.b - surface.b) * share,
+        surface.a,
+    )
 }
 
 /// The colour a region of the flash map is drawn in: its segment of the bar, and its key below.

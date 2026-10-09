@@ -82,6 +82,7 @@ pub use i18n::{Key, LanguageExt};
 
 use pages::common::BODY;
 use pages::storage::Storage;
+use pages::summary::SystemPanel;
 use pages::wifi::Wifi;
 use pomelo_widgets::touch_keyboard::KeyAction;
 
@@ -230,6 +231,11 @@ pub struct Settings {
     /// The storage page, and the other one. It holds the same board — a page that asks the SDMMC slot
     /// whether there is a card in it is asking the board, and there is nowhere else to ask.
     storage: Storage,
+    /// The readout at the top of the main list, and its own reading of the board. See
+    /// [`pages::summary`] for why this one is taken here rather than pushed in the way the battery
+    /// reading is: nothing else in this stack owns these numbers, and the page that draws them is
+    /// the page that asks for them.
+    system: SystemPanel,
     /// Whether the restart question is up, which is the only modal the *app* has.
     ///
     /// A `bool` and not a dialog type: there is one question, and an enum with one variant is a
@@ -242,6 +248,11 @@ impl Settings {
     /// The app at the main list, the way the original starts, with `board` for the pages that need
     /// hardware.
     pub fn new(board: Arc<Board>) -> Self {
+        // Read before the list is ever drawn, for the reason the Wi-Fi status is: the readout is the
+        // first thing on the first page, and a board that never sent a tick would otherwise show an
+        // empty panel until the app was left and re-entered.
+        let system = SystemPanel::new(&board);
+
         let mut settings = Self {
             section: SettingsSection::Main,
             is_24h_format: true,
@@ -250,6 +261,7 @@ impl Settings {
             board: Arc::clone(&board),
             wifi: Wifi::new(Arc::clone(&board)),
             storage: Storage::new(board),
+            system,
             restart_prompt: false,
         };
 
@@ -367,6 +379,11 @@ impl Settings {
             None
         } else {
             self.section = SettingsSection::Main;
+
+            // Coming back is a second look: the readout has been off screen for as long as the page
+            // behind it was up, and it is the one thing here that went on changing while it was.
+            self.refresh_system();
+
             Some(to_top())
         }
     }
@@ -388,6 +405,22 @@ impl Settings {
     /// Takes a battery reading the platform pushed in.
     pub fn set_battery(&mut self, reading: Battery) {
         self.battery = reading;
+    }
+
+    /// Looks at the machine again, which is what the readout at the top of the list is made of.
+    ///
+    /// Called by whoever owns the loop when a second has passed — on the board that is
+    /// [`pomelo_hal::SystemEvent::Tick`], which the platform's event pump sends once a second.
+    ///
+    /// Does nothing unless the main list is the page on screen, and that is the whole of its
+    /// design. The readout is the only thing in this app that changes on its own, it is visible
+    /// from nowhere else, and a frame is not free on this board: the host runs the view and the
+    /// damage diff for every message, so a page that kept a clock ticking in the background would
+    /// be paying for a number nobody is looking at.
+    pub fn refresh_system(&mut self) {
+        if self.section == SettingsSection::Main {
+            self.system.refresh(&self.board);
+        }
     }
 }
 
@@ -530,6 +563,11 @@ impl Settings {
             self.storage.detect();
         }
 
+        // A page that *is* the main list has no opening move of its own, but the readout on it does:
+        // leaving it for a sub-page and coming back is the one moment it is certainly stale, and it
+        // costs five reads to be right about. See [`Settings::refresh_system`].
+        self.refresh_system();
+
         to_top()
     }
 
@@ -550,6 +588,7 @@ impl Settings {
                 self.preferences,
                 (self.wifi.status().state == WifiState::Connected)
                     .then_some(self.wifi.status().ssid.as_str()),
+                &self.system,
             ),
             SettingsSection::Wifi => wifi_page(self.preferences, self.wifi.enabled(), &self.wifi),
             SettingsSection::Memory => memory_page(self.preferences),

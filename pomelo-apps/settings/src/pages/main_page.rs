@@ -1,4 +1,4 @@
-//! The main settings list: three cards of tiles.
+//! The main settings list: a readout, then three cards of tiles.
 
 use iced::widget::text;
 
@@ -7,20 +7,28 @@ use pomelo_material_symbols::Icon;
 use crate::i18n::{Key, LanguageExt as _};
 use crate::pages::card::{Card, Tile};
 use crate::pages::common::{body, page, title, UI};
+use crate::pages::summary::{summary_panel, SystemPanel};
 use crate::style;
 use crate::{Message, SettingsSection};
 use pomelo_widgets::SystemPreferences;
 
 /// The main list, in `language`.
 ///
-/// The list is a way *in*, not a readout. The one tile that says anything about this machine is the
-/// Wi-Fi one — which network the radio is on is not visible anywhere else — and the pages behind the
-/// others are where their facts belong. A value here would be a second place for the same fact to be
-/// wrong.
+/// The list is a way *in*, not a readout: the pages behind the rows are where their facts belong,
+/// and a value on a row would be a second place for the same fact to be wrong. The one tile that
+/// says anything about this machine is the Wi-Fi one, because which network the radio is on is not
+/// visible anywhere else.
+///
+/// The readout above it is not the exception that breaks that rule, because it is not a row. Nothing
+/// on it opens anything, and no page behind the list draws what it draws: a percentage of the heap
+/// rather than the heap's byte counts, a die temperature, the fill of the built-in volume rather than
+/// each volume's, a date. It is the summary a person checks *before* deciding which of those pages
+/// to open — which is why it is above them and not among them, and why it is one card rather than a
+/// row per number. Its own file is [`crate::pages::summary`].
 ///
 /// `connected` is the SSID the radio is on, or `None` if it is not on one. The labels are
 /// translated; a network's name is not, because it is the network's, not the interface's. See
-/// [`crate::i18n`].
+/// [`crate::i18n`]. `panel` is the readout's own reading of the board, taken by the app.
 ///
 /// Two rows of the last card are not destinations, and they carry no chevron-shaped promise: the
 /// language row *is* the switch it looks like a setting for, and the restart row asks a question
@@ -28,7 +36,11 @@ use pomelo_widgets::SystemPreferences;
 /// the other is about the whole of it — so both sit after the three sections that are, and the
 /// system readout comes last of all: what the machine *is* is the one thing here nobody opens
 /// Settings to change, and the foot of the list is where the things you do not come for go.
-pub(crate) fn main_page<'a>(preferences: SystemPreferences, connected: Option<&str>) -> UI<'a> {
+pub(crate) fn main_page<'a>(
+    preferences: SystemPreferences,
+    connected: Option<&str>,
+    panel: &SystemPanel,
+) -> UI<'a> {
     let language = preferences.language;
     let theme = preferences.theme;
     let wifi = connected
@@ -96,6 +108,7 @@ pub(crate) fn main_page<'a>(preferences: SystemPreferences, connected: Option<&s
     page(
         title(language.text(Key::Settings), theme),
         body(vec![
+            summary_panel(preferences, panel),
             connectivity.view(),
             device.view(),
             system.view(),

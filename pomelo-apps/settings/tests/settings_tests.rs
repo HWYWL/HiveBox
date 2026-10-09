@@ -12,12 +12,16 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use iced::time::Instant;
 use iced::Size;
 use iced_test::Simulator;
-use pomelo_hal::{ApInfo, Board, ScanState, WifiState, WifiStatus};
+use pomelo_hal::sim::SimSystem;
+use pomelo_hal::{
+    ApInfo, Board, ChipInfo, FirmwareInfo, HalError, MemoryInfo, ScanState, SystemBackend,
+    WifiState, WifiStatus,
+};
 use pomelo_material_symbols::Icon;
 use pomelo_widgets::touch_keyboard::{KeyAction, KeyboardMode};
 
@@ -266,7 +270,9 @@ impl pomelo_hal::PowerBackend for CountingPower {
 
 /// A board whose power backend is [`CountingPower`].
 fn board_that_counts_restarts(restarts: Arc<AtomicUsize>) -> Arc<Board> {
-    use pomelo_hal::sim::{SimAudio, SimImu, SimInput, SimMic, SimStorage, SimWeb, SimWifi};
+    use pomelo_hal::sim::{
+        SimAudio, SimImu, SimInput, SimMic, SimStorage, SimSystem, SimWeb, SimWifi,
+    };
 
     Arc::new(Board::from_backends(
         Box::new(CountingPower {
@@ -280,6 +286,7 @@ fn board_that_counts_restarts(restarts: Arc<AtomicUsize>) -> Arc<Board> {
         Box::new(SimInput::new()),
         Box::new(SimStorage::new()),
         Box::new(SimWeb::new()),
+        Box::new(SimSystem::new()),
     ))
 }
 
@@ -591,7 +598,9 @@ fn the_battery_page_admits_when_it_has_no_temperature() {
 /// backend that has no card: `Board::from_backends` is the composition root's door, and a test is a
 /// composition root.
 fn board_with_slot(card: bool) -> Arc<Board> {
-    use pomelo_hal::sim::{SimAudio, SimImu, SimInput, SimMic, SimPower, SimStorage, SimWeb, SimWifi};
+    use pomelo_hal::sim::{
+        SimAudio, SimImu, SimInput, SimMic, SimPower, SimStorage, SimSystem, SimWeb, SimWifi,
+    };
 
     let storage = if card {
         SimStorage::new()
@@ -608,6 +617,7 @@ fn board_with_slot(card: bool) -> Arc<Board> {
         Box::new(SimInput::new()),
         Box::new(storage),
         Box::new(SimWeb::new()),
+        Box::new(SimSystem::new()),
     ))
 }
 
@@ -1309,5 +1319,194 @@ fn the_font_tier_can_be_cycled() {
     settings.update(Message::CycleFontTier);
     assert_eq!(settings.font_tier(), FontSizeTier::Standard);
     assert_eq!(settings.font_tier().base_size(), 24.0);
+}
+
+// =============================================================================
+// The readout at the top of the main list
+// =============================================================================
+
+/// The board's own account of itself, with a counter on the one reading a refresh re-reads.
+///
+/// The platform's second pulse tells the readout to look again, and the difference a test has to be
+/// able to see is "it looked" against "it drew the same numbers again". A counter is that
+/// difference; the numbers themselves are the simulator's, and `the_readout_shows_what_the_board_says`
+/// is where they are checked.
+struct CountingSystem {
+    reads: Arc<AtomicUsize>,
+    inner: SimSystem,
+}
+
+impl SystemBackend for CountingSystem {
+    fn chip(&self) -> Result<ChipInfo, HalError> {
+        self.inner.chip()
+    }
+
+    fn firmware(&self) -> Result<FirmwareInfo, HalError> {
+        self.inner.firmware()
+    }
+
+    /// Counted, and it is the only one: the identity is read once, and the temperature and the
+    /// storage fill come from the power and storage backends. Whatever a tick re-reads, it re-reads
+    /// this.
+    fn uptime(&self) -> Result<Duration, HalError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.inner.uptime()
+    }
+
+    fn memory(&self) -> Result<MemoryInfo, HalError> {
+        self.inner.memory()
+    }
+
+    fn clock(&self) -> Result<Option<SystemTime>, HalError> {
+        self.inner.clock()
+    }
+}
+
+/// A board whose system backend is [`CountingSystem`].
+fn board_that_counts_reads(reads: Arc<AtomicUsize>) -> Arc<Board> {
+    use pomelo_hal::sim::{SimAudio, SimImu, SimInput, SimMic, SimPower, SimStorage, SimWeb, SimWifi};
+
+    Arc::new(Board::from_backends(
+        Box::new(SimPower::new()),
+        Box::new(SimWifi::new()),
+        Box::new(SimAudio::new()),
+        Box::new(SimMic::new()),
+        Box::new(SimImu::new()),
+        Box::new(SimInput::new()),
+        Box::new(SimStorage::new()),
+        Box::new(SimWeb::new()),
+        Box::new(CountingSystem {
+            reads,
+            inner: SimSystem::new(),
+        }),
+    ))
+}
+
+/// The readout says what the board says: three named gauges, and two cards off the chip and the
+/// image rather than off a literal.
+///
+/// The values on the gauges are readings that move, so what a test can hold still is the shape of
+/// them — and the chip's part number and the version the *simulated* image reports are exactly the
+/// two that no literal in this app could have produced.
+#[test]
+fn the_readout_says_what_the_board_says() {
+    let settings = english();
+    let mut ui = screen(&settings, TALL);
+
+    assert!(ui.find("Memory used").is_ok(), "the heap");
+    assert!(ui.find("Chip temp").is_ok(), "the PMIC's die temperature");
+    assert!(ui.find("Storage used").is_ok(), "the built-in volume");
+
+    assert!(
+        ui.find("ESP32-S3").is_ok(),
+        "the part number the chip reports"
+    );
+    assert!(
+        ui.find("0.1.0 (simulator)").is_ok(),
+        "and the version the image reports"
+    );
+
+    // The footer's two readings. Their values are the wall clock and a timer, so neither is a
+    // string a test can hold still; what it can hold still is that both are drawn at all.
+    assert!(ui.find("System time").is_ok());
+    assert!(ui.find("Uptime").is_ok());
+
+    // The storage gauge is the *built-in* volume, not the card: the simulator's card is a 32 GB one
+    // that is 43% full, and its built-in partition holds the firmware's `welcome.txt` in 3 MB —
+    // which is this. A ring showing the card's number here would be the one design decision this
+    // asserts the opposite of.
+    assert!(
+        ui.find("0%").is_ok(),
+        "the built-in volume's fill, and not the card's"
+    );
+    assert!(ui.find("43%").is_err(), "the card is the storage page's");
+}
+
+/// A gauge's three parts are one column: the ring, the glyph and number in it, and the word under
+/// it — all on the same centre line.
+///
+/// The regression this exists for is the word. `Text::center` sets the alignment *inside* a text and
+/// leaves the text as wide as itself, so the label — which sits in a container as wide as its cell,
+/// so that a long one wraps instead of running into its neighbour's — was drawn against that
+/// container's left edge. The ring above it and the number inside it were centred, because each of
+/// those is only as wide as it is. On the board that put "存储占用" about 32 px to the left of the
+/// ring it belongs to, which is what a person saw as the labels being askew.
+///
+/// The storage gauge, and not the other two: its reading is the one that holds still long enough to
+/// be named in a test, because it is the fill of a partition the simulator does not write to.
+#[test]
+fn a_gauges_three_parts_share_a_centre_line() {
+    use iced_test::selector::Candidate;
+
+    let settings = english();
+    let mut ui = screen(&settings, TALL);
+
+    let centre = |ui: &mut Simulator<'_, Message>, needle: &str| {
+        ui.find(|candidate: Candidate<'_>| match candidate {
+            Candidate::Text {
+                content, bounds, ..
+            } if content == needle => Some(bounds),
+            _ => None,
+        })
+        .unwrap_or_else(|error| panic!("{needle:?} is not on the page: {error}"))
+        .center_x()
+    };
+
+    // The number in the ring, which is what the label has to line up with. It is centred in the
+    // ring, and the ring is a third of the panel — so this is the cell's centre as well.
+    let value = centre(&mut ui, "0%");
+    let glyph = centre(&mut ui, Icon::STORAGE.glyph());
+    let label = centre(&mut ui, "Storage used");
+
+    assert!(
+        (glyph - value).abs() < 0.5,
+        "the glyph is at {glyph} and the number at {value}"
+    );
+    assert!(
+        (label - value).abs() < 0.5,
+        "the word under the ring is at {label} and the ring's own middle at {value}"
+    );
+}
+
+/// A second is when the readout looks again, and it only looks while it is on screen.
+///
+/// The whole of `Settings::refresh_system`: the tick arrives every second, and what it must not do
+/// is read the board five times a second for a page that is not up.
+#[test]
+fn the_readout_looks_again_on_the_tick_and_only_while_it_is_up() {
+    let reads = Arc::new(AtomicUsize::new(0));
+    let mut settings = Settings::new(board_that_counts_reads(Arc::clone(&reads)));
+
+    let after_construction = reads.load(Ordering::SeqCst);
+    assert_eq!(
+        after_construction, 1,
+        "read once before the list is ever drawn, so the first frame is not blank"
+    );
+
+    settings.refresh_system();
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        after_construction + 1,
+        "a tick is a second look"
+    );
+
+    // Away from the list, the readout is not on the page, and a reading nobody can see is not worth
+    // a mutex a second.
+    settings.update(Message::Open(SettingsSection::Memory));
+
+    let while_away = reads.load(Ordering::SeqCst);
+    settings.refresh_system();
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        while_away,
+        "off screen, nothing is read"
+    );
+
+    // And coming back is the one moment it is certainly stale.
+    settings.update(Message::Back);
+    assert!(
+        reads.load(Ordering::SeqCst) > while_away,
+        "returning to the list looks again"
+    );
 }
 

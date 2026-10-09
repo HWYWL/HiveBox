@@ -14,6 +14,7 @@ mod input;
 mod mic;
 mod power;
 mod storage;
+mod system;
 mod web;
 mod wifi;
 
@@ -23,5 +24,6 @@ pub use input::SimInput;
 pub use mic::SimMic;
 pub use power::SimPower;
 pub use storage::SimStorage;
+pub use system::SimSystem;
 pub use web::SimWeb;
 pub use wifi::SimWifi;

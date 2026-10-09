@@ -31,7 +31,7 @@ fn board() -> Arc<Board> {
 /// player has to speak about rather than report as a missing file.
 fn board_without_card() -> Arc<Board> {
     use pomelo_hal::sim::{
-        SimAudio, SimImu, SimInput, SimMic, SimPower, SimStorage, SimWeb, SimWifi,
+        SimAudio, SimImu, SimInput, SimMic, SimPower, SimStorage, SimSystem, SimWeb, SimWifi,
     };
 
     Arc::new(Board::from_backends(
@@ -43,6 +43,7 @@ fn board_without_card() -> Arc<Board> {
         Box::new(SimInput::new()),
         Box::new(SimStorage::without_card()),
         Box::new(SimWeb::new()),
+        Box::new(SimSystem::new()),
     ))
 }
 
