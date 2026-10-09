@@ -64,6 +64,12 @@ pub struct MusicPlayerModel {
     pub volume: u8,
     pub position_secs: f32,
     pub duration_secs: f32,
+    /// Where a finger has dragged the progress bar to, in seconds, while it is still on it.
+    ///
+    /// `None` is "nobody has hold of the bar", and it is also what keeps [`Self::tick`] from reading
+    /// the position back from the backend: while a bar is being dragged the number under it is the
+    /// finger's, and one that a frame overwrote would shiver under the hand.
+    pub seeking: Option<f32>,
     pub rotation_angle: f32,
     pub title_scroll_offset: f32,
     pub title_scroll_done: bool,
@@ -90,6 +96,7 @@ impl MusicPlayerModel {
             volume,
             position_secs: 0.0,
             duration_secs: 0.0,
+            seeking: None,
             rotation_angle: 0.0,
             title_scroll_offset: 0.0,
             title_scroll_done: true,
@@ -264,6 +271,10 @@ impl MusicPlayerModel {
         self.rotation_angle = 0.0;
         self.title_scroll_offset = 0.0;
         self.title_scroll_done = true;
+
+        /* A new track opens at its own beginning: a hand that was still on the bar of the last one is
+         * not on this one, and its position means nothing here. */
+        self.seeking = None;
         let track_path = self.playlist[self.current_index].path.clone();
 
         let result = self.board.audio().play(&track_path);
@@ -339,6 +350,54 @@ impl MusicPlayerModel {
         self.set_volume(self.volume.saturating_sub(10));
     }
 
+    /// Move the volume under a finger that is dragging the level: heard, not written down.
+    ///
+    /// The expensive half of a volume change is the backend remembering it — an erase and a rewrite of
+    /// a flash partition, see [`pomelo_hal::AudioBackend::preview_volume`] — and a drag is a stream of
+    /// numbers of which only the last is the one anybody meant. So this says the number and leaves it
+    /// there;
+    /// [`Self::commit_volume`] is what the finger's release says.
+    pub fn preview_volume(&mut self, vol: u8) {
+        self.volume = vol.min(100);
+        self.board.audio().preview_volume(self.volume);
+    }
+
+    /// The finger has let go of the level: this is the number the board will come up at next time.
+    pub fn commit_volume(&mut self) {
+        self.board.audio().set_volume(self.volume);
+    }
+
+    /// A finger has taken hold of the progress bar, or moved it: follow it, and tell nobody.
+    ///
+    /// The backend is not asked to go there until the finger lets go ([`Self::commit_seek`]), because
+    /// a seek here is the file opened again further in: once a frame, that is a track made of
+    /// restarts. What moves meanwhile is the bar and the number under it, which is the whole of what a
+    /// hand can see.
+    pub fn scrub(&mut self, position_secs: f32) {
+        let position = position_secs.clamp(0.0, self.duration_secs.max(0.0));
+
+        self.position_secs = position;
+        self.seeking = Some(position);
+    }
+
+    /// The finger has let go of the progress bar: play from where it was left.
+    ///
+    /// The position stays where the finger put it rather than being read back, so the bar does not
+    /// jump home for the frame or two a seek takes to land: the backend's next answer is already the
+    /// same place, because the frames it counts from go on from where the needle was put down.
+    pub fn commit_seek(&mut self) {
+        let Some(position) = self.seeking.take() else {
+            return;
+        };
+
+        self.position_secs = position;
+
+        match self.board.audio().seek(position) {
+            Ok(()) => self.last_error = None,
+            Err(error) => self.last_error = Some(error.to_string()),
+        }
+    }
+
     /// Open the track at `index`: what a tap on a row in the list means.
     ///
     /// Showing the playing screen and starting the track are one step because they are one intent.
@@ -376,15 +435,28 @@ impl MusicPlayerModel {
     /// counted 2.5° per frame, which is only a speed if you know the frame rate.
     pub fn tick(&mut self, elapsed: f32) {
         self.board.audio().tick();
-        let position = self.board.audio().position_secs();
-        self.position_secs = position;
+
+        /* A finger on the bar is the exception to "the backend owns the position": while one is there
+         * the position is what it says, and a poll every frame would drag the number back out from
+         * under it. Everything else about the frame still happens — the disc turns, the backend is
+         * ticked — and the readout is the same one it will be a frame after the finger leaves. */
+        let dragging = self.seeking.is_some();
+
+        if !dragging {
+            self.position_secs = self.board.audio().position_secs();
+        }
+
         let still_playing = self.board.audio().is_playing();
 
         if self.status == PlaybackStatus::Playing {
             self.rotation_angle =
                 (self.rotation_angle + elapsed.max(0.0) * ROTATION_DEGREES_PER_SECOND) % 360.0;
 
-            if !still_playing
+            /* Not while a finger is on the bar: a track being dragged has been stopped for the moment
+             * of the seek, and "the backend says it is not playing" would otherwise be read as the end
+             * of the track and skip to the next one — under the hand, mid-drag. */
+            if !dragging
+                && !still_playing
                 && self.position_secs >= self.duration_secs
                 && self.duration_secs > 0.0
             {
@@ -398,6 +470,9 @@ impl MusicPlayerModel {
     pub fn stop_audio(&mut self) {
         self.board.audio().stop();
         self.status = PlaybackStatus::Stopped;
+
+        /* The bar goes with the track: a drag that was in progress belongs to what was playing. */
+        self.seeking = None;
     }
 
     pub fn is_animating(&self) -> bool {

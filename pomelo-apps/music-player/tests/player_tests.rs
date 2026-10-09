@@ -13,9 +13,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use iced::Size;
+use iced::{mouse, Event, Point, Size};
 use iced_test::Simulator;
 
+use music_player::style;
 use music_player::{Message, Page, PlaybackStatus, Player, SCREEN};
 use pomelo_hal::Board;
 use pomelo_material_symbols::Icon;
@@ -73,6 +74,66 @@ fn press(player: &mut Player, label: &str) -> Result<(), iced_test::Error> {
     }
 
     Ok(())
+}
+
+/// One gesture on a bar: press at `from`, drag to `to`, then let go.
+///
+/// These are the three moments a slider reacts to, and the whole of a drag. The press takes hold and
+/// says where the finger landed, the move is what the hand does next, and the release is the only one
+/// of the three that commits anything.
+fn drag(ui: &mut Simulator<'_, Message>, from: Point, to: Point) {
+    ui.point_at(from);
+    ui.simulate([Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))]);
+
+    ui.point_at(to);
+    ui.simulate([Event::Mouse(mouse::Event::CursorMoved { position: to })]);
+
+    ui.simulate([Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))]);
+}
+
+/// Drags the progress bar from `from` to `to`, both fractions of the track, and answers with what the
+/// bar said while it was dragged.
+///
+/// The bar is found from the stamp printed under it rather than from a selector of its own: a slider
+/// publishes no candidate for one to match, while the text beside it does. The two are children of the
+/// same column — the bar, one gap, then the stamps — so the stamp's own box says where the bar is, and
+/// the bar is as wide as the column rather than merely as wide as its own drawing.
+fn drag_the_progress_bar(player: &Player, from: f32, to: f32) -> Vec<Message> {
+    let mut ui = interface(player);
+    let stamp = ui
+        .find("00:00")
+        .expect("the position's stamp, which sits under the bar")
+        .bounds();
+
+    let x = |fraction: f32| stamp.x + style::BAR_WIDTH * fraction;
+    let y = stamp.y - style::BAR_GAP - style::BAR_TOUCH / 2.0;
+
+    drag(&mut ui, Point::new(x(from), y), Point::new(x(to), y));
+
+    ui.into_messages().collect()
+}
+
+/// The same gesture on the level, which has its readout beside it instead of stamps beneath it.
+///
+/// The level is the bar to the left of the readout. The readout is centred in a box of its own width,
+/// so the box starts half the slack to the left of the number and the bar ends one gap further left
+/// again; the readout is on the bar's own line, so its centre is the bar's.
+fn drag_the_level(player: &Player, from: f32, to: f32) -> Vec<Message> {
+    let mut ui = interface(player);
+    let readout = ui
+        .find(format!("{}%", player.volume()))
+        .expect("the level's readout")
+        .bounds();
+
+    let right = readout.x - (style::VOLUME_READOUT - readout.width) / 2.0 - style::VOLUME_GAP;
+    let left = right - style::VOLUME_BAR_WIDTH;
+    let y = readout.y + readout.height / 2.0;
+
+    let x = |fraction: f32| left + (right - left) * fraction;
+
+    drag(&mut ui, Point::new(x(from), y), Point::new(x(to), y));
+
+    ui.into_messages().collect()
 }
 
 fn scratch_dir() -> PathBuf {
@@ -513,4 +574,188 @@ fn a_scan_of_the_callers_own_directory_leaves_the_slot_empty() {
     assert_eq!(player.title(), "sample", "the track the caller supplied");
     assert!(player.wants_card(), "the slot is still empty");
     assert_eq!(player.library_dir(), None);
+}
+
+/// The progress bar can be dragged, and the drag and the release are two different things.
+///
+/// This is the whole gesture through the real widget tree, which is the only place the difference shows:
+/// the bar is a slider, the tree is built from the model, and the messages that come back are the ones
+/// [`Player::update`] is handed. A slider that lost its `on_release` — a bar you can slide but that
+/// never plays from where you left it — fails here rather than on the panel.
+#[test]
+fn dragging_the_progress_bar_scrubs_and_only_the_release_seeks() -> Result<(), iced_test::Error> {
+    let board = board();
+    let mut player = Player::new(board.clone());
+    let title = with_one_track(&mut player);
+    press(&mut player, &title)?;
+
+    // A fifth of the way into a three-second track and then four fifths: one second, then two.
+    let messages = drag_the_progress_bar(&player, 0.2, 0.8);
+
+    assert_eq!(
+        messages.len(),
+        3,
+        "the press takes hold, the move reports a new second, the release follows: {messages:?}"
+    );
+    assert!(
+        matches!(messages[0], Message::Scrub(_)),
+        "the finger landing is a scrub and not a seek: {messages:?}"
+    );
+    assert!(
+        matches!(messages[1], Message::Scrub(_)),
+        "and so is what it does next: {messages:?}"
+    );
+    assert_eq!(
+        messages[2],
+        Message::Seek,
+        "letting go is the only one of the three that moves the track: {messages:?}"
+    );
+
+    for message in messages {
+        player.update(message);
+    }
+
+    assert!(
+        (player.position_secs() - 2.0).abs() < 0.01,
+        "four fifths of three seconds, got {}",
+        player.position_secs()
+    );
+
+    let backend = board.audio().position_secs();
+    assert!(
+        (backend - 2.0).abs() < 0.1,
+        "and the track itself is there, not only the bar: got {backend}"
+    );
+
+    Ok(())
+}
+
+/// A finger on the bar is the one exception to "the backend owns the position", and the release is the
+/// only thing the backend is told.
+///
+/// A seek on this board is the file opened again further in, so a scrub that reached it would be a
+/// track made of restarts. The readout follows the finger instead — including across a frame, which is
+/// what a drawn drag is — and letting go is what the backend hears.
+#[test]
+fn a_drag_follows_the_finger_and_the_release_is_what_the_backend_hears() -> Result<(), iced_test::Error>
+{
+    use std::time::Instant;
+
+    let board = board();
+    let mut player = Player::new(board.clone());
+    let title = with_one_track(&mut player);
+    press(&mut player, &title)?;
+
+    player.update(Message::Scrub(2.0));
+    assert!(
+        (player.position_secs() - 2.0).abs() < 0.001,
+        "the readout follows the finger"
+    );
+    assert!(
+        board.audio().position_secs() < 1.0,
+        "and the track has not been moved yet: the finger is not the player"
+    );
+
+    // A frame under the finger does not drag the readout back out from under it.
+    player.update(Message::Tick(Instant::now()));
+    assert!(
+        (player.position_secs() - 2.0).abs() < 0.001,
+        "the finger is ahead of the backend until it lets go"
+    );
+
+    player.update(Message::Seek);
+
+    let backend = board.audio().position_secs();
+    assert!(
+        (backend - 2.0).abs() < 0.1,
+        "letting go is the seek, got {backend}"
+    );
+
+    // And the model and the backend agree again, which is what a tick from here on reads.
+    player.update(Message::Tick(Instant::now()));
+    assert!(
+        (player.position_secs() - 2.0).abs() < 0.1,
+        "the position is the backend's again, got {}",
+        player.position_secs()
+    );
+
+    Ok(())
+}
+
+/// The level is a bar too, and a drag along it is heard as it goes and written down when the finger
+/// stops.
+///
+/// The two are separate messages for a reason that is not visible here — a flash partition is erased
+/// once per gesture rather than once per frame — so what this asserts is the split itself: the drag
+/// reports the level, and letting go is what the board keeps.
+#[test]
+fn dragging_the_level_reports_it_and_the_release_keeps_it() -> Result<(), iced_test::Error> {
+    let board = board();
+    let mut player = Player::new(board.clone());
+    let title = with_one_track(&mut player);
+    press(&mut player, &title)?;
+
+    let before = player.volume();
+
+    // Four tenths of the level to seven tenths: 40, then 70.
+    let messages = drag_the_level(&player, 0.4, 0.7);
+
+    assert_eq!(messages.len(), 3, "{messages:?}");
+    assert!(
+        matches!(messages[0], Message::VolumePreview(40)),
+        "{messages:?}"
+    );
+    assert!(
+        matches!(messages[1], Message::VolumePreview(70)),
+        "{messages:?}"
+    );
+    assert_eq!(
+        messages[2],
+        Message::VolumeCommit,
+        "letting go is what is written down: {messages:?}"
+    );
+
+    for message in messages {
+        player.update(message);
+    }
+
+    assert_eq!(player.volume(), 70, "seven tenths of the level");
+    assert_eq!(board.audio().volume(), 70, "and the board is at it");
+    assert_ne!(before, player.volume(), "the drag moved it, not the buttons");
+
+    Ok(())
+}
+
+/// A drag that ends where it started is still a gesture, and still the one the board keeps.
+///
+/// A finger that taps the bar without moving — or moves and comes back — is a person pointing at the
+/// second they want; the release is the intent, not the movement, so there is nothing to send until it
+/// comes.
+#[test]
+fn a_drag_that_moves_nothing_still_commits_on_release() -> Result<(), iced_test::Error> {
+    let board = board();
+    let mut player = Player::new(board.clone());
+    let title = with_one_track(&mut player);
+    press(&mut player, &title)?;
+
+    // A tap two thirds of the way in: 2.0 s of the three-second track, aimed at without moving.
+    let messages = drag_the_progress_bar(&player, 0.66, 0.66);
+
+    assert_eq!(
+        messages,
+        vec![Message::Scrub(2.0), Message::Seek],
+        "the release is sent whether or not the finger moved"
+    );
+
+    for message in messages {
+        player.update(message);
+    }
+
+    let backend = board.audio().position_secs();
+    assert!(
+        (backend - 2.0).abs() < 0.1,
+        "a tap on the bar plays from there, got {backend}"
+    );
+
+    Ok(())
 }

@@ -28,10 +28,11 @@ use std::path::Path;
 use symphonia::core::audio::{SampleBuffer, SignalSpec};
 use symphonia::core::codecs::{Decoder, DecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::{FormatOptions, FormatReader};
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
+use symphonia::core::units::Time;
 
 use crate::probe::{AudioInfo, AudioKind};
 
@@ -303,6 +304,38 @@ impl PcmStream {
     /// Whether the stream has ended or failed.
     pub fn is_finished(&self) -> bool {
         self.finished
+    }
+
+    /// Move to `position_secs` from the start of the file and go on decoding from there.
+    ///
+    /// The container can only land on a packet, never on a sample, so an accurate seek puts the
+    /// stream at or just before what was asked for. The frame counter is set to the position that was
+    /// *asked* for rather than reported back: the gap is a packet — tens of milliseconds — and a
+    /// readout that visibly lags the bar a finger just dragged is a worse lie than that.
+    ///
+    /// A decoder keeps state across packets, so it is reset: the documentation of
+    /// [`FormatReader::seek`] requires it, and without it the first frames after a jump decode from
+    /// the wrong side of the bit reservoir.
+    pub fn seek(&mut self, position_secs: f32) -> Result<(), String> {
+        let position_secs = position_secs.max(0.0);
+
+        let to = SeekTo::Time {
+            time: Time::from(position_secs),
+            track_id: Some(self.track_id),
+        };
+
+        self.format
+            .seek(SeekMode::Accurate, to)
+            .map_err(|e| e.to_string())?;
+
+        self.decoder.reset();
+        self.frames = (position_secs * self.sample_rate as f32) as u64;
+
+        // A seek into a stream that had already ended is how a finished track is played again from
+        // somewhere in the middle, so the end is not sticky.
+        self.finished = false;
+
+        Ok(())
     }
 
     /// Decode the next block of packets into 16-bit samples, appended to `out`.

@@ -8,7 +8,8 @@
 //! the disc stands two short to pay for it. The disc has more room than it needs and the volume row
 //! has nowhere else to fit. The list page has no bands at all: a head, and rows that scroll.
 
-use iced::Color;
+use iced::widget::slider;
+use iced::{Border, Color};
 
 /// The panel the player is designed for.
 pub const SCREEN: u32 = 480;
@@ -42,15 +43,36 @@ pub const MARKER_SIZE: f32 = 8.0;
 pub const MARKER_ORBIT: f32 = 46.0;
 
 /// The progress bar: the original's 380 px of a 480 px panel, 6 px tall with a 3 px radius, 8 px
-/// above the timestamps, and never thinner than 4 px so an empty track still shows where it starts.
+/// above the timestamps.
+///
+/// The rail's measurements are what both draggable bars are drawn with — see [`BAR_TOUCH`] — and the
+/// 4 px minimum an empty track used to show with is gone with the containers that drew it: the handle
+/// at the left end of the rail says where a track starts, and does it by being there.
 pub const BAR_WIDTH: f32 = 380.0;
 /// The horizontal margin around the progress bar on the canonical panel (50.0 px).
 pub const BAR_MARGIN_H: f32 = (SCREEN as f32 - BAR_WIDTH) / 2.0;
 pub const BAR_HEIGHT: f32 = 6.0;
 pub const BAR_RADIUS: f32 = 3.0;
 pub const BAR_GAP: f32 = 8.0;
-pub const BAR_MIN_FILL: f32 = 4.0;
 pub const TIME_FONT: f32 = 14.0;
+
+/// How tall the *band* a bar is dragged in is, as opposed to the rail it draws.
+///
+/// The rail stays the original's 6 px, because that is what the bar looks like; 6 px is a mark to look
+/// at, though, and not a thing to put a finger on. A slider is one widget with one box, so the box is
+/// the finger's size and the rail is drawn inside it.
+pub const BAR_TOUCH: f32 = 28.0;
+/// The handle on a rail — round, and half again as wide as the rail is tall, so that a bar that can be
+/// dragged looks like one.
+pub const HANDLE_RADIUS: f32 = 9.0;
+/// The ring around the handle, in the page's colour under the theme. Without it the handle is a purple
+/// bump on a purple rail, and the only part of it that shows is the half hanging over the grey track.
+pub const HANDLE_BORDER: f32 = 2.0;
+/// One step of a seek, in seconds: finer than a finger can aim at on a 380 px rail — four minutes is
+/// 240 s of bar — and coarse enough that the readout under it changes by a number a person can read.
+pub const SEEK_STEP: f32 = 1.0;
+/// One step of the level, in percent, on a shorter rail and for the same reason.
+pub const VOLUME_STEP: u8 = 1;
 
 /// The controls: the original's 48 / 60 / 48 px round buttons, the gap between them, and the
 /// volume pair with its readout.
@@ -269,6 +291,34 @@ pub fn track_for(theme: ThemeMode) -> Color {
         rgb((229, 231, 235))
     } else {
         rgb((44, 44, 48))
+    }
+}
+
+/// The look of a bar that can be dragged: the same rail as the one this app used to paint by hand,
+/// plus a round handle to take hold of.
+///
+/// The rail keeps the theme's two colours and the original's measurements — [`BAR_HEIGHT`] tall with
+/// [`BAR_RADIUS`] — so that a glance at the playing screen still finds the same instrument in the same
+/// place, and the theme still says what colour it is. What is new is that there is something on it:
+/// a slider with nothing to grab is a bar that gives no sign it can be moved.
+pub fn slider_style(theme: ThemeMode) -> slider::Style {
+    slider::Style {
+        rail: slider::Rail {
+            backgrounds: (primary().into(), track_for(theme).into()),
+            width: BAR_HEIGHT,
+            border: Border {
+                radius: BAR_RADIUS.into(),
+                ..Border::default()
+            },
+        },
+        handle: slider::Handle {
+            shape: slider::HandleShape::Circle {
+                radius: HANDLE_RADIUS,
+            },
+            background: primary().into(),
+            border_width: HANDLE_BORDER,
+            border_color: background_for(theme),
+        },
     }
 }
 

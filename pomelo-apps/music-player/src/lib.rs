@@ -36,6 +36,7 @@ use std::time::Instant;
 
 use iced::theme::Palette;
 use iced::widget::scrollable::{Direction, Scrollbar};
+use iced::widget::slider::Slider;
 use iced::widget::{button, container, stack, text, Column, Row, Scrollable, Space};
 use iced::{Alignment, Border, Color, Element, Length, Padding, Shadow, Subscription, Theme};
 
@@ -62,6 +63,14 @@ pub enum Message {
     VolumeDown,
     /// Ten percent louder.
     VolumeUp,
+    /// A finger has dragged the level to this percentage: heard, and not written down yet.
+    ///
+    /// From the slider rather than from the two buttons beside it, because they are different
+    /// questions: a button is a step, and a step is a decision. This is the middle of one — see
+    /// [`MusicPlayerModel::preview_volume`] — and [`Message::VolumeCommit`] is the end of it.
+    VolumePreview(u8),
+    /// The finger has let go of the level: this is the number the board keeps, and comes up at.
+    VolumeCommit,
     /// Open the track at this index of the playlist — what a tap on a row in the list means.
     ///
     /// `Open` and not `Select`: choosing a track and playing it are one thing here, and the name says
@@ -70,6 +79,13 @@ pub enum Message {
     /// Leave the playing screen for the list. Does nothing from the list, where the launcher's own
     /// back is the one that means something — see [`Player::go_back`].
     Back,
+    /// A finger has dragged the progress bar to this second of the track: shown, and not played yet.
+    ///
+    /// The backend is not asked to go anywhere until the finger lets go ([`Message::Seek`]): a seek
+    /// here is the file opened again further in, and once a frame that is a track made of restarts.
+    Scrub(f32),
+    /// The finger has let go of the progress bar: play from where it was left.
+    Seek,
     /// Look for the card again — what a finger does on the empty screen.
     Rescan,
 }
@@ -173,6 +189,10 @@ impl Player {
             Message::Next => self.model.next_track(),
             Message::VolumeDown => self.model.volume_down(),
             Message::VolumeUp => self.model.volume_up(),
+            // The drag and its release, from the level's slider: heard as it moves, written down when
+            // it stops.
+            Message::VolumePreview(volume) => self.model.preview_volume(volume),
+            Message::VolumeCommit => self.model.commit_volume(),
             Message::Open(index) => self.model.open_track(index),
             // The button on the playing screen. From the list there is nothing to go back to, and the
             // press is dropped: the launcher's back is what leaves the app, and it never routes
@@ -180,6 +200,10 @@ impl Player {
             Message::Back => {
                 self.model.go_back();
             }
+            // The same bargain for the progress bar: the finger moves it, and letting go is what the
+            // backend is told.
+            Message::Scrub(position) => self.model.scrub(position),
+            Message::Seek => self.model.commit_seek(),
             Message::Rescan => self.model.refresh_playlist(),
         }
     }
@@ -491,28 +515,29 @@ impl Player {
         stack![face, marker].into()
     }
 
-    /// The progress band: the bar, and the two timestamps below it.
+    /// The progress band: the bar a finger can drag, and the two timestamps below it.
+    ///
+    /// The bar is a slider and no longer two containers of hand-picked widths, because it is the one
+    /// thing on this screen a hand wants to be on: the rail says where playback is, and the handle is
+    /// what the hand takes hold of. The `BAR_MIN_FILL` sliver went with the containers — a handle
+    /// standing at the left end of the rail says where a track begins better than 4 px of purple did.
+    ///
+    /// The timestamps are the model's numbers and not the slider's, which is what makes a drag read
+    /// out loud: [`Player::update`] follows the finger through [`Message::Scrub`], so the left-hand
+    /// stamp shows the second being aimed at before anything is played from there.
     fn progress_band(&self) -> Element<'_, Message> {
-        let ratio = if self.model.duration_secs > 0.0 {
-            (self.model.position_secs / self.model.duration_secs).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
+        let duration = self.model.duration_secs.max(0.0);
+        let position = self.model.position_secs.clamp(0.0, duration);
+        let theme_mode = self.theme_mode();
 
-        let filled = (style::BAR_WIDTH * ratio).max(style::BAR_MIN_FILL);
-
-        let fill = container(Space::new())
-            .width(Length::Fixed(filled))
-            .height(Length::Fixed(style::BAR_HEIGHT))
-            .style(|_theme| bar_style(style::primary()));
-
-        let track_color = style::track_for(self.theme_mode());
-        let track = container(fill)
+        let bar = Slider::new(0.0..=duration, position, Message::Scrub)
+            .step(style::SEEK_STEP)
             .width(Length::Fixed(style::BAR_WIDTH))
-            .height(Length::Fixed(style::BAR_HEIGHT))
-            .style(move |_theme| bar_style(track_color));
+            .height(style::BAR_TOUCH)
+            .on_release(Message::Seek)
+            .style(move |_theme, _status| style::slider_style(theme_mode));
 
-        let text_color = style::text_gray_for(self.theme_mode());
+        let text_color = style::text_gray_for(theme_mode);
         let stamps: Vec<Element<'_, Message>> = vec![
             text(format_time(self.model.position_secs))
                 .size(style::TIME_FONT)
@@ -529,7 +554,7 @@ impl Player {
 
         container(
             Column::with_children(vec![
-                track.into(),
+                bar.into(),
                 Space::new().height(Length::Fixed(style::BAR_GAP)).into(),
                 stamps.into(),
             ])
@@ -572,31 +597,26 @@ impl Player {
     ///
     /// The volume is the board's and not this page's — the backend writes it to its own partition on
     /// the way past, and reads it back when the board boots — so this band is a view of one number
-    /// with two ways of moving it, and nothing of its own to keep. See
+    /// with three ways of moving it, and nothing of its own to keep. See
     /// `pomelo_hal::music_settings`.
     ///
-    /// Buttons and a level, and not a slider: the panel is 480 px of finger with a transport row
-    /// directly above, and a step of ten percent is what the row can be aimed at. The level bar is
-    /// the progress bar — same width, same height, same radius — because the two are the same kind of
-    /// instrument and reading them as one is the point.
+    /// The level is a slider and the pair beside it are buttons, which is not a redundancy: a finger
+    /// that knows where it wants to land drags, and a thumb holding the box steps. The pair still moves
+    /// in tens, because a button is a step and a step is a decision. The drag is heard as it goes and
+    /// written down only when the finger stops — see [`Message::VolumePreview`] — so that a flash
+    /// partition is erased once per gesture rather than once per frame.
+    ///
+    /// It is the progress bar's instrument: same width, same rail, same handle.
     fn volume_band(&self) -> Element<'_, Message> {
         let theme_mode = self.theme_mode();
         let volume = self.model.volume;
 
-        /* No `BAR_MIN_FILL` here, unlike the progress bar: a level of zero that still showed a sliver
-         * of fill would be a bar claiming there was some. */
-        let filled = style::VOLUME_BAR_WIDTH * (volume as f32 / 100.0);
-
-        let fill = container(Space::new())
-            .width(Length::Fixed(filled))
-            .height(Length::Fixed(style::BAR_HEIGHT))
-            .style(|_theme| bar_style(style::primary()));
-
-        let track_color = style::track_for(theme_mode);
-        let level = container(fill)
+        let level = Slider::new(0..=100u8, volume, Message::VolumePreview)
+            .step(style::VOLUME_STEP)
             .width(Length::Fixed(style::VOLUME_BAR_WIDTH))
-            .height(Length::Fixed(style::BAR_HEIGHT))
-            .style(move |_theme| bar_style(track_color));
+            .height(style::BAR_TOUCH)
+            .on_release(Message::VolumeCommit)
+            .style(move |_theme, _status| style::slider_style(theme_mode));
 
         let readout = container(
             text(format!("{volume}%"))
@@ -1018,14 +1038,3 @@ fn disc_style(color: Color) -> container::Style {
     }
 }
 
-/// The same, for the progress bar's two halves.
-fn bar_style(color: Color) -> container::Style {
-    container::Style {
-        background: Some(color.into()),
-        border: Border {
-            radius: style::BAR_RADIUS.into(),
-            ..Border::default()
-        },
-        ..container::Style::default()
-    }
-}

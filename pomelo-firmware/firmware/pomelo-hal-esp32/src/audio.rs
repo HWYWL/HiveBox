@@ -79,6 +79,13 @@ const SETTINGS_CAPACITY: usize = 256;
 /// through, spelled out here for the same reason it is spelled out there.
 const ESP_ERR_NOT_FOUND: i32 = 0x105;
 
+/// How long a seek waits for the previous worker to close the codec, in milliseconds.
+///
+/// Generous next to what it is waiting for: the worker checks for the stop between blocks, which is a
+/// few milliseconds of decoding. Waiting longer than a moment would be the panel frozen behind an
+/// audio thread that is not coming back.
+const WORKER_HANDOVER_MS: u32 = 300;
+
 /// The path as a C string. A NUL inside a path is impossible here and would be a bad argument.
 fn c_path(path: &Path) -> Result<CString, HalError> {
     CString::new(path.to_string_lossy().as_ref()).map_err(|_| HalError::InvalidArg)
@@ -148,7 +155,17 @@ struct PlaybackControl {
     /// Frames (not bytes) written to the codec. Frames are what a position in seconds is made of,
     /// and they survive the conversion: a 24-bit stereo file and a 16-bit mono one both leave one
     /// frame per frame.
+    ///
+    /// Counted from the *start of the track*, not from where this worker picked it up: a seek starts
+    /// a new worker, and the position it hands the page has to already include where the needle was
+    /// put, or the bar would snap back to zero the moment it was let go.
     frames_played: AtomicU32,
+    /// Set by the worker, after it has closed the codec, on its way out.
+    ///
+    /// The codec is one device and the worker that ends a track closes it, so a seek has to know that
+    /// the old worker is finished with it before a new one opens it again: two workers holding the
+    /// same sink is a track that goes silent at random.
+    worker_done: AtomicBool,
 }
 
 /// A file being played, whichever way its samples have to be arrived at.
@@ -191,7 +208,14 @@ impl TrackSource {
 }
 
 pub struct EspAudio {
-    meta: Option<AudioMeta>,
+    /// What was opened, kept so a seek can open it again further in.
+    ///
+    /// `None` is "nothing is open": a board that has never played, or one whose track was stopped,
+    /// and the state a seek is answered from without touching the codec at all.
+    path: Option<String>,
+    /// The same file's shape, needed by the reopen: without the sample rate there is nothing to turn
+    /// a position in seconds into, and without the duration there is nothing to clamp it against.
+    info: Option<AudioInfo>,
     control: Option<Arc<PlaybackControl>>,
     volume: u8,
 }
@@ -206,7 +230,8 @@ impl EspAudio {
          * read the file, and a codec with no gain is not a state anything here wants to be in even
          * for the length of a boot. */
         let mut audio = Self {
-            meta: None,
+            path: None,
+            info: None,
             control: None,
             volume: music_settings::DEFAULT_VOLUME,
         };
@@ -249,6 +274,7 @@ impl EspAudio {
             is_paused: AtomicBool::new(false),
             stop_requested: AtomicBool::new(false),
             frames_played: AtomicU32::new(0),
+            worker_done: AtomicBool::new(false),
         });
 
         let control_clone = Arc::clone(&control);
@@ -290,13 +316,21 @@ impl EspAudio {
                     ffi::hal_audio_close();
                 }
                 control_clone.is_playing.store(false, Ordering::Relaxed);
+                control_clone.worker_done.store(true, Ordering::Relaxed);
             });
 
         Ok(())
     }
 
     /// Open a file for playback: its own samples if it holds them, a decoder if it does not.
-    fn open_track(path: &str, info: &AudioInfo) -> Result<TrackSource, HalError> {
+    ///
+    /// `position_secs` is where in the track the needle goes down, which is zero for a plain `play`
+    /// and the finger's position for a seek. The work is the same either way — one offset instead of
+    /// another — and doing it here rather than in a second copy of the same function is what keeps a
+    /// seek from being a differently-broken way of starting a track.
+    fn open_track(path: &str, info: &AudioInfo, position_secs: f32) -> Result<TrackSource, HalError> {
+        let position_secs = position_secs.max(0.0);
+
         match info.kind {
             AudioKind::Wav => {
                 let mut file = File::open(path)
@@ -311,7 +345,15 @@ impl EspAudio {
                     .map_err(|e| HalError::Io(e.to_string()))?;
                 let wav = parse_wav_header(&header[..read]).map_err(HalError::Io)?;
 
-                file.seek(SeekFrom::Start(wav.data_offset as u64))
+                /* Whole frames, because half a frame is half a sample out of each channel — and
+                 * clamped to the `data` chunk, so a position past the end lands on the end rather
+                 * than in whatever chunk follows it. */
+                let bytes_per_frame =
+                    (wav.channels as u64 * wav.bits_per_sample as u64 / 8).max(1);
+                let frames = (position_secs * wav.sample_rate as f32) as u64;
+                let offset = wav.data_offset as u64 + (frames * bytes_per_frame).min(wav.data_len as u64);
+
+                file.seek(SeekFrom::Start(offset))
                     .map_err(|e| HalError::Io(e.to_string()))?;
 
                 let normalizer = PcmNormalizer::new(wav.source()).ok_or_else(|| {
@@ -324,7 +366,12 @@ impl EspAudio {
                 Ok(TrackSource::Wav { file, normalizer })
             }
             AudioKind::Mp3 | AudioKind::Flac => {
-                let stream = PcmStream::open(Path::new(path)).map_err(HalError::Io)?;
+                let mut stream = PcmStream::open(Path::new(path)).map_err(HalError::Io)?;
+
+                if position_secs > 0.0 {
+                    stream.seek(position_secs).map_err(HalError::Io)?;
+                }
+
                 Ok(TrackSource::Coded(Box::new(stream)))
             }
         }
@@ -333,14 +380,19 @@ impl EspAudio {
     /// Drive `source` into the codec until it ends, the caller stops it, or reading fails.
     ///
     /// The codec is already open when this is called and is closed when it returns.
-    fn run_worker(source: TrackSource, control: Arc<PlaybackControl>) {
+    ///
+    /// `start_frames` is how far into the track this worker's first block is — zero for a track
+    /// played from the beginning, and the seek position otherwise. It is counted from there rather
+    /// than from zero so that the position the page reads is a position in the *track*, which is the
+    /// only kind of position a progress bar can be drawn at.
+    fn run_worker(source: TrackSource, control: Arc<PlaybackControl>, start_frames: u64) {
         let channels = source.output_channels().max(1) as usize;
         let bytes_per_frame = channels * 2;
 
         let mut source = source;
         let mut scratch = vec![0u8; 8192];
         let mut pcm: Vec<u8> = Vec::with_capacity(32 * 1024);
-        let mut frames: u64 = 0;
+        let mut frames: u64 = start_frames;
 
         loop {
             if control.stop_requested.load(Ordering::Relaxed) {
@@ -385,6 +437,87 @@ impl EspAudio {
             ffi::hal_audio_close();
         }
         control.is_playing.store(false, Ordering::Relaxed);
+        control.worker_done.store(true, Ordering::Relaxed);
+    }
+
+    /// Open `path` at `position_secs` and give it to a worker of its own.
+    ///
+    /// The one place a track is started, so `play` and `seek` differ only in where the needle goes
+    /// down: the probe's answer, the codec, the volume it has to be given back after
+    /// `hal_audio_open`, and the worker that feeds it are the same work either way.
+    ///
+    /// The codec must be free when this is called — [`Self::play`] stops the previous track first,
+    /// [`AudioBackend::seek`] waits for its worker to let go.
+    ///
+    /// `paused` is decided before the worker exists and not after: a flag set from here once the
+    /// thread is already running would let its first block reach the speaker, which is audible as a
+    /// syllable of a paused track.
+    fn start_at(
+        &mut self,
+        path: &str,
+        info: &AudioInfo,
+        position_secs: f32,
+        paused: bool,
+    ) -> Result<AudioMeta, HalError> {
+        let source = Self::open_track(path, info, position_secs)?;
+        let channels = source.output_channels().max(1) as u8;
+
+        let ret = unsafe { ffi::hal_audio_open(info.sample_rate, channels, CODEC_BITS) };
+        if ret != 0 {
+            return Err(HalError::Internal(ret));
+        }
+
+        // `hal_audio_open` resets the codec to its own gain, so the volume goes back on here.
+        self.apply_volume(self.volume);
+
+        let start_frames = (position_secs.max(0.0) * info.sample_rate as f32) as u64;
+
+        let control = Arc::new(PlaybackControl {
+            is_playing: AtomicBool::new(true),
+            is_paused: AtomicBool::new(paused),
+            stop_requested: AtomicBool::new(false),
+            frames_played: AtomicU32::new(start_frames as u32),
+            worker_done: AtomicBool::new(false),
+        });
+
+        let control_clone = Arc::clone(&control);
+
+        let _ = std::thread::Builder::new()
+            .name("audio_worker".into())
+            .spawn(move || Self::run_worker(source, control_clone, start_frames));
+
+        /* The file is remembered here rather than in `play`, because the two things that read it
+         * later — a seeking reopen and the position readout — need it whichever way the track was
+         * opened, and a second copy of this list would be a second chance to leave one out. */
+        self.path = Some(path.to_string());
+        self.info = Some(*info);
+        self.control = Some(control);
+
+        Ok(info.meta())
+    }
+
+    /// Ask the current worker to stop, and wait for it to let go of the codec.
+    ///
+    /// Returns whether it did. The wait is bounded ([`WORKER_HANDOVER_MS`]) rather than patient: a
+    /// worker that will not come back must not take the panel with it, and a seek that is not made is
+    /// a missed seek, where a frozen screen is a broken board.
+    fn hand_over(&mut self) -> bool {
+        let Some(control) = self.control.clone() else {
+            return true;
+        };
+
+        control.stop_requested.store(true, Ordering::Relaxed);
+        control.is_playing.store(false, Ordering::Relaxed);
+
+        for _ in 0..WORKER_HANDOVER_MS {
+            if control.worker_done.load(Ordering::Relaxed) {
+                return true;
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        false
     }
 }
 
@@ -432,36 +565,7 @@ impl AudioBackend for EspAudio {
             )));
         }
 
-        let source = Self::open_track(path, &info)?;
-        let channels = source.output_channels().max(1) as u8;
-
-        let ret = unsafe { ffi::hal_audio_open(info.sample_rate, channels, CODEC_BITS) };
-        if ret != 0 {
-            return Err(HalError::Internal(ret));
-        }
-
-        // `hal_audio_open` resets the codec to its own gain, so the volume goes back on here.
-        self.apply_volume(self.volume);
-
-        let control = Arc::new(PlaybackControl {
-            is_playing: AtomicBool::new(true),
-            is_paused: AtomicBool::new(false),
-            stop_requested: AtomicBool::new(false),
-            frames_played: AtomicU32::new(0),
-        });
-
-        let control_clone = Arc::clone(&control);
-
-        let _ = std::thread::Builder::new()
-            .name("audio_worker".into())
-            .spawn(move || Self::run_worker(source, control_clone));
-
-        let audio_meta = info.meta();
-
-        self.meta = Some(audio_meta);
-        self.control = Some(control);
-
-        Ok(audio_meta)
+        self.start_at(path, &info, 0.0, false)
     }
 
     fn pause(&mut self) {
@@ -484,6 +588,12 @@ impl AudioBackend for EspAudio {
         unsafe {
             ffi::hal_audio_close();
         }
+
+        /* Stopping closes the track, and what is closed cannot be seeked in: forgetting the file here
+         * is what makes a drag on the bar of a stopped track do nothing instead of quietly starting
+         * the track again at the place the finger left it. */
+        self.path = None;
+        self.info = None;
     }
 
     fn set_volume(&mut self, volume: u8) {
@@ -491,11 +601,25 @@ impl AudioBackend for EspAudio {
 
         /* Written down on every change. A volume is turned one step at a time, so this is a handful
          * of small writes rather than a stream of them — and a board that came back at the wrong
-         * volume because the power went before it was saved would be worse than the write costs. */
+         * volume because the power went before it was saved would be worse than the write costs. A
+         * level dragged by a finger is not a step at a time and does not come through here: see
+         * [`AudioBackend::preview_volume`]. */
         let settings = MusicSettings { volume: self.volume };
         if let Err(error) = write_settings(&settings, BOARD_APP_DATA) {
             eprintln!("[audio] could not remember the volume: {error}");
         }
+    }
+
+    /// Turn the codec without writing anything down: what a finger dragging the level says, once a
+    /// frame.
+    ///
+    /// The write is the expensive half of a volume change — an erase and a rewrite of a flash
+    /// partition — and a drag is dozens of changes a second, of which only the last one is the number
+    /// anybody meant. So the drag is heard and not remembered, and the `set_volume` that ends it is
+    /// what the next boot reads. A board switched off mid-drag comes back at the volume the drag
+    /// started from, which is exactly what the screen was showing a second earlier.
+    fn preview_volume(&mut self, volume: u8) {
+        self.apply_volume(volume);
     }
 
     fn volume(&self) -> u8 {
@@ -513,21 +637,58 @@ impl AudioBackend for EspAudio {
 
     #[inline]
     fn position_secs(&self) -> f32 {
-        if let (Some(meta), Some(c)) = (&self.meta, &self.control) {
-            if meta.sample_rate > 0 {
+        if let (Some(info), Some(c)) = (&self.info, &self.control) {
+            if info.sample_rate > 0 {
                 let frames = c.frames_played.load(Ordering::Relaxed);
-                let position = frames as f32 / meta.sample_rate as f32;
+                let position = frames as f32 / info.sample_rate as f32;
 
                 /* A track whose length could not be worked out reports its position as it is rather
                  * than clamped to zero — an MP3 with no encoder frame is long, not empty. */
-                return if meta.duration_secs > 0.0 {
-                    position.min(meta.duration_secs)
+                return if info.duration_secs > 0.0 {
+                    position.min(info.duration_secs)
                 } else {
                     position
                 };
             }
         }
         0.0
+    }
+
+    /// Put the needle where the finger left it.
+    ///
+    /// There is no seeking in a stream of PCM: the only way back into a track is to open it again
+    /// further in, so this is a small replay — the old worker is asked to stop and waited for, the
+    /// file is opened at an offset (`open_track`), and a new worker takes over from there. For a WAV
+    /// that offset is a byte in the `data` chunk; for an MP3 or FLAC it is a packet the decoder
+    /// starts again from.
+    fn seek(&mut self, position_secs: f32) -> Result<(), HalError> {
+        /* Nothing open: a track that was never played, or one that was stopped — stop closes the
+         * track here, so there is nothing left to seek in and, like the trait says, nothing happens. */
+        let (Some(path), Some(info)) = (self.path.clone(), self.info) else {
+            return Ok(());
+        };
+
+        /* Clamped to the track, because the backend is the one that knows how long it is: a bar
+         * dragged past the end is a finger that has run out of bar, not an error. */
+        let end = if info.duration_secs > 0.0 {
+            info.duration_secs
+        } else {
+            f32::MAX
+        };
+        let position = position_secs.clamp(0.0, end);
+
+        let was_paused = self
+            .control
+            .as_ref()
+            .map_or(false, |c| c.is_paused.load(Ordering::Relaxed));
+
+        if !self.hand_over() {
+            eprintln!("[audio] the previous worker is still holding the codec; not seeking");
+            return Err(HalError::Busy);
+        }
+
+        self.start_at(&path, &info, position, was_paused)
+            .map(|_| ())
     }
 
     #[inline]

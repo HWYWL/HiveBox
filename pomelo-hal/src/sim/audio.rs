@@ -15,6 +15,8 @@
 
 #[cfg(feature = "simulator")]
 use std::fs::File;
+#[cfg(feature = "simulator")]
+use std::time::Duration;
 use std::path::Path;
 use std::time::Instant;
 
@@ -35,6 +37,7 @@ enum SimAudioCommand {
     Resume,
     Stop,
     SetVolume(f32),
+    Seek(f32),
 }
 
 pub struct SimAudio {
@@ -98,6 +101,14 @@ impl SimAudio {
                             SimAudioCommand::SetVolume(v) => {
                                 if let Some(sink) = &sink {
                                     sink.set_volume(v);
+                                }
+                            }
+                            SimAudioCommand::Seek(secs) => {
+                                if let Some(sink) = &sink {
+                                    /* A host device that cannot seek (some decoders) has already had
+                                     * the move counted by `elapsed_base`; the sound simply carries
+                                     * on, which is better than the whole drag being rejected. */
+                                    let _ = sink.try_seek(Duration::from_secs_f32(secs));
                                 }
                             }
                         }
@@ -216,6 +227,27 @@ impl AudioBackend for SimAudio {
 
     fn position_secs(&self) -> f32 {
         self.elapsed().min(self.duration)
+    }
+
+    fn seek(&mut self, position_secs: f32) -> Result<(), HalError> {
+        /* Nothing has been opened: nothing to move. The device answers the same way, so a bar
+         * dragged with no track under it is quiet here too rather than being the one place it
+         * panics. */
+        if !self.is_playing && self.elapsed_base == 0.0 && self.started_at.is_none() {
+            return Ok(());
+        }
+
+        let end = if self.duration > 0.0 { self.duration } else { f32::MAX };
+        let position = position_secs.clamp(0.0, end);
+
+        /* The clock read by `position_secs` is this struct's, not rodio's, so it moves with the
+         * needle: the host sink is told too, but the number the page shows next frame comes from
+         * here and would otherwise snap back to where the track was. */
+        self.elapsed_base = position;
+        self.started_at = if self.paused { None } else { Some(Instant::now()) };
+        self.send(SimAudioCommand::Seek(position));
+
+        Ok(())
     }
 
     fn tick(&mut self) {
