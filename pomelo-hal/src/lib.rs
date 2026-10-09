@@ -23,12 +23,21 @@
 //! On the name: "HAL" here means *board-level services* — the peripherals this board has —
 //! not the register-level HAL that `esp-hal` means. Nothing in here talks to a register.
 
+pub mod app_data;
 pub mod board;
 pub mod error;
+pub mod music_settings;
+pub mod pcm;
+pub mod probe;
 pub mod traits;
 pub mod types;
 pub mod wav;
 pub mod wifi_credentials;
+
+/// MP3 and FLAC decoding — behind a feature, because it is the only dependency in the crate that
+/// exists for the device's sake rather than the simulator's.
+#[cfg(feature = "decode")]
+pub mod decode;
 
 /// Desktop simulator backends, on every platform that is not the device itself.
 #[cfg(not(target_os = "espidf"))]
@@ -36,6 +45,7 @@ pub mod sim;
 
 pub use board::Board;
 pub use error::HalError;
+pub use music_settings::MusicSettings;
 pub use traits::{
     AudioBackend, ImuBackend, InputBackend, MicBackend, PowerBackend, StorageBackend, WebBackend,
     WifiBackend,
@@ -58,5 +68,6 @@ pub mod prelude {
         ApInfo, AudioMeta, FlashLayout, FlashRegion, FlashRegionKind, InputAction, ScanState,
         SystemEvent, Vec3, VolumeInfo, VolumeKind, WebStatus, WifiState, WifiStatus,
     };
+    pub use crate::music_settings::MusicSettings;
     pub use crate::wifi_credentials::WifiCredentials;
 }

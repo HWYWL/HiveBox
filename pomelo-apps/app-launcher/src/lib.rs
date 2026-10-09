@@ -899,6 +899,10 @@ impl Launcher {
             Message::Calculator(message) => self.get_or_create_calculator().update(message),
             Message::Counter(message) => self.get_or_create_counter().update(message),
             Message::Hello(message) => self.get_or_create_hello().update(message),
+            // The player navigates inside itself too — the list and the track — so its back is asked
+            // before it is handled like any other message, exactly as the settings app's is. Both the
+            // button on the playing screen and the hardware key arrive here as this one message.
+            Message::Music(music_player::Message::Back) => return self.go_back(),
             Message::Music(message) => self.get_or_create_music().update(message),
             Message::Terminal(message) => self.get_or_create_terminal().update(message),
             Message::WebManager(message) => self.get_or_create_web_manager().update(message),
@@ -969,6 +973,13 @@ impl Launcher {
                     (false, Task::none())
                 }
             }
+            // The player has two screens, and back steps between them before it leaves the app: the
+            // playing screen gives way to the list, and only a press *from* the list backgrounds it.
+            // Nothing to scroll and nothing to redraw, so the answer is a `bool`.
+            Screen::App(MUSIC) => match &mut self.music {
+                Some(player) => (player.go_back(), Task::none()),
+                None => (false, Task::none()),
+            },
             Screen::App(_) => (false, Task::none()),
         };
 
@@ -1443,6 +1454,41 @@ mod tests {
         // Hardware Back from Main exits Settings to Grid
         launcher.update(Message::Back);
         assert_eq!(launcher.screen, Screen::Grid);
+    }
+
+    /// The player is the second app here that navigates inside itself, and it takes the back press
+    /// the same way the settings app does: from the track it steps to the list, and only from the
+    /// list does the press leave the app.
+    #[test]
+    fn back_returns_the_music_player_to_its_list_before_the_grid() {
+        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
+
+        launcher.update(Message::Open(MUSIC));
+        assert_eq!(launcher.screen, Screen::App(MUSIC));
+        assert_eq!(
+            launcher.music().page(),
+            music_player::Page::Library,
+            "the app opens on the list and plays nothing"
+        );
+
+        // What a tap on a row sends: the playing screen comes up.
+        launcher.update(Message::Music(music_player::Message::Open(0)));
+        assert_eq!(launcher.music().page(), music_player::Page::NowPlaying);
+
+        launcher.update(Message::Back);
+        assert_eq!(
+            launcher.screen,
+            Screen::App(MUSIC),
+            "the player consumes the press that leaves its track"
+        );
+        assert_eq!(launcher.music().page(), music_player::Page::Library);
+
+        launcher.update(Message::Back);
+        assert_eq!(
+            launcher.screen,
+            Screen::Grid,
+            "and the press from the list is the launcher's own"
+        );
     }
 
     #[test]

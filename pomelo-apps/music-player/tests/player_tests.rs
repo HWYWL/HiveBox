@@ -16,7 +16,7 @@ use std::sync::Arc;
 use iced::Size;
 use iced_test::Simulator;
 
-use music_player::{Message, PlaybackStatus, Player, SCREEN};
+use music_player::{Message, Page, PlaybackStatus, Player, SCREEN};
 use pomelo_hal::Board;
 use pomelo_material_symbols::Icon;
 
@@ -24,6 +24,25 @@ use pomelo_material_symbols::Icon;
 /// the interface and not the hardware.
 fn board() -> Arc<Board> {
     Arc::new(Board::simulated())
+}
+
+/// The same board with the card taken out of the slot — the state a person meets, and the one the
+/// player has to speak about rather than report as a missing file.
+fn board_without_card() -> Arc<Board> {
+    use pomelo_hal::sim::{
+        SimAudio, SimImu, SimInput, SimMic, SimPower, SimStorage, SimWeb, SimWifi,
+    };
+
+    Arc::new(Board::from_backends(
+        Box::new(SimPower::new()),
+        Box::new(SimWifi::new()),
+        Box::new(SimAudio::new()),
+        Box::new(SimMic::new()),
+        Box::new(SimImu::new()),
+        Box::new(SimInput::new()),
+        Box::new(SimStorage::without_card()),
+        Box::new(SimWeb::new()),
+    ))
 }
 
 /// A player with a scratch directory of its own.
@@ -116,13 +135,122 @@ fn with_one_track(player: &mut Player) -> String {
     "sample".to_string()
 }
 
+/// The app opens on the list, and nothing is playing: opening a player is not asking it to play.
+///
+/// This is the whole of why the list exists. The panel is looked at far more often than it is
+/// listened to, and a board that starts a track because an app was opened is a board with a mind of
+/// its own.
+#[test]
+fn the_player_opens_on_the_list_with_nothing_playing() {
+    use pomelo_widgets::preferences::{FontSizeTier, Language, SystemPreferences, ThemeMode};
+
+    let mut player = player();
+    with_one_track(&mut player);
+
+    assert_eq!(player.page(), Page::Library);
+    assert_eq!(player.status(), PlaybackStatus::Stopped);
+
+    player.set_preferences(SystemPreferences::new(
+        Language::English,
+        ThemeMode::Dark,
+        FontSizeTier::Standard,
+    ));
+    assert_eq!(player.library_title(), "Music library");
+    assert_eq!(player.track_count(), "1 track", "the head counts what it found");
+
+    // Worded per language, because "1 首" and "1 tracks" are both the kind of thing that makes a
+    // finished screen look like it was left half-done.
+    player.set_preferences(SystemPreferences::new(
+        Language::Chinese,
+        ThemeMode::Dark,
+        FontSizeTier::Standard,
+    ));
+    assert_eq!(player.library_title(), "音乐库");
+    assert_eq!(player.track_count(), "1 首");
+}
+
+/// A tap on a row is the only way onto the playing screen, and it starts the track it names.
+///
+/// Choosing a track and playing it are one intent, so one tap is all of it: a screen that came up
+/// with a stopped disc on it, one more press from the sound that was asked for, would be asking the
+/// same question twice.
+#[test]
+fn a_tap_on_a_row_opens_the_track_and_plays_it() -> Result<(), iced_test::Error> {
+    let mut player = player();
+    let title = with_one_track(&mut player);
+
+    press(&mut player, &title)?;
+
+    assert_eq!(player.page(), Page::NowPlaying, "the row leads to the track");
+    assert_eq!(player.status(), PlaybackStatus::Playing);
+    assert_eq!(player.title(), title);
+    Ok(())
+}
+
+/// Back steps from the track to the list, and only from the list does the press leave the app.
+///
+/// `go_back`'s answer is what the launcher reads: `true` means the press was the app's to keep.
+#[test]
+fn back_leaves_the_playing_screen_before_it_leaves_the_app() -> Result<(), iced_test::Error> {
+    let mut player = player();
+    let title = with_one_track(&mut player);
+    press(&mut player, &title)?;
+
+    assert!(
+        player.go_back(),
+        "the playing screen has the list behind it, so the press is consumed"
+    );
+    assert_eq!(player.page(), Page::Library);
+    assert_eq!(
+        player.status(),
+        PlaybackStatus::Playing,
+        "and going back does not stop the music: choosing the next track is why a person goes back"
+    );
+
+    assert!(
+        !player.go_back(),
+        "the list is where the app stops answering back; the launcher's own back leaves it"
+    );
+    Ok(())
+}
+
+/// The list wears no back button — the press that leaves the app is the launcher's — and the track
+/// screen does, because the list is behind it.
+#[test]
+fn the_back_button_is_on_the_track_and_not_on_the_list() -> Result<(), iced_test::Error> {
+    let mut player = player();
+    let title = with_one_track(&mut player);
+
+    {
+        let mut ui = interface(&player);
+        assert!(
+            ui.find(Icon::ARROW_BACK.glyph()).is_err(),
+            "there is nowhere to go back to from the list"
+        );
+    }
+
+    press(&mut player, &title)?;
+
+    let mut ui = interface(&player);
+    assert!(
+        ui.find(Icon::ARROW_BACK.glyph()).is_ok(),
+        "the track screen can go back to the list"
+    );
+    Ok(())
+}
+
 #[test]
 fn a_press_on_play_starts_the_track() -> Result<(), iced_test::Error> {
     let mut player = player();
     let title = with_one_track(&mut player);
 
     assert_eq!(player.title(), title);
-    assert_eq!(player.status(), PlaybackStatus::Stopped);
+
+    // Onto the playing screen first, then hold it: the button the press reaches is the one that
+    // resumes a stopped track, which is also what it does from a pause.
+    press(&mut player, &title)?;
+    press(&mut player, Icon::PAUSE.glyph())?;
+    assert_eq!(player.status(), PlaybackStatus::Paused);
 
     press(&mut player, Icon::PLAY_ARROW.glyph())?;
 
@@ -138,9 +266,9 @@ fn a_press_on_play_starts_the_track() -> Result<(), iced_test::Error> {
 #[test]
 fn play_then_pause_stops_asking_for_frames() -> Result<(), iced_test::Error> {
     let mut player = player();
-    with_one_track(&mut player);
+    let title = with_one_track(&mut player);
 
-    press(&mut player, Icon::PLAY_ARROW.glyph())?;
+    press(&mut player, &title)?;
     assert!(player.is_animating());
 
     // The icon changed with the state, which is what a person reads to know what the button will
@@ -160,9 +288,11 @@ fn play_then_pause_stops_asking_for_frames() -> Result<(), iced_test::Error> {
 #[test]
 fn next_and_prev_move_the_playlist_and_play_what_they_land_on() -> Result<(), iced_test::Error> {
     let mut player = player();
-    with_one_track(&mut player);
+    let title = with_one_track(&mut player);
 
-    assert_eq!(player.status(), PlaybackStatus::Stopped);
+    press(&mut player, &title)?;
+    assert_eq!(player.page(), Page::NowPlaying);
+    assert_eq!(player.status(), PlaybackStatus::Playing);
 
     press(&mut player, Icon::SKIP_NEXT.glyph())?;
 
@@ -177,11 +307,35 @@ fn next_and_prev_move_the_playlist_and_play_what_they_land_on() -> Result<(), ic
     Ok(())
 }
 
+/// The volume buttons are on the track screen, and a press on one steps the level.
+///
+/// The press is aimed at the glyph, which is the assertion that the two buttons are in the tree at
+/// all — a row that only existed in the model would pass every test that asked the model directly.
+#[test]
+fn the_volume_buttons_step_the_level() -> Result<(), iced_test::Error> {
+    let mut player = player();
+    let title = with_one_track(&mut player);
+    press(&mut player, &title)?;
+
+    let before = player.volume();
+
+    press(&mut player, Icon::VOLUME_DOWN.glyph())?;
+    assert_eq!(player.volume(), before.saturating_sub(10));
+
+    press(&mut player, Icon::VOLUME_UP.glyph())?;
+    assert_eq!(player.volume(), before, "and the pair are inverse steps");
+    Ok(())
+}
+
 #[test]
 fn the_volume_steps_and_never_leaves_its_range() {
     let mut player = player();
 
-    assert_eq!(player.volume(), 75, "the model's starting volume");
+    assert_eq!(
+        player.volume(),
+        75,
+        "the volume is the board's, and 75 is what a board that has never been turned down comes up at"
+    );
 
     player.update(Message::VolumeUp);
     assert_eq!(player.volume(), 85);
@@ -275,4 +429,88 @@ fn preferences_roundtrip() {
 
     assert_eq!(p.preferences(), prefs);
     assert_eq!(p.theme_mode(), ThemeMode::Light);
+}
+
+/// With no card in the slot the player asks for one, in the language on the screen.
+#[test]
+fn an_empty_slot_asks_for_a_card() {
+    use pomelo_widgets::preferences::{FontSizeTier, Language, SystemPreferences, ThemeMode};
+
+    let mut player = Player::new(board_without_card());
+
+    assert!(player.wants_card(), "an empty slot has to be noticed");
+    assert_eq!(player.library_dir(), None);
+
+    // Nothing to play, so the title band is where the reason goes — and the reason is the card, not
+    // a file that was never there.
+    player.refresh_playlist_in(&[]);
+    assert_eq!(player.title(), player.empty_notice());
+
+    player.set_preferences(SystemPreferences::new(
+        Language::Chinese,
+        ThemeMode::Dark,
+        FontSizeTier::Standard,
+    ));
+    assert_eq!(player.empty_notice(), "请插入SD卡");
+    assert!(
+        player.empty_hint().contains("存储卡"),
+        "got {}",
+        player.empty_hint()
+    );
+
+    player.set_preferences(SystemPreferences::new(
+        Language::English,
+        ThemeMode::Dark,
+        FontSizeTier::Standard,
+    ));
+    assert_eq!(player.empty_notice(), "Insert an SD card");
+    assert!(
+        player.empty_hint().contains("card"),
+        "got {}",
+        player.empty_hint()
+    );
+}
+
+/// With a card in the slot the music is read from the folder on it, and the player says where that
+/// is: the mount point is the board's to name, and the folder inside it is the player's.
+#[test]
+fn a_card_in_the_slot_is_where_the_music_is_read_from() {
+    let player = Player::new(board());
+
+    assert!(!player.wants_card());
+    assert_eq!(player.library_dir(), Some("/sdcard/music"));
+}
+
+/// A card can arrive while the box is running and the app is not restarted when it does, so the
+/// empty screen looks again when it is touched.
+#[test]
+fn a_tap_on_the_empty_screen_looks_again() -> Result<(), iced_test::Error> {
+    let mut player = Player::new(board_without_card());
+    player.refresh_playlist_in(&[]);
+
+    let label = player.empty_notice();
+    press(&mut player, &label)?;
+
+    assert!(
+        player.wants_card(),
+        "the slot is still empty, and the player is still saying so"
+    );
+
+    Ok(())
+}
+
+/// And a scan a caller points somewhere of its own does not answer the card question: the tests
+/// above play a generated track, but that is not the card's music and it does not fill the slot.
+#[test]
+fn a_scan_of_the_callers_own_directory_leaves_the_slot_empty() {
+    let dir = scratch_dir();
+    write_sample(&dir);
+    let dir = dir.to_str().expect("a utf-8 scratch path");
+
+    let mut player = Player::new(board_without_card());
+    player.refresh_playlist_in(&[dir]);
+
+    assert_eq!(player.title(), "sample", "the track the caller supplied");
+    assert!(player.wants_card(), "the slot is still empty");
+    assert_eq!(player.library_dir(), None);
 }

@@ -105,6 +105,9 @@ impl Board {
     pub fn init(&self) {
         let _ = self.power().init();
         let _ = self.wifi().init();
+        // Puts the speaker at the volume the board was last left at, which is why it happens here
+        // rather than when some app that makes a sound is opened.
+        let _ = self.audio().init();
         // Mounts a card if one is in the slot. An empty slot is not an error, so the panel comes up
         // the same way either way — and nothing else at boot waits on a filesystem it did not ask
         // for.

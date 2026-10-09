@@ -17,7 +17,10 @@ publish = false
 crate-type = ["rlib"]
 
 [dependencies]
-pomelo-hal = { git = "https://github.com/pomelos-on-sale/pomelo-hal.git", rev = "80af97fdcbe15592b28f8fdbf2047308ad406551" }
+# `decode` is on for the same reason the audio backend exists: this is the crate that plays a track,
+# and an MP3 or FLAC is one of the three formats it plays. Without it the board would still *list*
+# those files and then refuse them at the moment of pressing play.
+pomelo-hal = { git = "https://github.com/pomelos-on-sale/pomelo-hal.git", rev = "80af97fdcbe15592b28f8fdbf2047308ad406551", features = ["decode"] }
 
 [patch."https://github.com/pomelos-on-sale/pomelo-hal.git"]
 pomelo-hal = { path = "../../../pomelo-hal" }

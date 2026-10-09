@@ -2,8 +2,11 @@
 //!
 //! The same numbers and the same named colours as the original player's `ui/theme.rs`,
 //! `ui/title.rs`, `ui/vinyl.rs`, `ui/progress.rs` and `ui/controls.rs`, so that the two apps lay
-//! out alike: absolute type, fluid bands. The page's four bands are the original's
-//! `Expanded(flex:)` shares, 4 : 15 : 3 : 3, of what is left after the page's padding.
+//! out alike: absolute type, fluid bands. The playing screen's bands are the original's
+//! `Expanded(flex:)` shares, 4 : 15 : 3 : 3, of what is left after the page's padding — with one
+//! share moved: the volume row, which the original's controls band held, gets a band of its own and
+//! the disc stands two short to pay for it. The disc has more room than it needs and the volume row
+//! has nowhere else to fit. The list page has no bands at all: a head, and rows that scroll.
 
 use iced::Color;
 
@@ -14,11 +17,15 @@ pub const SCREEN: u32 = 480;
 pub const PAGE_TOP: f32 = 20.0;
 pub const PAGE_BOTTOM: f32 = 30.0;
 
-/// The four bands: title, disc, progress, controls.
+/// The playing screen's five bands: title, disc, progress, controls, volume.
+///
+/// The original's 4 : 15 : 3 : 3, with the volume row given a share of its own. The disc pays for it
+/// and can afford to: it needs 128 of the 430 px the page has, and 11 of 25 is 172.
 pub const TITLE_FLEX: u16 = 4;
-pub const DISC_FLEX: u16 = 14;
+pub const DISC_FLEX: u16 = 11;
 pub const PROGRESS_FLEX: u16 = 3;
 pub const CONTROLS_FLEX: u16 = 4;
+pub const VOLUME_FLEX: u16 = 3;
 
 /// The title band.
 pub const TITLE_FONT: f32 = 32.0;
@@ -59,6 +66,39 @@ pub const VOLUME_READOUT: f32 = 52.0;
 // 15 and not 16: the platform's baked sizes are 14 / 15 / 18, and a readout one pixel off one of
 // them pays a glyph rasterisation per character the first time it is drawn.
 pub const VOLUME_FONT: f32 = 15.0;
+/// The level bar in the volume row: what is left of the progress bar's width once the two buttons,
+/// the readout and the three gaps between them are taken out of it. The row is that same 380 px,
+/// which is what makes the two bars line up rather than nearly line up.
+pub const VOLUME_BAR_WIDTH: f32 =
+    BAR_WIDTH - VOLUME_BUTTON * 2.0 - VOLUME_READOUT - VOLUME_GAP * 3.0;
+
+/// The back button on the playing screen: a small transport button, because that is what it is.
+pub const BACK_BUTTON: f32 = 40.0;
+pub const ICON_BACK: f32 = 22.0;
+/// The glyph in each of the volume pair — smaller than the transport's, because the button is.
+pub const ICON_VOLUME: f32 = 20.0;
+
+/// The list page's head: tall enough for its type and no taller, so that the rows get the rest.
+pub const HEADER_HEIGHT: f32 = 64.0;
+/// One step down from the playing screen's 32 px title: the page a person is on is not the track.
+pub const HEADER_FONT: f32 = 24.0;
+/// A row's title: 18, the largest of the platform's baked sizes below the page titles, so that a long
+/// name fits and a rasterisation is not paid per character.
+pub const ROW_FONT: f32 = 18.0;
+
+/// A track's row: 56 px is a finger's height, and the gap is the controls' 8 px, because the two are
+/// both "this much apart".
+pub const ROW_HEIGHT: f32 = 56.0;
+pub const ROW_GAP: f32 = 8.0;
+/// Rounded, and not `ROUND`: a row is a card, and the renderer would happily make it a pill.
+pub const ROW_RADIUS: f32 = 12.0;
+/// The row's own inside margin — enough to keep the words off the rounded edge.
+pub const ROW_PADDING: f32 = 14.0;
+/// The column the track's number sits in, which is also the width the playing mark takes over.
+/// Fixed, so that every title starts at the same x whether it is preceded by `7` or by a glyph.
+pub const ROW_INDEX_WIDTH: f32 = 28.0;
+/// The playing mark in that column.
+pub const ROW_MARK: f32 = 18.0;
 
 /// A radius no box this app draws is half as wide as.
 ///
@@ -129,6 +169,20 @@ pub fn label_playing() -> Color {
 /// The label at the centre, otherwise: the theme's `VINYL_LABEL_PAUSED`.
 pub fn label_paused() -> Color {
     rgb((156, 163, 175))
+}
+
+/// The row of the track that is playing: the primary colour diluted.
+///
+/// The theme has no token for it and there is no border to draw with, so the mark has to be the
+/// fill: the same purple as the progress bar and the play button, mixed most of the way into
+/// whichever background it sits on. Pale on the light theme, deep on the dark one — marked, and not
+/// shouted, in both.
+pub fn row_playing_for(theme: ThemeMode) -> Color {
+    if theme.is_light() {
+        rgb((243, 232, 255))
+    } else {
+        rgb((60, 32, 84))
+    }
 }
 
 /// The spindle: the theme's `VINYL_SPINDLE`.

@@ -27,7 +27,11 @@ pomelo-widgets = { git = "https://github.com/pomelos-on-sale/pomelo-widgets.git"
 # project's `main.rs` the desktop simulator. That is a HAL dependency and not a platform-layer one:
 # it is the interface, with no hardware behind it. From GitHub by revision: a sibling repository,
 # and this project builds on its own.
-pomelo-hal = { git = "https://github.com/pomelos-on-sale/pomelo-hal.git", rev = "20eaa910f0a05cd68684d6aa868fd78457c51be9" }
+#
+# `decode` is on because this is the crate that has to *recognise* an MP3 or FLAC before it can put
+# one in a list: the player scans by content, and without the decoder a compressed file has no
+# sample rate and no length to show.
+pomelo-hal = { git = "https://github.com/pomelos-on-sale/pomelo-hal.git", rev = "20eaa910f0a05cd68684d6aa868fd78457c51be9", features = ["decode"] }
 pomelo-material-symbols = { git = "https://github.com/pomelos-on-sale/pomelo-material-symbols.git", rev = "7dc390fb1924dc69b375e5ae77806857f798cc58" }
 
 [features]

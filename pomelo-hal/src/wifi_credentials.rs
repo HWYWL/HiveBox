@@ -61,21 +61,9 @@ pub const FILE: &str = "wifi.conf";
 /// The directory the Wi-Fi files live in, inside an app-data root.
 pub const DIRECTORY: &str = "WIFI";
 
-/// The app-data root on the board: the `internal` partition, mounted by the firmware.
-///
-/// `/internal` is a 3 MB SPIFFS partition (`partitions.csv`), and mounting it is the firmware's job,
-/// not this crate's. A board where nothing mounted it fails on the *write*, not on the read: a file
-/// that is not there reads as `Ok(None)`, because "never been on a network" and "nowhere to put
-/// one" must not look the same — only the second is a fault, and only the second is the
-/// firmware's.
-pub const BOARD_APP_DATA: &str = "/internal/AppData";
-
-/// The app-data root on a desktop, under the home directory.
-///
-/// A desktop has no partition to mount, so the same shape sits one directory down instead. The
-/// simulator does not use it — see `sim::wifi` for why — but it is here so that the two platforms
-/// are one line apart rather than one design apart.
-pub const DESKTOP_APP_DATA: &str = ".pomelo/AppData";
+/// The app-data root on the board, and the one on a desktop: the directory *above* `WIFI/`, which
+/// this file shares with every other app's. See [`crate::app_data`].
+pub use crate::app_data::{BOARD_APP_DATA, DESKTOP_APP_DATA};
 
 /// Where the file is, under `root`.
 pub fn path(root: impl AsRef<Path>) -> PathBuf {
