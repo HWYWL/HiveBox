@@ -596,6 +596,14 @@ where
         let (mouse_over_y_scrollbar, mouse_over_x_scrollbar) =
             scrollbars.is_mouse_over(cursor);
 
+        // Where the finger landed, recorded here rather than in the touch handling below,
+        // because the press that follows is offered to the content first and the widget
+        // under the finger — a row's button — captures it, which would hide the touch from
+        // this list entirely. A press that never travels is a tap; see `TOUCH_SLOP`.
+        if let Event::Touch(touch::Event::FingerPressed { position, .. }) = event {
+            state.touch_origin = Some(*position);
+        }
+
         let last_offsets = (state.offset_x, state.offset_y);
 
         if let Some(last_scrolled) = state.last_scrolled {
@@ -836,6 +844,8 @@ where
                     )
             ) {
                 state.interaction = Interaction::None;
+                // The finger is off the list; the next one starts a scroll of its own.
+                state.touch_origin = None;
                 return;
             }
 
@@ -924,30 +934,69 @@ where
                         && !mouse_over_x_scrollbar) =>
                 {
                     match event {
-                        touch::Event::FingerPressed { .. } => {
-                            let Some(position) = cursor_over_scrollable else {
-                                return;
-                            };
-
-                            state.interaction =
-                                Interaction::TouchScrolling(position);
-                        }
-                        touch::Event::FingerMoved { .. } => {
-                            // If FingerPressed was captured by a child widget (e.g. a
-                            // button), TouchScrolling was never started. Lazily initialise
-                            // it here from the current cursor position so that a drag
-                            // starting on a button still scrolls the list — the standard
-                            // mobile-first gesture.
+                        touch::Event::FingerMoved { position, .. } => {
+                            // A scroll is not started when the finger lands, because the
+                            // press under it — a row's button — has already been given the
+                            // event and captured it. It starts one `TOUCH_SLOP` later, once
+                            // the finger has actually travelled: a drag that begins on a
+                            // button still scrolls the list, the standard mobile-first
+                            // gesture, while a press that stays put is left to the button
+                            // and reads as a tap.
                             if !matches!(
                                 state.interaction,
                                 Interaction::TouchScrolling(_)
                             ) {
-                                if let Some(position) = cursor_over_scrollable {
-                                    state.interaction =
-                                        Interaction::TouchScrolling(position);
-                                } else {
+                                // `false` when no origin was recorded, so a list handed a
+                                // movement without a press — which the touch pipeline never
+                                // does — is not made to wait for one.
+                                let within_slop =
+                                    state.touch_origin.is_some_and(|origin| {
+                                        let travelled = drag_delta(
+                                            origin,
+                                            *position,
+                                            bounds,
+                                            content_bounds,
+                                        );
+
+                                        travelled.x.abs() < TOUCH_SLOP
+                                            && travelled.y.abs() < TOUCH_SLOP
+                                    });
+
+                                if within_slop {
                                     return;
                                 }
+
+                                // The scroll is this list's now, so whatever the finger went
+                                // down on is told its press is over: the button stops being
+                                // pressed, which is what keeps letting go over the row from
+                                // reading as a tap on it. The same cancel a `GestureDetector`
+                                // sends when a drag becomes its gesture.
+                                let translation = state.translation(
+                                    self.direction,
+                                    bounds,
+                                    content_bounds,
+                                );
+
+                                self.content.as_widget_mut().update(
+                                    &mut tree.children[0],
+                                    &Event::Touch(touch::Event::FingerLost {
+                                        id: touch::Finger(0),
+                                        position: *position,
+                                    }),
+                                    content,
+                                    cursor,
+                                    renderer,
+                                    clipboard,
+                                    shell,
+                                    &Rectangle {
+                                        y: bounds.y + translation.y,
+                                        x: bounds.x + translation.x,
+                                        ..bounds
+                                    },
+                                );
+
+                                state.interaction =
+                                    Interaction::TouchScrolling(*position);
                             }
 
                             let Interaction::TouchScrolling(
@@ -1652,11 +1701,53 @@ fn notify_viewport<Message>(
     true
 }
 
+/// How far a finger has to travel from where it landed before a touch on the list is
+/// taken as a scroll instead of a press.
+///
+/// Under it nothing moves and the press is left with whatever it landed on, which is what
+/// keeps a tap on a row a tap even when the finger wobbles; at it the list takes the
+/// gesture over and cancels the press underneath. It is the same distance the panel's own
+/// gestures use to tell a drag from a tap, so that one length covers both.
+const TOUCH_SLOP: f32 = 18.0;
+
+/// The part of a drag from `origin` to `point` this list can actually act on: an axis its
+/// content overflows in, and no other.
+///
+/// A drag that cannot move the content — sideways on a vertical list, or along an axis
+/// that already fits its viewport — is not the beginning of a scroll, so it must not be
+/// taken as one. These are the same two conditions [`State::scroll`] applies to a delta.
+fn drag_delta(
+    origin: Point,
+    point: Point,
+    bounds: Rectangle,
+    content_bounds: Rectangle,
+) -> Vector {
+    Vector::new(
+        if bounds.width < content_bounds.width {
+            point.x - origin.x
+        } else {
+            0.0
+        },
+        if bounds.height < content_bounds.height {
+            point.y - origin.y
+        } else {
+            0.0
+        },
+    )
+}
+
 #[derive(Debug, Clone, Copy)]
 struct State {
     offset_y: Offset,
     offset_x: Offset,
     interaction: Interaction,
+    /// Where the finger currently on the list first landed, for as long as it is down.
+    ///
+    /// A scroll only begins once the finger has travelled [`TOUCH_SLOP`] from here, so a
+    /// press that stays put is never mistaken for one. Recorded before the press is
+    /// offered to the content, because whatever lands under the finger — a row's button —
+    /// is exactly the widget that captures the event and hides it from this list.
+    touch_origin: Option<Point>,
     keyboard_modifiers: keyboard::Modifiers,
     last_notified: Option<Viewport>,
     last_scrolled: Option<Instant>,
@@ -1682,6 +1773,7 @@ impl Default for State {
             offset_y: Offset::Absolute(0.0),
             offset_x: Offset::Absolute(0.0),
             interaction: Interaction::None,
+            touch_origin: None,
             keyboard_modifiers: keyboard::Modifiers::default(),
             last_notified: None,
             last_scrolled: None,
