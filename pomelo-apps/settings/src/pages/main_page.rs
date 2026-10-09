@@ -24,8 +24,10 @@ use pomelo_widgets::SystemPreferences;
 ///
 /// Two rows of the last card are not destinations, and they carry no chevron-shaped promise: the
 /// language row *is* the switch it looks like a setting for, and the restart row asks a question
-/// rather than opening a page. They are at the foot of the list because neither is a reading of this
-/// machine — one is about the interface, the other is about the whole of it.
+/// rather than opening a page. Neither is a reading of this machine — one is about the interface,
+/// the other is about the whole of it — so both sit after the three sections that are, and the
+/// system readout comes last of all: what the machine *is* is the one thing here nobody opens
+/// Settings to change, and the foot of the list is where the things you do not come for go.
 pub(crate) fn main_page<'a>(preferences: SystemPreferences, connected: Option<&str>) -> UI<'a> {
     let language = preferences.language;
     let theme = preferences.theme;
@@ -60,11 +62,6 @@ pub(crate) fn main_page<'a>(preferences: SystemPreferences, connected: Option<&s
 
     let system = Card::new(theme)
         .tile(Tile::section(
-            Icon::INFO,
-            SettingsSection::SystemInfo,
-            language.text(Key::System),
-        ))
-        .tile(Tile::section(
             Icon::PALETTE,
             SettingsSection::Theme,
             language.text(Key::Theme),
@@ -89,6 +86,11 @@ pub(crate) fn main_page<'a>(preferences: SystemPreferences, connected: Option<&s
             // interface you are reading the row in *is* the value — a name here would repeat it.
             language.text(Key::Language),
             Message::SetLanguage(language.other()),
+        ))
+        .tile(Tile::section(
+            Icon::INFO,
+            SettingsSection::SystemInfo,
+            language.text(Key::System),
         ));
 
     page(
