@@ -5,15 +5,15 @@ rebake with `python3 bake.py` after changing the charset or the sizes.
 
 ## What was baked
 
-* source font: `dist\SourceHanSansSC-Regular-Subset.otf` — 1783856 B, sha256 `7c37435b35cce99520ecfa2c9507e8de7d69f1589cdc9b09731caeb15a2b53cc`
-* charset: `source\charset-common.txt` — 4011 characters
+* source font: `dist\SourceHanSansSC-Regular-Subset.otf` — 1784100 B, sha256 `82c83f2d1a9ba4362b13c713941d90d018f33bfbe200748600828329ea104e8c`
+* charset: `source\charset-common.txt` — 4012 characters
 * coverage: 8-bit alpha, no hinting, pixel-aligned (subpixel bins unused)
 
 | table | size | glyphs | coverage | file | bytes/glyph |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `SourceHanSansSC-Regular-Subset-common@18px.bin` | 18 px | 4011 | 1175.7 KiB | 1222.8 KiB | 300 B |
-| `SourceHanSansSC-Regular-Subset-common@20px.bin` | 20 px | 4011 | 1385.3 KiB | 1432.3 KiB | 354 B |
-| `SourceHanSansSC-Regular-Subset-common@24px.bin` | 24 px | 4011 | 1983.6 KiB | 2030.6 KiB | 506 B |
+| `SourceHanSansSC-Regular-Subset-common@18px.bin` | 18 px | 4012 | 1176.0 KiB | 1223.1 KiB | 300 B |
+| `SourceHanSansSC-Regular-Subset-common@20px.bin` | 20 px | 4012 | 1385.6 KiB | 1432.7 KiB | 354 B |
+| `SourceHanSansSC-Regular-Subset-common@24px.bin` | 24 px | 4012 | 1984.1 KiB | 2031.1 KiB | 506 B |
 
 ## Which sizes are cached, and what happens without one
 
