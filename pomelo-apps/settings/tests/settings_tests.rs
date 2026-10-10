@@ -125,8 +125,9 @@ const PAGES: [(&str, SettingsSection, &str); 7] = [
 /// panel and scrolls on the device, but the simulator has no scroll, so a press needs a screen that
 /// shows all of it. It only has to be *taller than the list*, with room for the next few rounds of
 /// tuning — a tight fit turns every metric change into a test failure, which is how it went from 800
-/// to here when the list's top gap and its gaps between cards both grew.
-const TALL: f32 = 1200.0;
+/// to here when the list's top gap and its gaps between cards both grew, and from 1200 when the
+/// readout at the top of the list gained a third row of its footer.
+const TALL: f32 = 1400.0;
 
 /// `settings`' interface on the design panel.
 fn interface(settings: &Settings) -> Simulator<'_, Message> {
@@ -1406,10 +1407,17 @@ fn the_readout_says_what_the_board_says() {
         "and the version the image reports"
     );
 
-    // The footer's two readings. Their values are the wall clock and a timer, so neither is a
-    // string a test can hold still; what it can hold still is that both are drawn at all.
+    // The footer's three readings. Two of them are the wall clock and a timer, so neither is a string
+    // a test can hold still — what it can hold still is that all three are drawn. The third is the
+    // one that *is* holdable: the simulator answers a fixed build stamp rather than the clock, which
+    // is what makes this line assert the formatting and not the moment the test ran.
+    assert!(ui.find("Build time").is_ok());
     assert!(ui.find("System time").is_ok());
     assert!(ui.find("Uptime").is_ok());
+    assert!(
+        ui.find("2026-01-01 00:00:00").is_ok(),
+        "the stamp the simulated image carries, spelled as the panel spells instants"
+    );
 
     // The storage gauge is the *built-in* volume, not the card: the simulator's card is a 32 GB one
     // that is 43% full, and its built-in partition holds the firmware's `welcome.txt` in 3 MB —
@@ -1471,9 +1479,15 @@ fn a_gauges_three_parts_share_a_centre_line() {
 /// The system page says what the image calls itself, and the readout at the top of the list says the
 /// same thing — one reading, one source.
 ///
-/// The regression this is for is a sentence about an image nobody has: the OS row was the literal
+/// The regression this is for is a sentence about an image nobody has: the row was the literal
 /// `Pomelo OS v0.2.0 (Build 2026.09)` while the panel's firmware card read the version out of the
 /// image, so the same box was two different firmwares depending on which screen was up.
+///
+/// The page's *other* row is the one this test now has to tell apart from it: the OS line says what
+/// this software is built on, which is a specification, and the firmware line says which build is
+/// running, which is the reading. Two rows, two subjects — and the one that would be a second copy
+/// of the panel's card is the second of them, drawn here on purpose because a page of specifications
+/// that never says what it is running is a page nobody can use to report a bug.
 #[test]
 fn the_system_page_names_the_image_that_is_running() {
     let settings = english();
@@ -1497,6 +1511,12 @@ fn the_system_page_names_the_image_that_is_running() {
     assert!(
         ui.find("Pomelo OS v0.2.0 (Build 2026.09)").is_err(),
         "and not the version this code was written against"
+    );
+
+    // What the software is built on, which no chip can be asked for.
+    assert!(
+        ui.find("pomelo-ui, heavily customised").is_ok(),
+        "the OS row is a statement about the code, not a reading"
     );
 
     // The rows that are specifications stay written down, and are not turned into readings.

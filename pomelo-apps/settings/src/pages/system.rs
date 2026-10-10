@@ -1,17 +1,22 @@
-//! The system information page: model, OS, CPU, display and renderer.
+//! The system information page: model, OS, firmware, CPU, display and renderer.
 //!
 //! # Which of these rows is a reading and which is a specification
 //!
-//! One row is a *reading* — the OS line, which is what the image calls itself, and it is taken from
-//! the same place the readout at the top of the list takes it ([`SystemPanel::firmware`]). It used
-//! to be the literal `Pomelo OS v0.2.0 (Build 2026.09)`, which is a sentence about an image nobody
-//! has: the version the build stamps in is a git hash, and the name is whatever CMake was told.
+//! One row is a *reading* — the firmware line, which is what the image calls itself, and it is taken
+//! from the same place the readout at the top of the list takes it ([`SystemPanel::firmware`]). It
+//! used to be the OS line, and before that the literal `Pomelo OS v0.2.0 (Build 2026.09)`, which is
+//! a sentence about an image nobody has: the version the build stamps in is a git hash, and the name
+//! is whatever CMake was told.
 //!
-//! The rest are **specifications**: what this board is, on paper. `Waveshare ESP32-S3 AMOLED 2.16"`
-//! is the board's name and nothing on the chip knows it; `CO5300 480x480 QSPI AMOLED` is a part
-//! number off a schematic. Those stay written down, because a written-down fact that no code reads
-//! back is a *spec* rather than a second copy of a reading — and the distinction is worth the words:
-//! a spec is wrong only if the hardware changes, a stale reading is wrong the moment it is drawn.
+//! The rest are **specifications**: what this board, or this software, is on paper. The OS row is
+//! the one about software rather than hardware — this project is a customisation of the upstream
+//! `pomelo-ui` ([`Key::OsBasedOnPomeloUi`]) — and that is a fact about the code, which is exactly
+//! what the chip cannot be asked for. It is a spec for the same reason `Waveshare ESP32-S3 AMOLED
+//! 2.16"` is: nothing on the silicon knows either one.
+//!
+//! Those stay written down, because a written-down fact that no code reads back is a *spec* rather
+//! than a second copy of a reading — and the distinction is worth the words: a spec is wrong only if
+//! the hardware or the upstream project changes, a stale reading is wrong the moment it is drawn.
 
 use crate::i18n::{Key, LanguageExt as _};
 use crate::pages::card::Header;
@@ -33,7 +38,14 @@ pub(crate) fn system_page<'a>(
             language.text(Key::Model),
             "Waveshare ESP32-S3 AMOLED 2.16\"".to_string(),
         ),
-        (language.text(Key::Os), image(language, readout.firmware())),
+        (
+            language.text(Key::Os),
+            language.text(Key::OsBasedOnPomeloUi).to_string(),
+        ),
+        (
+            language.text(Key::Firmware),
+            image(language, readout.firmware()),
+        ),
         (
             language.text(Key::Cpu),
             "Xtensa Dual-Core LX7 @ 240MHz".to_string(),
@@ -92,6 +104,7 @@ mod tests {
         let firmware = FirmwareInfo {
             name: String::from("pomelo"),
             version: String::from("1.2.3"),
+            built: None,
         };
 
         assert_eq!(image(Language::English, Some(&firmware)), "pomelo 1.2.3");

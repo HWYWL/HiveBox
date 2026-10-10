@@ -37,6 +37,8 @@ mod ffi {
     pub const FIRMWARE_NAME_MAX_LEN: usize = 24;
     /// Mirrors `HAL_SYSTEM_VERSION_MAX_LEN`.
     pub const VERSION_MAX_LEN: usize = 32;
+    /// Mirrors `HAL_SYSTEM_BUILD_MAX_LEN` — and `esp_app_desc_t`'s own `date` and `time`.
+    pub const BUILD_MAX_LEN: usize = 16;
 
     /// Mirrors `hal_system_chip_t`.
     #[repr(C)]
@@ -53,6 +55,8 @@ mod ffi {
     pub struct HalSystemFirmware {
         pub name: [c_char; FIRMWARE_NAME_MAX_LEN],
         pub version: [c_char; VERSION_MAX_LEN],
+        pub date: [c_char; BUILD_MAX_LEN],
+        pub time: [c_char; BUILD_MAX_LEN],
     }
 
     /// Mirrors `hal_system_memory_t`.
@@ -121,11 +125,16 @@ impl SystemBackend for EspSystem {
         })
     }
 
-    /// The running image's own description.
+    /// The running image's own description, and when it was built.
     ///
     /// `ESP_ERR_NOT_FOUND` is an image with no description — one not built by this toolchain —
     /// which becomes an `Io` error rather than an empty `FirmwareInfo`: a card drawing a blank
     /// version would be showing a board that has one and cannot say it.
+    ///
+    /// The stamp comes out of the same description, in the two fields the compiler filled: `date`
+    /// and `time`, which [`FirmwareInfo::compile_stamp`] respells into one instant. An image that
+    /// carries neither leaves the reading absent rather than blank, which is the one thing this
+    /// backend and the C side have to agree about.
     fn firmware(&self) -> Result<FirmwareInfo, HalError> {
         let mut raw = MaybeUninit::<ffi::HalSystemFirmware>::uninit();
 
@@ -139,6 +148,10 @@ impl SystemBackend for EspSystem {
         Ok(FirmwareInfo {
             name: c_buf_to_string(&raw.name),
             version: c_buf_to_string(&raw.version),
+            built: FirmwareInfo::compile_stamp(
+                &c_buf_to_string(&raw.date),
+                &c_buf_to_string(&raw.time),
+            ),
         })
     }
 

@@ -447,6 +447,9 @@ esp_err_t hal_storage_get_flash(hal_flash_layout_t *out);
 #define HAL_SYSTEM_CHIP_MODEL_MAX_LEN    16
 #define HAL_SYSTEM_FIRMWARE_NAME_MAX_LEN 24
 #define HAL_SYSTEM_VERSION_MAX_LEN       32
+/* Exactly `esp_app_desc_t`'s own two fields, so the build stamp crosses the FFI
+ * in the spelling the compiler left it in rather than a copy this header made up. */
+#define HAL_SYSTEM_BUILD_MAX_LEN         16
 
 typedef struct {
     char     model[HAL_SYSTEM_CHIP_MODEL_MAX_LEN];
@@ -457,6 +460,13 @@ typedef struct {
 typedef struct {
     char name[HAL_SYSTEM_FIRMWARE_NAME_MAX_LEN];
     char version[HAL_SYSTEM_VERSION_MAX_LEN];
+    /* When this image was built, in the compiler's spelling: `date` is `"Oct 10 2026"`
+     * and `time` is `"14:32:05"`. Two strings and not one instant, because that is
+     * what a C image has room for — the reader on the Rust side is what turns the
+     * pair into the one spelling the interface writes instants in, and it is the
+     * reader's business because it is the only side that knows what a locale is. */
+    char date[HAL_SYSTEM_BUILD_MAX_LEN];
+    char time[HAL_SYSTEM_BUILD_MAX_LEN];
 } hal_system_firmware_t;
 
 typedef struct {
@@ -474,10 +484,14 @@ typedef struct {
 esp_err_t hal_system_get_chip(hal_system_chip_t *out);
 
 /**
- * @brief Read the running image's own description: its project name and version.
+ * @brief Read the running image's own description: its name, its version, and when it
+ *        was built.
  *
  * These are the strings the build stamped into the image, so a page showing them
- * is showing what is actually running rather than a literal someone typed.
+ * is showing what is actually running rather than a literal someone typed. The
+ * stamp is read the same way and for the same reason: a page saying when the
+ * firmware was built is saying when *this* firmware was built, and it is wrong
+ * only for as long as it takes to flash another one.
  *
  * @return
  *      - ESP_OK on success

@@ -106,6 +106,12 @@ esp_err_t hal_system_get_firmware(hal_system_firmware_t *out)
     strncpy(out->name, app->project_name, sizeof out->name - 1);
     strncpy(out->version, app->version, sizeof out->version - 1);
 
+    /* The stamp the compiler left in this image — the same pair the IDF itself puts
+     * in its boot log. Copied across as the two strings it is; see the note on the
+     * struct for why the respelling happens on the Rust side. */
+    strncpy(out->date, app->date, sizeof out->date - 1);
+    strncpy(out->time, app->time, sizeof out->time - 1);
+
     return ESP_OK;
 }
 

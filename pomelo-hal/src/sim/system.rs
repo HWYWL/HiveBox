@@ -40,13 +40,18 @@ impl SystemBackend for SimSystem {
         })
     }
 
-    /// A name and a version that are plainly a simulator's: a desktop run is not an image, and a
-    /// version number here that looked like the board's would be a reading a page could mistake for
-    /// one off the hardware.
+    /// A name, a version and a build time that are plainly a simulator's: a desktop run is not an
+    /// image, and a version number here that looked like the board's would be a reading a page could
+    /// mistake for one off the hardware.
+    ///
+    /// The build time is a fixed instant and not `SystemTime::now()`, which is the one thing it must
+    /// not be: a host run that read the clock here would draw a firmware built a moment ago, every
+    /// moment, and a test asserting the row says anything at all would be asserting nothing.
     fn firmware(&self) -> Result<FirmwareInfo, HalError> {
         Ok(FirmwareInfo {
             name: String::from("pomelo-os"),
             version: String::from("0.1.0 (simulator)"),
+            built: Some(String::from("2026-01-01 00:00:00")),
         })
     }
 

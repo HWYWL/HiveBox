@@ -186,8 +186,9 @@ fn internal_use(board: &Board) -> Option<f32> {
 /// The readout: one card, three parts.
 ///
 /// One card and not three, because the three parts are one answer: the gauges say how it is doing,
-/// the cards say what it is, and the footer says since when. A reader who has to work out which box
-/// belongs to which is reading a form rather than a readout.
+/// the cards say what it is, and the footer says *when* — when the image was built, what the clock
+/// reads, and how long the board has been up since it was flashed. A reader who has to work out
+/// which box belongs to which is reading a form rather than a readout.
 pub(crate) fn summary_panel<'a>(preferences: SystemPreferences, panel: &SystemPanel) -> UI<'a> {
     let language = preferences.language;
     let theme = preferences.theme;
@@ -259,10 +260,19 @@ pub(crate) fn summary_panel<'a>(preferences: SystemPreferences, panel: &SystemPa
     .height(Length::Fixed(style::SUMMARY_CARD_H));
 
     // The footer, as the rows every other card in this app is made of: a label on the left and its
-    // value on the right. Two rows rather than one line of four — "System time: 2026-10-09
-    // 17:36:11" and its neighbour are longer than the panel is, in English, at this size.
+    // value on the right. Three rows rather than one line of six — "System time: 2026-10-09
+    // 17:36:11" and its neighbours are longer than the panel is, in English, at this size.
+    //
+    // The three are one subject, in the order they happened: when this image was built, what the
+    // clock says now, and how long the board has been up since it was flashed with it. The build
+    // time is the odd one among them — it is the only reading here that came in with the identity
+    // and cannot change while the box is running, which is why it costs the tick nothing.
     let footer = detail_rows(
         vec![
+            (
+                language.text(Key::BuildTime),
+                built(panel.firmware(), language),
+            ),
             (
                 language.text(Key::SystemTime),
                 local_time(panel.clock, language),
@@ -475,6 +485,18 @@ fn share(percent: Option<f32>, color: iced::Color) -> Reading {
 // Time
 // =============================================================================
 
+/// When the image was built, or a word when it does not say.
+///
+/// Drawn as the image spells it — `2026-10-10 14:32:05` — and not put through [`local_time`] the way
+/// the clock below it is: the stamp is a wall clock reading taken on the build machine, with no zone
+/// attached to it and none to apply. See
+/// [`FirmwareInfo::compile_stamp`](pomelo_hal::FirmwareInfo::compile_stamp).
+fn built(image: Option<&FirmwareInfo>, language: Language) -> String {
+    image
+        .and_then(|image| image.built.clone())
+        .unwrap_or_else(|| language.text(Key::None).to_string())
+}
+
 /// The clock as a person reads it: `2026-10-09 17:36:11`, or a word when there is no clock.
 fn local_time(clock: Option<SystemTime>, language: Language) -> String {
     let Some(seconds) = clock
@@ -615,5 +637,30 @@ mod tests {
         assert_eq!(counted(Language::English, Some(21.7)), "22%");
         assert_eq!(degrees(Language::English, Some(31.4)), "31 C");
         assert_eq!(degrees(Language::Chinese, None), "无");
+    }
+
+    /// The build stamp is drawn as the image spells it, and its absence is a word.
+    ///
+    /// The one reading on this panel that is *not* an instant the board has: the stamp carries no
+    /// zone, so it is passed through rather than shifted — and an image that carries none says so
+    /// rather than being drawn a date somebody's build did not produce.
+    #[test]
+    fn a_build_stamp_is_drawn_as_the_image_spells_it() {
+        let image = |built: Option<&str>| FirmwareInfo {
+            name: String::from("firmware"),
+            version: String::from("6de00de-dirty"),
+            built: built.map(String::from),
+        };
+
+        assert_eq!(
+            built(
+                Some(&image(Some("2026-10-10 14:32:05"))),
+                Language::Chinese
+            ),
+            "2026-10-10 14:32:05"
+        );
+        assert_eq!(built(Some(&image(None)), Language::English), "none");
+        assert_eq!(built(Some(&image(None)), Language::Chinese), "无");
+        assert_eq!(built(None, Language::English), "none");
     }
 }

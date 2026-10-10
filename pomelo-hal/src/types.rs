@@ -338,6 +338,43 @@ mod tests {
         };
         assert_eq!(running.url(&no_address), None);
     }
+
+    /// A build stamp is read in the shape a C compiler writes it, and only in that shape.
+    ///
+    /// Two of these are cases a reader would not think of: a day of the month below ten is
+    /// space-padded (`"Oct  9 2026"`), and every shape that is not a stamp is *no* stamp rather than
+    /// a wrong one — an image that carries nothing, a month spelled in another language, an hour of
+    /// 99.
+    #[test]
+    fn a_build_stamp_is_read_in_the_shape_c_writes_it() {
+        assert_eq!(
+            FirmwareInfo::compile_stamp("Oct 10 2026", "14:32:05").as_deref(),
+            Some("2026-10-10 14:32:05")
+        );
+        assert_eq!(
+            FirmwareInfo::compile_stamp("Jan  1 2026", "00:00:00").as_deref(),
+            Some("2026-01-01 00:00:00"),
+            "a single-digit day is padded with a space"
+        );
+        assert_eq!(
+            FirmwareInfo::compile_stamp("Dec 31 2025", "23:59:59").as_deref(),
+            Some("2025-12-31 23:59:59")
+        );
+
+        // An image built with `CONFIG_APP_COMPILE_TIME_DATE` off is two empty fields.
+        assert_eq!(FirmwareInfo::compile_stamp("", ""), None);
+
+        // And the shapes that are not a stamp.
+        assert_eq!(FirmwareInfo::compile_stamp("Okt 10 2026", "14:32:05"), None);
+        assert_eq!(FirmwareInfo::compile_stamp("Oct 32 2026", "14:32:05"), None);
+        assert_eq!(FirmwareInfo::compile_stamp("Oct 10 2026", "99:32:05"), None);
+        assert_eq!(FirmwareInfo::compile_stamp("Oct 10 2026", "14:32"), None);
+        assert_eq!(
+            FirmwareInfo::compile_stamp("Oct 10 2026 2026", "14:32:05"),
+            None,
+            "one field too many"
+        );
+    }
 }
 
 /// Whether the management page is being served, and where.
@@ -448,17 +485,81 @@ pub struct ChipInfo {
     pub revision: u16,
 }
 
-/// The firmware that is running, as it names itself.
+/// The firmware that is running, as it names itself — and as it says when it was made.
 ///
 /// Read out of the image's own description — the same strings the build stamped into it — and not
 /// from a literal in whichever page is drawing them. A version written down twice is a version that
-/// is wrong once.
+/// is wrong once, and a build time written down at all is a build time of somebody else's build.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FirmwareInfo {
     /// The project's name.
     pub name: String,
     /// The version string built into the image.
     pub version: String,
+    /// When this image was built, to the second, as `2026-10-10 14:32:05`.
+    ///
+    /// `None` for an image that carries no stamp — one built with the time and date switched off —
+    /// and for one whose stamp is not in a shape this can read. A board that cannot say when its
+    /// firmware was made says so, rather than drawing a date nobody's build produced.
+    pub built: Option<String>,
+}
+
+impl FirmwareInfo {
+    /// The build stamp a C compiler leaves in an image, respelled as one instant.
+    ///
+    /// `__DATE__` and `__TIME__` are two strings — `"Oct 10 2026"` and `"14:32:05"` — because a C
+    /// image has nowhere to put a date; this is what turns the pair into the one spelling the rest
+    /// of this interface writes instants in, which is the same spelling the settings app's clock is
+    /// drawn in.
+    ///
+    /// No zone is applied, and none could be: the stamp is a wall-clock reading taken on the build
+    /// machine, and the image does not record where that machine was standing. Shifting it would be
+    /// inventing the zone rather than reading the image.
+    ///
+    /// `None` for anything else — an empty pair, or a spelling from a compiler that is not this one.
+    /// A page drawing a build time it had to guess would be worse than a page that says it has none.
+    pub fn compile_stamp(date: &str, time: &str) -> Option<String> {
+        // The date first, and the day of the month is space-padded by the C standard (`"%b %e %Y"`
+        // spells October the ninth as `"Oct  9 2026"`), which is why this splits on whitespace
+        // rather than on spaces.
+        let mut fields = date.split_whitespace();
+        let month = month_number(fields.next()?)?;
+        let day: u32 = fields.next()?.parse().ok()?;
+        let year: u32 = fields.next()?.parse().ok()?;
+
+        if fields.next().is_some() || !(1..=31).contains(&day) {
+            return None;
+        }
+
+        let mut clock = time.split(':');
+        let hour: u32 = clock.next()?.parse().ok()?;
+        let minute: u32 = clock.next()?.parse().ok()?;
+        let second: u32 = clock.next()?.parse().ok()?;
+
+        if clock.next().is_some() || hour > 23 || minute > 59 || second > 59 {
+            return None;
+        }
+
+        Some(format!(
+            "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}"
+        ))
+    }
+}
+
+/// The month `__DATE__` names, as the number it stands for.
+///
+/// Three letters and no more: the macro is specified as the C locale's `"%b"`, so the names are the
+/// English ones, and a compiler that localises them is one whose stamp [`FirmwareInfo::compile_stamp`]
+/// reads as no stamp at all.
+fn month_number(name: &str) -> Option<u32> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+
+    MONTHS
+        .iter()
+        .position(|month| *month == name)
+        .map(|index| index as u32 + 1)
 }
 
 /// An abstract user input action (physical button, gesture, or navigation command).

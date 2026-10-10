@@ -87,6 +87,10 @@ pub enum Key {
     ChipTemperature,
     Firmware,
     Uptime,
+    // The third instant in the same footer, and the one that is not a clock: when this image was
+    // built, above the time being shown and the length of time it has been up. Three readings that
+    // belong together in the order they happened.
+    BuildTime,
     // `Model` is the *board's* name — "Waveshare ESP32-S3 AMOLED 2.16\"" — and it heads a row on the
     // system page. This one is the chip's part number, which is a different fact with the same word
     // for it, and a card and a row labelled alike are two things a reader takes for one.
@@ -165,6 +169,15 @@ pub enum Key {
     // The system page.
     Model,
     Os,
+    // The OS row's *value*, and the only sentence on that page: this project is a customisation of
+    // the upstream `pomelo-ui`, which is a fact about the code and not something the chip can be
+    // asked for. What the image calls itself is the firmware row's — that one is a reading.
+    //
+    // The English is a clause and not a sentence — the label beside it already says "OS", and a
+    // value that began "Based on ..." would be the row's own subject said twice. It is also kept
+    // shorter than the longest specification on that page, because a value wider than its row is a
+    // value drawn outside the card.
+    OsBasedOnPomeloUi,
     Display,
     Renderer,
     Flash,
@@ -221,6 +234,7 @@ impl Key {
             Self::ChipTemperature => "芯片温度",
             Self::Firmware => "固件版本",
             Self::Uptime => "已启动",
+            Self::BuildTime => "编译时间",
             Self::ChipModel => "芯片型号",
 
             Self::Toggle => "开关",
@@ -279,6 +293,7 @@ impl Key {
 
             Self::Model => "型号",
             Self::Os => "操作系统",
+            Self::OsBasedOnPomeloUi => "基于 pomelo-ui 深度定制",
             Self::Display => "显示屏",
             Self::Renderer => "渲染器",
             Self::Flash => "闪存",
@@ -332,6 +347,7 @@ impl Key {
             Self::ChipTemperature => "Chip temp",
             Self::Firmware => "Firmware",
             Self::Uptime => "Uptime",
+            Self::BuildTime => "Build time",
             Self::ChipModel => "Chip model",
 
             Self::Toggle => "Switch",
@@ -390,6 +406,7 @@ impl Key {
 
             Self::Model => "Model",
             Self::Os => "OS",
+            Self::OsBasedOnPomeloUi => "pomelo-ui, heavily customised",
             Self::Display => "Display",
             Self::Renderer => "Renderer",
             Self::Flash => "Flash",
@@ -468,7 +485,7 @@ mod tests {
 
     /// Every key, for the tests above. Kept beside them so a new variant is a compile error here
     /// too.
-    const ALL: [Key; 97] = [
+    const ALL: [Key; 99] = [
         Key::Settings,
         Key::Back,
         Key::Wifi,
@@ -492,6 +509,7 @@ mod tests {
         Key::ChipTemperature,
         Key::Firmware,
         Key::Uptime,
+        Key::BuildTime,
         Key::ChipModel,
         Key::Toggle,
         Key::Network,
@@ -545,6 +563,7 @@ mod tests {
         Key::LowPowerMode,
         Key::Model,
         Key::Os,
+        Key::OsBasedOnPomeloUi,
         Key::Display,
         Key::Renderer,
         Key::Flash,
