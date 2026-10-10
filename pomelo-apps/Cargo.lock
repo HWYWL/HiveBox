@@ -94,6 +94,7 @@ dependencies = [
  "iced",
  "image",
  "music-player",
+ "nas-monitor",
  "pomelo-hal",
  "pomelo-material-symbols",
  "pomelo-widgets",

@@ -8,14 +8,14 @@ pub use pomelo_widgets::{AppIcon, AppMeta as Entry};
 
 include!(concat!(env!("OUT_DIR"), "/baked_icons.rs"));
 
-/// Six apps, in the order the grid shows them: the first [`crate::PER_PAGE`] fill the first page,
+/// Seven apps, in the order the grid shows them: the first [`crate::PER_PAGE`] fill the first page,
 /// and the rest fall on the second.
 ///
 /// The order is the interface's and not the alphabet's. The four on the first page are the four
 /// things this box is *for* — what it plays, what it serves, what it can be told to do, and how it
-/// is set up — and the second page holds the two that are about the box itself rather than the jobs
-/// it is for: the calculator, which has nothing to do with it at all, and the task viewer, which is
-/// about nothing else.
+/// is set up — and the second page holds the three that are about the box itself and what is beside
+/// it rather than the jobs it is for: the calculator, which has nothing to do with it at all, the task
+/// viewer, which is about nothing else, and the NAS monitor, which is about the machine next to it.
 pub const CATALOGUE: &[Entry] = &[
     // Page 1
     Entry {
@@ -55,5 +55,13 @@ pub const CATALOGUE: &[Entry] = &[
         // A system monitor rather than a list: the list is what it draws, and this is what it *is*.
         icon: AppIcon::glyph(Icon::MONITOR_HEART),
         accent: (44, 56, 66),
+    },
+    Entry {
+        name: "NAS",
+        name_zh: "NAS 监控",
+        // The machine beside this one rather than anything in it: a server-in-a-box is what it draws,
+        // and reaching it is what the app is for.
+        icon: AppIcon::glyph(Icon::DNS),
+        accent: (34, 52, 60),
     },
 ];

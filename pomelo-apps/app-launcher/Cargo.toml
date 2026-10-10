@@ -33,6 +33,7 @@ pomelo-hal = { git = "https://github.com/pomelos-on-sale/pomelo-hal.git", rev = 
 # decide it from inside a dependency.
 calculator = { path = "../calculator", default-features = false }
 music-player = { path = "../music-player", default-features = false }
+nas-monitor = { path = "../nas-monitor", default-features = false }
 settings = { path = "../settings", default-features = false }
 task-viewer = { path = "../task-viewer", default-features = false }
 terminal = { path = "../terminal", default-features = false }

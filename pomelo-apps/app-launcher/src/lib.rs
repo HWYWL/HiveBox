@@ -127,6 +127,7 @@ use iced::{
 
 use calculator::Calculator;
 use music_player::Player;
+use nas_monitor::NasMonitor;
 use pomelo_hal::Board;
 use settings::Settings;
 use task_viewer::TaskViewer;
@@ -177,13 +178,14 @@ enum Screen {
 ///
 /// Indices, because that is what the grid hands over when a tile is tapped. The tests assert that
 /// each of these still names the app it says it does, and every entry has one: the catalogue and
-/// the list of apps are the same six things, in the same order.
+/// the list of apps are the same seven things, in the same order.
 pub const MUSIC: usize = 0;
 pub const WEB_MANAGER: usize = 1;
 pub const TERMINAL: usize = 2;
 pub const SETTINGS: usize = 3;
 pub const CALCULATOR: usize = 4;
 pub const TASK_VIEWER: usize = 5;
+pub const NAS_MONITOR: usize = 6;
 
 /// What the launcher reacts to.
 ///
@@ -262,6 +264,7 @@ pub enum Message {
     Terminal(terminal::Message),
     WebManager(web_manager::Message),
     TaskViewer(task_viewer::Message),
+    NasMonitor(nas_monitor::Message),
 }
 
 /// The layer over the desktop that is moving, and which way it is going.
@@ -333,6 +336,7 @@ pub struct Launcher {
     terminal: Option<Terminal>,
     web_manager: Option<WebManager>,
     task_viewer: Option<TaskViewer>,
+    nas_monitor: Option<NasMonitor>,
     /// Apps currently running in memory (foreground or background).
     running_apps: Vec<usize>,
     board: Arc<Board>,
@@ -391,6 +395,7 @@ impl Launcher {
             recents: false,
             transition: None,
             task_viewer: None,
+            nas_monitor: None,
             clock,
             battery,
             charging,
@@ -439,6 +444,9 @@ impl Launcher {
             app.set_preferences(prefs);
         }
         if let Some(app) = &mut self.task_viewer {
+            app.set_preferences(prefs);
+        }
+        if let Some(app) = &mut self.nas_monitor {
             app.set_preferences(prefs);
         }
     }
@@ -526,6 +534,17 @@ impl Launcher {
         self.task_viewer.as_mut().unwrap()
     }
 
+    /// The NAS monitor, which is handed the board like the task viewer and reads a *different*
+    /// machine through it: what this board can reach is the backend's business, not this app's.
+    pub fn get_or_create_nas_monitor(&mut self) -> &mut NasMonitor {
+        if self.nas_monitor.is_none() {
+            let mut app = NasMonitor::new(Arc::clone(&self.board));
+            app.set_preferences(self.preferences);
+            self.nas_monitor = Some(app);
+        }
+        self.nas_monitor.as_mut().unwrap()
+    }
+
     /// The hosted apps, for the host and the tests.
     pub fn calculator(&mut self) -> &Calculator {
         self.get_or_create_calculator()
@@ -549,6 +568,10 @@ impl Launcher {
 
     pub fn task_viewer(&mut self) -> &TaskViewer {
         self.get_or_create_task_viewer()
+    }
+
+    pub fn nas_monitor(&mut self) -> &NasMonitor {
+        self.get_or_create_nas_monitor()
     }
 
     /// Sets what the status bar shows.
@@ -597,6 +620,7 @@ impl Launcher {
             MUSIC => self.music = None,
             WEB_MANAGER => self.web_manager = None,
             TASK_VIEWER => self.task_viewer = None,
+            NAS_MONITOR => self.nas_monitor = None,
             _ => {}
         }
 
@@ -758,6 +782,14 @@ impl Launcher {
     fn task_viewer_screen(&self) -> Element<'_, Message> {
         if let Some(app) = &self.task_viewer {
             app.view().map(Message::TaskViewer)
+        } else {
+            Space::new().into()
+        }
+    }
+
+    fn nas_monitor_screen(&self) -> Element<'_, Message> {
+        if let Some(app) = &self.nas_monitor {
+            app.view().map(Message::NasMonitor)
         } else {
             Space::new().into()
         }
@@ -1018,6 +1050,9 @@ impl Launcher {
                     TASK_VIEWER => {
                         self.get_or_create_task_viewer();
                     }
+                    NAS_MONITOR => {
+                        self.get_or_create_nas_monitor();
+                    }
                     _ => {}
                 }
 
@@ -1084,6 +1119,14 @@ impl Launcher {
                 if let (Screen::App(TASK_VIEWER), Some(viewer)) = (self.screen, &mut self.task_viewer) {
                     viewer.update(task_viewer::Message::Tick(Instant::now()));
                 }
+
+                // The NAS monitor is asked the same way and for a sharper version of the same reason:
+                // a look at it is a network round trip to another machine, and a page nobody is on has
+                // no business opening sessions to a NAS that nobody is asking about.
+                if let (Screen::App(NAS_MONITOR), Some(monitor)) = (self.screen, &mut self.nas_monitor)
+                {
+                    monitor.update(nas_monitor::Message::Tick(Instant::now()));
+                }
             }
             Message::Resized(size) => {
                 self.size = size;
@@ -1098,6 +1141,7 @@ impl Launcher {
             Message::Terminal(message) => self.get_or_create_terminal().update(message),
             Message::WebManager(message) => self.get_or_create_web_manager().update(message),
             Message::TaskViewer(message) => self.get_or_create_task_viewer().update(message),
+            Message::NasMonitor(message) => self.get_or_create_nas_monitor().update(message),
             Message::Settings(settings::Message::Back) => return self.go_back(),
             Message::Settings(message) => {
                 let (task, new_prefs) = {
@@ -1556,6 +1600,7 @@ impl Launcher {
             MUSIC => self.music_screen(),
             WEB_MANAGER => self.web_manager_screen(),
             TASK_VIEWER => self.task_viewer_screen(),
+            NAS_MONITOR => self.nas_monitor_screen(),
             _ => self.launcher(),
         }
     }
@@ -1962,10 +2007,15 @@ mod tests {
             CATALOGUE[TASK_VIEWER].localized_name(Language::Chinese),
             "任务查看器"
         );
+        assert_eq!(
+            CATALOGUE[NAS_MONITOR].localized_name(Language::Chinese),
+            "NAS 监控"
+        );
+        assert_eq!(CATALOGUE[NAS_MONITOR].name, "NAS");
     }
 
-    /// The grid's two pages, in the order they are drawn: the four the box is for, then the two that
-    /// are about the box itself.
+    /// The grid's two pages, in the order they are drawn: the four the box is for, then the three that
+    /// are about the box itself and what is beside it.
     ///
     /// Written out rather than derived, because the order *is* the interface: a page and a position
     /// are what a finger learns, and a reshuffle that left this test green would be the one kind of
@@ -1982,14 +2032,15 @@ mod tests {
                 "Terminal",
                 "Settings",
                 "Calculator",
-                "Tasks"
+                "Tasks",
+                "NAS"
             ]
         );
-        assert_eq!(CATALOGUE.len(), 6, "and the six are all the tiles there are");
+        assert_eq!(CATALOGUE.len(), 7, "and the seven are all the tiles there are");
         assert_eq!(
             Launcher::new(Arc::new(Board::simulated())).pages(),
             2,
-            "four on the first page leaves two on the second"
+            "four on the first page leaves three on the second"
         );
     }
 
