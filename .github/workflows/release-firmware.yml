@@ -1,0 +1,137 @@
+# 推一个 `v*` 的 tag，就出一版固件：编译 → 生成合并镜像 → 挂到 Releases。
+#
+# 也可以手动触发（Actions → 固件发布 → Run workflow）：只产出构建产物，不发布会话
+# —— 手动跑没有 tag，就没有版本号可核对，也没有 Release 可挂。
+#
+# 工具链版本是钉住的，不跟着「最新」走：`components/rust_main/CMakeLists.txt` 里写的是
+# `cargo +esp198`，所以这里用 espup 装一个同样叫 `esp198` 的工具链（1.98.1.0，与本机一致）。
+# 那个 CMake 注释里记着为什么不能用更旧的 `esp`（1.97 的 Xtensa LLVM 编不了 iced_core）。
+name: 固件发布
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+# 建 Release 与上传资产要写权限；其余按最小权限来。
+permissions:
+  contents: write
+
+# 同一个 tag 上只跑一个。不取消正在跑的那个：取消会把一个半成品 Release 留在页面上。
+concurrency:
+  group: firmware-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IDF_VERSION: v6.1
+  # 与本机 `espup install --name esp198 --toolchain-version …` 装出来的一致。
+  XTENSA_TOOLCHAIN: esp198
+  XTENSA_TOOLCHAIN_VERSION: 1.98.1.0
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: 取代码
+        uses: actions/checkout@v4
+        with:
+          # 版本号来自 `git describe`，浅克隆里没有 tag，就只剩一串哈希了。
+          fetch-depth: 0
+
+      # ---------------------------------------------------------------- ESP-IDF
+      - name: 缓存 ESP-IDF 与其工具链
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/esp-idf
+            ~/.espressif
+          key: idf-${{ env.IDF_VERSION }}-${{ runner.os }}-${{ hashFiles('.github/workflows/release-firmware.yml') }}
+
+      - name: 安装 ESP-IDF
+        run: |
+          set -eo pipefail
+          if [ ! -d "$HOME/esp-idf/tools" ]; then
+            # 不用 --shallow-submodules：子模块被钉在各自的提交上，浅到只取分支尖端会取不到。
+            git clone -b "${IDF_VERSION}" --depth 1 --recursive \
+              https://github.com/espressif/esp-idf.git "$HOME/esp-idf"
+          fi
+          "$HOME/esp-idf/install.sh" esp32s3
+
+      # ----------------------------------------------------------- Rust / Xtensa
+      - name: 安装 Xtensa 工具链
+        run: |
+          set -eo pipefail
+          if ! rustup toolchain list | grep -q "^${XTENSA_TOOLCHAIN}"; then
+            cargo install espup --locked
+            espup install \
+              --name "${XTENSA_TOOLCHAIN}" \
+              --toolchain-version "${XTENSA_TOOLCHAIN_VERSION}" \
+              --targets esp32s3
+          fi
+          rustup run "${XTENSA_TOOLCHAIN}" rustc -Vv | head -1
+
+      # ------------------------------------------------------------------ 构建
+      - name: 编译固件并生成合并镜像
+        run: |
+          set -eo pipefail
+          . "$HOME/esp-idf/export.sh"
+          . "$HOME/export-esp.sh"     # espup 生成的：PATH、LIBCLANG_PATH 与工具链名
+          cd pomelo-firmware/firmware
+          idf.py build merge-bin
+
+      - name: 核对镜像自报的版本与 tag 一致
+        run: |
+          set -eo pipefail
+          . "$HOME/esp-idf/export.sh"
+          cd pomelo-firmware/firmware
+          reported=$(python -m esptool --chip esp32s3 image-info build/firmware.bin \
+                     | sed -n 's/^App version: *//p' | head -1)
+          echo "镜像自报的版本：${reported}"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${reported}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::镜像自报的版本（${reported}）与 tag（${GITHUB_REF_NAME}）不一致 —— 检查是否在要发布的那个提交上打了 tag"
+            exit 1
+          fi
+
+      - name: 产出待发布的资产
+        run: |
+          set -eo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME}"
+          else
+            version="$(git rev-parse --short HEAD)"
+          fi
+          asset="hivebox-firmware-${version}.bin"
+          cp pomelo-firmware/firmware/build/merged-binary.bin "${asset}"
+          ls -l "${asset}"
+          echo "ASSET=${asset}" >> "$GITHUB_ENV"
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ASSET }}
+          path: ${{ env.ASSET }}
+
+      # -------------------------------------------------------------- 发行说明
+      - name: 找这一版的发行说明
+        id: notes
+        run: |
+          set -eo pipefail
+          file="docs/releases/${GITHUB_REF_NAME}.md"
+          if [ -f "$file" ]; then
+            echo "找到 ${file}"
+            echo "path=${file}" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::${file} 不存在，这一版用自动生成的发行说明"
+          fi
+
+      - name: 发布 Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          files: ${{ env.ASSET }}
+          body_path: ${{ steps.notes.outputs.path }}
+          generate_release_notes: ${{ steps.notes.outputs.path == '' }}
