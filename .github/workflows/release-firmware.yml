@@ -61,17 +61,19 @@ jobs:
           "$HOME/esp-idf/install.sh" esp32s3
 
       # ----------------------------------------------------------- Rust / Xtensa
+      # 注意这里没有 `| head` 这类会提前退出管道的写法：`set -o pipefail` 下，
+      # 提前退出的读者会让写者吃 SIGPIPE，整步以 141 失败（第一次跑就栽在这儿）。
       - name: 安装 Xtensa 工具链
         run: |
           set -eo pipefail
-          if ! rustup toolchain list | grep -q "^${XTENSA_TOOLCHAIN}"; then
+          if ! rustup run "${XTENSA_TOOLCHAIN}" rustc --version >/dev/null 2>&1; then
             cargo install espup --locked
             espup install \
               --name "${XTENSA_TOOLCHAIN}" \
               --toolchain-version "${XTENSA_TOOLCHAIN_VERSION}" \
               --targets esp32s3
           fi
-          rustup run "${XTENSA_TOOLCHAIN}" rustc -Vv | head -1
+          rustup run "${XTENSA_TOOLCHAIN}" rustc --version
 
       # ------------------------------------------------------------------ 构建
       - name: 编译固件并生成合并镜像
@@ -87,8 +89,9 @@ jobs:
           set -eo pipefail
           . "$HOME/esp-idf/export.sh"
           cd pomelo-firmware/firmware
-          reported=$(python -m esptool --chip esp32s3 image-info build/firmware.bin \
-                     | sed -n 's/^App version: *//p' | head -1)
+          # awk 而不是 `grep -m1` / `head -1`：那两种会提前关掉管道，让 esptool 吃 SIGPIPE。
+          reported=$(python -m esptool --chip esp32s3 image-info build/firmware.bin 2>/dev/null \
+                     | awk -F': ' '/^App version:/ { version = $2 } END { print version }')
           echo "镜像自报的版本：${reported}"
           if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${reported}" != "${GITHUB_REF_NAME}" ]; then
             echo "::error::镜像自报的版本（${reported}）与 tag（${GITHUB_REF_NAME}）不一致 —— 检查是否在要发布的那个提交上打了 tag"
