@@ -375,6 +375,58 @@ mod tests {
             "one field too many"
         );
     }
+
+    /// A version is read down to the release it is: the tag, and whether the tree it was built from
+    /// was the tag's.
+    ///
+    /// Every case here is a spelling `git describe` really produces, and the interesting ones are the
+    /// ones a cleverer rule gets wrong: a tag with a dash of its own must keep every dash, a tag whose
+    /// last field is a date must not have that date mistaken for a commit hash, and an untagged tree's
+    /// bare hash has no tag in it to find.
+    #[test]
+    fn a_version_is_read_down_to_its_release() {
+        let release = |version: &str| {
+            FirmwareInfo {
+                name: String::from("firmware"),
+                version: String::from(version),
+                built: None,
+            }
+            .release()
+        };
+
+        // On the tag: the release, already.
+        assert_eq!(release("v0.1.1-20261010"), "v0.1.1-20261010");
+
+        // Three commits past it: the count and the hash are the build's, not the version's.
+        assert_eq!(release("v0.1.1-20261010-3-g16414fb"), "v0.1.1-20261010");
+
+        // The same, with a working tree that had changes in it — the release, and the mark that says
+        // this image is not quite it. The mark is the one part of the tail that stays.
+        assert_eq!(
+            release("v0.1.1-20261010-3-g16414fb-dirty"),
+            "v0.1.1-20261010-dirty"
+        );
+        assert_eq!(release("v0.1.1-20261010-dirty"), "v0.1.1-20261010-dirty");
+
+        // A tag with dashes of its own keeps every one of them.
+        assert_eq!(release("v1.0.0-rc1-20261010"), "v1.0.0-rc1-20261010");
+        assert_eq!(release("v1.0.0-rc1-20261010-2-gabc1234"), "v1.0.0-rc1-20261010");
+
+        // An untagged tree: a bare hash, and nothing to cut.
+        assert_eq!(release("25ce332"), "25ce332");
+        assert_eq!(release("25ce332-dirty"), "25ce332-dirty");
+
+        // A dash and a hash that are not a describe tail, so not a tail:
+        // nothing after the tag's own last field, a hash with no count in front of it, and a count
+        // in front of something that is not a hash.
+        assert_eq!(release("v1.0.0-2"), "v1.0.0-2");
+        assert_eq!(release("v1.0.0-gdeadbeef"), "v1.0.0-gdeadbeef");
+        assert_eq!(release("v1.0.0-x-gdeadbeef"), "v1.0.0-x-gdeadbeef");
+
+        // And what a board that describes itself oddly says is passed through rather than mangled.
+        assert_eq!(release(""), "");
+        assert_eq!(release("(unknown)"), "(unknown)");
+    }
 }
 
 /// Whether the management page is being served, and where.
@@ -495,6 +547,10 @@ pub struct FirmwareInfo {
     /// The project's name.
     pub name: String,
     /// The version string built into the image.
+    ///
+    /// The image's own words, which for this project's builds is a `git describe`: the release tag,
+    /// and then how far the build has moved from it. [`FirmwareInfo::release`] is what an interface
+    /// draws, and the whole string is what a log should keep.
     pub version: String,
     /// When this image was built, to the second, as `2026-10-10 14:32:05`.
     ///
@@ -544,6 +600,69 @@ impl FirmwareInfo {
             "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}"
         ))
     }
+
+    /// The version as the release timeline spells it: the tag, without the build's own note of how
+    /// far it has moved from it.
+    ///
+    /// An image's version comes from `git describe`, so a build made *on* a tag says
+    /// `v0.1.1-20261010` and one made three commits later says `v0.1.1-20261010-3-g16414fb` — the
+    /// tag, then the count, then the commit. The count and the commit are a build's account of
+    /// itself: worth having in a log, which is why the boot log and the web page carry them
+    /// untouched, and not worth having in an interface whose reader is asking *which version is
+    /// this*, on a page that already says on another row when the image was built, to the second.
+    ///
+    /// `-dirty` stays, and the narrowness of the rule is why: it is not a note about how far the code
+    /// has moved, it is the note that says *this code is not the tag's at all* — and a version that
+    /// hid it would be claiming a release for an image nobody released.
+    ///
+    /// A `String` and not a slice of [`FirmwareInfo::version`], because the answer is not one: the
+    /// tag and the dirty mark are the two ends of a `git describe` with the middle taken out, and no
+    /// contiguous piece of the image's own string is both. Both ends are cut out of it rather than
+    /// respelled, which is as close to "a piece of what the build wrote" as this can get.
+    pub fn release(&self) -> String {
+        let (tag, dirty) = release_of(&self.version);
+
+        if dirty {
+            format!("{tag}-dirty")
+        } else {
+            tag.to_string()
+        }
+    }
+}
+
+/// The tag inside a `git describe` spelling of a version, and whether that spelling also carried the
+/// dirty mark.
+///
+/// The shape is `<tag>-<commits>-g<hash>`, with `-dirty` appended when the tree it was read from had
+/// uncommitted changes — and nothing at all when it was read on the tag itself. What this returns is
+/// the tag and the mark; what it drops is the middle.
+///
+/// Only the middle, and only when both halves of it are really there. A tag may contain dashes of its
+/// own (`v1.0.0-rc1-20261010`), and an untagged tree's version is a bare hash with no tag in it to
+/// find — so the rule cannot be "cut at the first dash", which would turn `v1.0.0-rc1` into
+/// `v1.0.0`: a version this project never released and never will.
+fn release_of(version: &str) -> (&str, bool) {
+    let dirty = version.ends_with("-dirty");
+    let body = version.strip_suffix("-dirty").unwrap_or(version);
+
+    // `g` and then hexadecimal: `git describe`'s abbreviation of the commit, and not a word that
+    // happens to start with a `g`.
+    let looks_like_hash = |field: &str| {
+        field.len() >= 2 && field.starts_with('g') && field[1..].chars().all(|c| c.is_ascii_hexdigit())
+    };
+    // Decimal digits and nothing else, and not empty: the count `git describe` puts between the tag
+    // and the commit, and not a date — a tag's own `-20261010` must survive this.
+    let looks_like_count =
+        |field: &str| !field.is_empty() && field.chars().all(|c| c.is_ascii_digit());
+
+    let tag = body
+        .rsplit_once('-')
+        .and_then(|(head, hash)| looks_like_hash(hash).then_some(head))
+        .and_then(|head| head.rsplit_once('-'))
+        .filter(|(_, count)| looks_like_count(count))
+        .map_or(body, |(tag, _)| tag);
+
+    (tag, dirty)
 }
 
 /// The month `__DATE__` names, as the number it stands for.

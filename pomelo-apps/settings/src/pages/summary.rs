@@ -248,10 +248,15 @@ pub(crate) fn summary_panel<'a>(preferences: SystemPreferences, panel: &SystemPa
             // CMake was given — `firmware` — and `firmware 6de00de-dirty` is a card whose longest
             // word is the one word that says nothing. [`FirmwareInfo::name`] is there for an image
             // whose name is worth reading.
+            //
+            // And the release rather than all of what the image calls itself: a build made between
+            // two tags says `v0.1.1-20261010-3-g16414fb`, where the version is `v0.1.1-20261010` and
+            // the rest is the distance a build has moved from it. The footer says when the image was
+            // built; a commit is for a build log. [`FirmwareInfo::release`].
             panel
                 .identity
                 .as_ref()
-                .map(|identity| identity.firmware.version.clone()),
+                .map(|identity| identity.firmware.release()),
             language,
             theme,
         ),

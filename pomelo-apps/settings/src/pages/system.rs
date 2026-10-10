@@ -89,7 +89,7 @@ pub(crate) fn system_page<'a>(
 /// showing the version this code was written against.
 fn image(language: Language, firmware: Option<&FirmwareInfo>) -> String {
     match firmware {
-        Some(firmware) => format!("{} {}", firmware.name, firmware.version),
+        Some(firmware) => format!("{} {}", firmware.name, firmware.release()),
         None => language.text(Key::None).to_string(),
     }
 }
@@ -110,5 +110,21 @@ mod tests {
         assert_eq!(image(Language::English, Some(&firmware)), "pomelo 1.2.3");
         assert_eq!(image(Language::English, None), "none");
         assert_eq!(image(Language::Chinese, None), "无");
+    }
+
+    /// A build made between two tags is drawn as the release it is a build *of*: the commits it has
+    /// moved past that tag are the build's business, and this row's business is the version.
+    #[test]
+    fn a_build_between_tags_is_drawn_as_its_release() {
+        let between_tags = FirmwareInfo {
+            name: String::from("firmware"),
+            version: String::from("v0.1.1-20261010-3-g16414fb"),
+            built: Some(String::from("2026-10-10 14:32:05")),
+        };
+
+        assert_eq!(
+            image(Language::English, Some(&between_tags)),
+            "firmware v0.1.1-20261010"
+        );
     }
 }
