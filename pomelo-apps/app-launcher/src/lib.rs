@@ -1344,20 +1344,32 @@ impl Launcher {
             return;
         };
 
-        // The distance is in shares of the panel and the speed in pixels a second, which is why they
-        // are compared against two thresholds that say the same thing in two units. The sign of the
-        // distance is the direction the finger pushed: a sheet pulled down and a sheet pushed up are
-        // one motion with two signs.
-        let (pushed, speed) = match transition.motion {
-            Motion::Back => (pulled - transition.start, velocity.x),
-            Motion::Home => (pulled - transition.start, -velocity.y),
-            Motion::Down => (pulled - transition.start, velocity.y),
+        // What the decision is about is what the *finger* did, and the sign of it is which way the
+        // finger pushed: a sheet pulled down and a sheet pushed up are one motion with two signs.
+        let (pushed, span, speed) = match transition.motion {
+            Motion::Back => (pulled - transition.start, self.size.width, velocity.x),
+            Motion::Home => (
+                pulled - transition.start,
+                self.size.height,
+                -velocity.y,
+            ),
+            Motion::Down => (
+                pulled - transition.start,
+                self.size.height,
+                velocity.y,
+            ),
             // An arriving app is never held: what sends it is a tap, which is `Progress::To` from the
             // start and never reaches this.
             Motion::Open => return,
         };
 
-        let meant_it = pushed.abs() >= style::TRANSITION_COMMIT
+        // The finger's own travel, and not the layer's: the layer's position is measured from where the
+        // drag was recognised (`pull_layer`), so the slop the finger spent getting there is added back
+        // here. See [`style::TRANSITION_COMMIT`] for why that distinction is the whole point of the
+        // number.
+        let travelled = pushed.abs() * span + style::SLOP;
+
+        let meant_it = travelled >= style::TRANSITION_COMMIT
             || pushed.signum() * speed >= style::TRANSITION_FLING;
 
         // Where it ends up: the other resting place if the gesture meant it, its own if it did not.
@@ -2475,6 +2487,40 @@ mod tests {
         assert_eq!(
             launcher.transition, None,
             "no layer moves for a finger going the wrong way out of an edge"
+        );
+
+        // And — the case this was reported for — a finger that comes down *inside* the band but not
+        // glued to the edge is making the gesture just the same. 48 px of a 480 px panel is under 4 mm
+        // of board, and a thumb goes where it goes.
+        launcher.update(Message::Open(MUSIC));
+        launcher.update(Message::TransitionSettled);
+        launcher.update(Message::Pulled {
+            start: Point::new(SCREEN as f32 / 2.0, SCREEN as f32 - style::EDGE_ZONE + 4.0),
+            delta: Vector::new(6.0, -120.0),
+        });
+
+        assert!(
+            matches!(
+                launcher.transition,
+                Some(Transition {
+                    layer: Layer::App(MUSIC),
+                    motion: Motion::Home,
+                    ..
+                })
+            ),
+            "a finger 44 px up from the foot of the panel is still swiping up from it"
+        );
+
+        // And one that came down outside the band is not: a band is a band, and this is what it costs.
+        launcher.update(Message::TransitionSettled);
+        launcher.update(Message::Pulled {
+            start: Point::new(SCREEN as f32 / 2.0, SCREEN as f32 - style::EDGE_ZONE - 12.0),
+            delta: Vector::new(6.0, -120.0),
+        });
+
+        assert_eq!(
+            launcher.transition, None,
+            "a finger that came down above the band is scrolling the page, not leaving it"
         );
     }
 

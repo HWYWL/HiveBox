@@ -122,13 +122,26 @@ pub const SLOP: f32 = 18.0;
 /// the page with only a brief swipe.
 pub const SWIPE_COMMIT: f32 = 216.0;
 
-/// How far from an edge of the panel a gesture has to *begin* to be that edge's gesture.
+/// How far from an edge of the panel a finger has to *come down* to be making that edge's gesture.
 ///
-/// This is the band that tells a "go back" drag apart from a page scrolling, and it is the reason
-/// the gesture layer can cover the whole screen at all: the swipe in the middle of a page is not
-/// claimed, so it stays the page's. 24 px of a 480 px panel — a thumb's margin, and narrow enough
-/// that the back button the settings pages put at the top left still gets its own presses.
-pub const EDGE_ZONE: f32 = 24.0;
+/// This is the band that tells a "go back" drag apart from a page scrolling, and it is the reason the
+/// gesture layer can cover the whole screen at all: the drag in the middle of a page is not claimed,
+/// so it stays the page's.
+///
+/// 48 px, and the physical size is why: this panel is 480 px across about 39 mm, so a pixel is about
+/// 12 to the millimetre — which makes 48 px a little under 4 mm, and the 24 px it was before barely
+/// 2 mm, *narrower than the patch a fingertip touches down with*. A phone gets away with an edge zone
+/// that thin because its edge is a piece of glass the hand is already holding; this board is a thing
+/// with a case, and a thumb that goes to swipe up from the foot of the panel comes down where it
+/// comes down. A gesture nobody can begin is a gesture that does not work, however generous its
+/// thresholds are — which is exactly how this one was reported.
+///
+/// The cost is the strip itself, and it is paid by whatever is under it: a drag that begins inside a
+/// band belongs to the gesture, so the grid's page turn loses the outermost 48 px of the panel (a
+/// rightward drag from the left edge now goes back, and on the grid back does nothing), and a list
+/// loses the bottom 48 px for scrolling. **This is the number to turn down** if one of those turns out
+/// to matter more than the gesture being easy to make.
+pub const EDGE_ZONE: f32 = 48.0;
 
 /// How far an edge swipe has to travel to count, rather than be a slip of the finger.
 ///
@@ -161,17 +174,20 @@ pub const PAGE_CURVE: Curve = Curve::EaseOutCubic;
 pub const TRANSITION: Duration = Duration::from_millis(240);
 pub const TRANSITION_CURVE: Curve = Curve::EaseOutCubic;
 
-/// How far a layer has to have been pushed for a finger leaving it to send it the way it was going: a
-/// share of the panel — 0.2, a fifth of the way, which is 96 px of this one.
+/// How far a *finger* has to travel for letting go to send the layer the way it was going: 96 px,
+/// which is [`EDGE_SWIPE`] to the pixel.
 ///
-/// A share rather than pixels because a share is what the transition is drawn in (see
-/// [`pomelo_widgets::Progress`]), but the number is [`EDGE_SWIPE`]'s: 96 px is how far an edge swipe
-/// had to travel before any of this moved with the finger, and a gesture that *shows* someone what
-/// they are doing must not then ask for more than the gesture that did not. It is also well short of
-/// the page turn's [`SWIPE_COMMIT`] (45%), and that is the other half of the same point: a page turn
-/// is a move to the next page, which can be made again a moment later, while this is a dismissal —
-/// the shortest gesture a phone has.
-pub const TRANSITION_COMMIT: f32 = 0.2;
+/// The finger's travel and not the layer's, which is the whole of why this is in pixels: the layer
+/// only starts moving once the drag has spent [`SLOP`] becoming a drag, so measuring the layer would
+/// quietly ask for 96 px plus that slop — and 96 px is how far an edge swipe had to travel before any
+/// of this moved with the finger at all. A gesture that *shows* someone what they are doing must not
+/// ask for more than the gesture that did not. See [`Launcher::release_layer`], which adds the slop
+/// back before comparing.
+///
+/// It is also well short of the page turn's [`SWIPE_COMMIT`] (45%), and that is the other half of the
+/// same point: a page turn is a move to the next page, which can be made again a moment later, while
+/// this is a dismissal — the shortest gesture a phone has.
+pub const TRANSITION_COMMIT: f32 = 96.0;
 
 /// How fast a flick sends a layer the way it was going without having been pushed that far: 250 px/s.
 ///
