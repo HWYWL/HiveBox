@@ -164,14 +164,33 @@ pub const STATUS_BG_APP_ICON: f32 = FONT_STANDARD;
 /// Spacing between multiple background app icons in the status bar.
 pub const STATUS_BG_APP_GAP: f32 = 6.0;
 
-/// The battery icon's size, scaled up for visibility.
-pub const STATUS_BATTERY_ICON: f32 = 36.0;
+/// The battery, which is drawn rather than picked out of a set of pictures.
+///
+/// The reading goes *inside* it, so what the shape has to be is a box with room for three digits —
+/// and no glyph in the set is that: the icon set draws a battery filling up, and its interior is
+/// the fill. See `status::battery_widget`.
+///
+/// The numbers are a battery seen from the side: [`BATTERY_W`] by [`BATTERY_H`] of outline, and the
+/// little terminal on the right that makes the shape a battery rather than a box.
+pub const BATTERY_W: f32 = 40.0;
+pub const BATTERY_H: f32 = 22.0;
+pub const BATTERY_RADIUS: f32 = 6.0;
+pub const BATTERY_BORDER: f32 = 1.5;
+pub const BATTERY_NUB_W: f32 = 3.0;
+pub const BATTERY_NUB_H: f32 = 9.0;
+pub const BATTERY_NUB_RADIUS: f32 = 1.5;
+/// The terminal stands off the body by a hair, so the two read as one shape and not as two boxes.
+pub const BATTERY_NUB_GAP: f32 = 1.0;
 
-/// The battery percentage text size.
-pub const STATUS_PERCENT_FONT: f32 = FONT_EXTRA_SMALL;
+/// The reading inside it: two steps below the bar's own text, and as large as three digits fit.
+pub const BATTERY_NUMBER_FONT: f32 = 14.0;
 
-/// Gap between the percentage text and the battery icon.
-pub const STATUS_BATTERY_GAP: f32 = 6.0;
+/// The bolt, which stands where the percentage used to and only while the charger is connected.
+///
+/// A bolt and not a green battery: the number inside is already the colour the bar's text is, and a
+/// second meaning for that colour would be a meaning the reading had to share with the charger.
+pub const BATTERY_BOLT_FONT: f32 = FONT_EXTRA_SMALL;
+pub const BATTERY_BOLT_GAP: f32 = 4.0;
 
 pub const STATUS_GAP: f32 = 14.0;
 

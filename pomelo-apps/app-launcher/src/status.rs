@@ -15,12 +15,15 @@
 //! would be worse than one that stops at "strong". The settings app's list is where four steps are
 //! drawn as four.
 //!
-//! # Eight pictures of a battery
+//! # The battery is drawn, and its reading is inside it
 //!
-//! `battery_android_0` through `_6`, then `_full`: seven steps of about fourteen percent each, and a
-//! full battery as its own picture. The icon is the whole reading — the same as the signal, and for
-//! the same reason: a percentage printed beside a picture of the percentage would be one reading
-//! drawn twice, and eight steps are what a 20 px glyph can say.
+//! It is the one reading on this bar that is not a glyph, and the number is why: the charge is
+//! written *inside* the shape, so the shape has to be a box with room for three digits — and a
+//! battery in the icon set is a picture of a battery filling up, whose interior is the fill. So the
+//! outline, the terminal on its right and the digits are drawn here, at `style`'s measurements.
+//!
+//! What is *not* written is a `%`. The shape says what kind of number it is, and a sign beside a
+//! number that is inside a picture of a battery is the same thing said twice.
 //!
 //! # The row is inset, and the band is not
 //!
@@ -28,23 +31,19 @@
 //! it is the top of the display — while what is drawn on it stops short of the corners.
 
 use iced::widget::{container, row, text, Space};
-use iced::{Alignment, Color, Element, Length, Padding};
+use iced::{Alignment, Border, Color, Element, Length, Padding};
 use pomelo_material_symbols::{self as icons, Icon};
 use pomelo_widgets::ThemeMode;
 
 use crate::style;
 use crate::Message;
 
-/// The bar as an element: `clock` and background app icons on the left, `wifi` bars and `battery` percent on the right.
+/// The bar as an element: the clock and the background apps on the left, the signal and the charge
+/// on the right.
 ///
-/// The whole bar is one row: the clock, background app icons, space, then the signal and the charge.
-/// Nothing here is interactive — the readings are the platform's to push, and the bar has no message
-/// of its own — so this is a plain `Element` and not one mapped from a message.
-/// The bar as an element: `clock` and background app icons on the left, `wifi` bars and `battery` percent on the right.
-///
-/// The whole bar is one row: the clock, background app icons, space, then the signal and the charge.
-/// Nothing here is interactive — the readings are the platform's to push, and the bar has no message
-/// of its own — so this is a plain `Element` and not one mapped from a message.
+/// The whole bar is one row, and nothing on it is interactive — the readings are the platform's to
+/// push and the bar has no message of its own — so this is a plain `Element` and not one mapped from
+/// a message.
 pub fn view<'a>(
     clock: &'a str,
     battery: u8,
@@ -74,22 +73,7 @@ pub fn view<'a>(
             .color(status_fg)
     };
 
-    let battery_icon_widget = |glyph: Icon| {
-        text(glyph.glyph())
-            .size(style::STATUS_BATTERY_ICON)
-            .font(icons::font())
-            .color(status_fg)
-            .line_height(1.0)
-    };
-
-    let battery_group = row![
-        text(format!("{battery}%"))
-            .size(style::STATUS_PERCENT_FONT)
-            .color(status_fg),
-        battery_icon_widget(battery_icon(battery, charging)),
-    ]
-    .align_y(Alignment::Center)
-    .spacing(style::STATUS_BATTERY_GAP);
+    let battery_group = battery_widget(battery, charging, status_fg);
 
     let mut bg_icons_row = row![].align_y(Alignment::Center).spacing(style::STATUS_BG_APP_GAP);
     for &bg_icon in background_icons {
@@ -140,41 +124,75 @@ pub fn wifi_icon(bars: u8) -> Icon {
     }
 }
 
-/// The picture for `percent` of charge and `charging` state.
+/// The charge as an element: a drawn battery with the reading inside it, and a bolt while charging.
 ///
-/// When `charging` is true, displays [`Icon::BATTERY_ANDROID_FRAME_BOLT`].
-/// Otherwise, divided into 7 shares across 100% (each share is 100 / 7 ≈ 14.28%):
-/// - Icon 0 (`BATTERY_ANDROID_0`): 0.5 share (0%..=7%)
-/// - Icons 1~6 (`BATTERY_ANDROID_1..6`): 1 share each (8%..=21%, 22%..=35%, 36%..=49%, 50%..=64%, 65%..=78%, 79%..=92%)
-/// - Icon 7 (`BATTERY_ANDROID_FULL`): 0.5 share (93%..=100%)
-pub fn battery_icon(percent: u8, charging: bool) -> Icon {
+/// See this module's docs for why it is not a glyph. The outline and the terminal are what make the
+/// shape a battery; the number is the reading; and the bolt is the charger, which the number cannot
+/// say and the shape has no room to say twice.
+///
+/// The bolt stands *beside* the battery rather than on it, in the place the percentage used to
+/// occupy. A bolt drawn over the outline would have to be drawn over the number too, and a bolt
+/// hidden behind a number is a charger nobody can see.
+fn battery_widget<'a>(percent: u8, charging: bool, ink: Color) -> Element<'a, Message> {
+    let reading = container(
+        text(charge(percent))
+            .size(style::BATTERY_NUMBER_FONT)
+            .color(ink),
+    )
+    .center_x(Length::Fill)
+    .center_y(Length::Fill);
+
+    let body = container(reading)
+        .width(Length::Fixed(style::BATTERY_W))
+        .height(Length::Fixed(style::BATTERY_H))
+        .style(move |_theme| container::Style {
+            border: Border {
+                color: ink,
+                width: style::BATTERY_BORDER,
+                radius: style::BATTERY_RADIUS.into(),
+            },
+            ..container::Style::default()
+        });
+
+    let terminal = container(Space::new())
+        .width(Length::Fixed(style::BATTERY_NUB_W))
+        .height(Length::Fixed(style::BATTERY_NUB_H))
+        .style(move |_theme| container::Style {
+            background: Some(ink.into()),
+            border: Border {
+                radius: style::BATTERY_NUB_RADIUS.into(),
+                ..Border::default()
+            },
+            ..container::Style::default()
+        });
+
+    let shape = row![body, terminal]
+        .align_y(Alignment::Center)
+        .spacing(style::BATTERY_NUB_GAP);
+
+    let mut group = row![]
+        .align_y(Alignment::Center)
+        .spacing(style::BATTERY_BOLT_GAP);
+
     if charging {
-        return Icon::BATTERY_ANDROID_FRAME_BOLT;
+        group = group.push(
+            text(Icon::BOLT.glyph())
+                .size(style::BATTERY_BOLT_FONT)
+                .font(icons::font())
+                .color(ink),
+        );
     }
-    let index = match percent {
-        0..=7 => 0,
-        8..=21 => 1,
-        22..=35 => 2,
-        36..=49 => 3,
-        50..=64 => 4,
-        65..=78 => 5,
-        79..=92 => 6,
-        _ => 7,
-    };
-    BATTERY[index]
+
+    group.push(shape).into()
 }
 
-/// The eight pictures the charge climbs through, in order: seven of a battery filling up, then full.
-const BATTERY: [Icon; 8] = [
-    Icon::BATTERY_ANDROID_0,
-    Icon::BATTERY_ANDROID_1,
-    Icon::BATTERY_ANDROID_2,
-    Icon::BATTERY_ANDROID_3,
-    Icon::BATTERY_ANDROID_4,
-    Icon::BATTERY_ANDROID_5,
-    Icon::BATTERY_ANDROID_6,
-    Icon::BATTERY_ANDROID_FULL,
-];
+/// The reading written inside the battery: the charge, and not the charge with a sign.
+///
+/// Its own function because of what it does *not* do: a `%` here would be the shape's meaning
+/// written out beside the shape, and the number that a person reads out of a battery is the number.
+fn charge(percent: u8) -> String {
+    percent.to_string()
+}
 
 #[cfg(test)]
 mod tests {
@@ -199,69 +217,37 @@ mod tests {
         }
     }
 
-    /// When charging is active, the bolt icon is always shown regardless of percentage.
+    /// The reading inside the battery is the number, and not the number with a sign.
+    ///
+    /// The regression this exists for is the `%`: it used to be printed beside the shape, and a
+    /// shape that already means "percent" does not need to be told so in the middle of itself.
     #[test]
-    fn the_charging_bolt_icon_is_shown_when_charging() {
-        assert_eq!(battery_icon(0, true), Icon::BATTERY_ANDROID_FRAME_BOLT);
-        assert_eq!(battery_icon(50, true), Icon::BATTERY_ANDROID_FRAME_BOLT);
-        assert_eq!(battery_icon(100, true), Icon::BATTERY_ANDROID_FRAME_BOLT);
-    }
+    fn the_charge_is_written_without_its_sign() {
+        assert_eq!(charge(0), "0");
+        assert_eq!(charge(88), "88");
+        assert_eq!(charge(100), "100");
 
-    /// The charge has eight pictures: 0 and FULL take 0.5 share each, and 1~6 take 1 share each (1 share = 100/7%).
-    #[test]
-    fn the_battery_icon_climbs_eight_steps_and_the_last_one_is_full() {
-        for (percent, icon) in [
-            (0, Icon::BATTERY_ANDROID_0),
-            (7, Icon::BATTERY_ANDROID_0),
-            (8, Icon::BATTERY_ANDROID_1),
-            (21, Icon::BATTERY_ANDROID_1),
-            (22, Icon::BATTERY_ANDROID_2),
-            (35, Icon::BATTERY_ANDROID_2),
-            (36, Icon::BATTERY_ANDROID_3),
-            (49, Icon::BATTERY_ANDROID_3),
-            (50, Icon::BATTERY_ANDROID_4),
-            (64, Icon::BATTERY_ANDROID_4),
-            (65, Icon::BATTERY_ANDROID_5),
-            (78, Icon::BATTERY_ANDROID_5),
-            (79, Icon::BATTERY_ANDROID_6),
-            (92, Icon::BATTERY_ANDROID_6),
-            (93, Icon::BATTERY_ANDROID_FULL),
-            (100, Icon::BATTERY_ANDROID_FULL),
-            (255, Icon::BATTERY_ANDROID_FULL),
-        ] {
-            assert_eq!(battery_icon(percent, false), icon, "{percent}%");
+        for percent in 0..=100u8 {
+            let written = charge(percent);
+
+            assert_eq!(written, percent.to_string(), "{percent} is written as itself");
+            assert!(
+                !written.contains('%'),
+                "{written} carries a sign the shape already gives it"
+            );
         }
     }
 
-    /// A fuller battery is never drawn as a lower picture.
+    /// The battery is drawn for a charge and for a charger, in both themes.
     ///
-    /// The whole hundred percent, in order, which is what says the arithmetic in [`battery_icon`]
-    /// does not fold back on itself somewhere between the boundaries above.
-    ///
-    /// The comparison is where the picture sits in [`BATTERY`], not the `Icon`s' own ordering: an
-    /// `Icon` orders by its code point, and the code points of a battery filling up run *backwards*
-    /// (`_0` is U+F30D and `_full` is U+F304), so `>` on the two would say the climb descends.
+    /// Nothing here can say what it *looks* like — a widget tree has no pixels — so what is checked
+    /// is that the shape builds at both ends of the scale and with the bolt in either state, which
+    /// is where a `Length::Fill` inside a fixed box would blow up.
     #[test]
-    fn a_fuller_battery_is_never_a_lower_picture() {
-        let step = |percent| {
-            let icon = battery_icon(percent, false);
-
-            BATTERY
-                .iter()
-                .position(|candidate| *candidate == icon)
-                .expect("every picture of a charge is one of the eight")
-        };
-
-        let mut last = step(0);
-
-        for percent in 0..=100u8 {
-            assert!(
-                step(percent) >= last,
-                "{percent}% draws lower than {}%",
-                percent - 1
-            );
-
-            last = step(percent);
+    fn the_battery_builds_at_both_ends_of_the_scale() {
+        for (percent, charging) in [(0, false), (7, false), (100, false), (50, true)] {
+            let _ = battery_widget(percent, charging, Color::WHITE);
+            let _ = battery_widget(percent, charging, Color::BLACK);
         }
     }
 
