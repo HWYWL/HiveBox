@@ -119,11 +119,24 @@ jobs:
 
           # 日志要写进文件再挑着贴出来：构建日志动辄上万行，而这里失败时唯一能
           # 从外面读到的东西是 check-run 注解（下载完整日志要仓库管理员权限）。
-          # 失败时把尾部若干行逐行发成 `::error::`，就能用注解接口读到出错原因。
+          #
+          # 先 grep 再贴：stdout 是块缓冲、stderr 不是，日志最后几行往往只是
+          # Kconfig 的 NOTE（上一次就是这么被骗过去的），错误通常在更前面。
           log="${RUNNER_TEMP}/build.log"
-          if ! idf.py build merge-bin > "${log}" 2>&1; then
-            echo "构建失败，下面是日志尾部 ${BUILD_LOG_TAIL} 行："
-            tail -n "${BUILD_LOG_TAIL}" "${log}" | while IFS= read -r line; do
+          set +e
+          idf.py build merge-bin > "${log}" 2>&1
+          status=$?
+          set -e
+
+          if [ "${status}" -ne 0 ]; then
+            echo "::error::idf.py 退出码 ${status}"
+            echo "::error::---- 日志里的可疑行 ----"
+            grep -n -i -E 'error|fatal|failed|cannot find|undefined reference|no such file|panic' "${log}" \
+              | tail -n "${BUILD_LOG_TAIL}" | while IFS= read -r line; do
+                echo "::error::${line}"
+              done
+            echo "::error::---- 日志末尾 15 行 ----"
+            tail -n 15 "${log}" | while IFS= read -r line; do
               echo "::error::${line}"
             done
             exit 1
