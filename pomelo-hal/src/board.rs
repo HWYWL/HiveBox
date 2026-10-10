@@ -12,8 +12,8 @@ use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
 use crate::traits::{
-    AudioBackend, ImuBackend, InputBackend, MicBackend, PowerBackend, StorageBackend, SystemBackend,
-    WebBackend, WifiBackend,
+    AudioBackend, ImuBackend, InputBackend, MicBackend, NasBackend, PowerBackend, StorageBackend,
+    SystemBackend, WebBackend, WifiBackend,
 };
 use crate::types::{SystemEvent, WifiStatus};
 
@@ -44,6 +44,7 @@ pub struct Board {
     storage: Mutex<Box<dyn StorageBackend>>,
     web: Mutex<Box<dyn WebBackend>>,
     system: Mutex<Box<dyn SystemBackend>>,
+    nas: Mutex<Box<dyn NasBackend>>,
     listeners: Mutex<Vec<EventListener>>,
     events: Mutex<VecDeque<SystemEvent>>,
     event_condvar: Condvar,
@@ -54,9 +55,13 @@ pub struct Board {
 impl Board {
     /// Assemble a board from one backend per subsystem.
     ///
-    /// The order is `power`, `wifi`, `audio`, `mic`, `imu`, `input`, `storage`, `web`, `system` — the
-    /// same order the accessors appear in. It takes boxes rather than generics so the caller can mix
-    /// concrete types and, in a test, its own fakes.
+    /// The order is `power`, `wifi`, `audio`, `mic`, `imu`, `input`, `storage`, `web`, `system`, `nas`
+    /// — the same order the accessors appear in. It takes boxes rather than generics so the caller can
+    /// mix concrete types and, in a test, its own fakes.
+    ///
+    /// New backends go on the *end* of both lists, even when a place in the middle would read better:
+    /// the order is one line in a caller's file per backend, and a backend inserted anywhere but the
+    /// end moves every argument below it in every composition root there is.
     pub fn from_backends(
         power: Box<dyn PowerBackend>,
         wifi: Box<dyn WifiBackend>,
@@ -67,6 +72,7 @@ impl Board {
         storage: Box<dyn StorageBackend>,
         web: Box<dyn WebBackend>,
         system: Box<dyn SystemBackend>,
+        nas: Box<dyn NasBackend>,
     ) -> Self {
         Self {
             power: Mutex::new(power),
@@ -78,6 +84,7 @@ impl Board {
             storage: Mutex::new(storage),
             web: Mutex::new(web),
             system: Mutex::new(system),
+            nas: Mutex::new(nas),
             listeners: Mutex::new(Vec::new()),
             events: Mutex::new(VecDeque::with_capacity(MAX_EVENT_QUEUE_SIZE)),
             event_condvar: Condvar::new(),
@@ -89,7 +96,8 @@ impl Board {
     #[cfg(not(target_os = "espidf"))]
     pub fn simulated() -> Self {
         use crate::sim::{
-            SimAudio, SimImu, SimInput, SimMic, SimPower, SimStorage, SimSystem, SimWeb, SimWifi,
+            SimAudio, SimImu, SimInput, SimMic, SimNas, SimPower, SimStorage, SimSystem, SimWeb,
+            SimWifi,
         };
         Self::from_backends(
             Box::new(SimPower::new()),
@@ -101,6 +109,7 @@ impl Board {
             Box::new(SimStorage::new()),
             Box::new(SimWeb::new()),
             Box::new(SimSystem::new()),
+            Box::new(SimNas::new()),
         )
     }
 
@@ -215,6 +224,15 @@ impl Board {
     /// bring up.
     pub fn system(&self) -> MutexGuard<'_, Box<dyn SystemBackend>> {
         lock(&self.system)
+    }
+
+    /// Lock the NAS-watching backend.
+    ///
+    /// Last, and after [`Board::system`] rather than beside [`Board::web`] where it would read better:
+    /// this list and the parameters of [`Board::from_backends`] are one list in one order, and a new
+    /// backend is appended to both. See that function.
+    pub fn nas(&self) -> MutexGuard<'_, Box<dyn NasBackend>> {
+        lock(&self.nas)
     }
 
     /// Advance every time-driven subsystem (Wi-Fi scan progress, audio EOF

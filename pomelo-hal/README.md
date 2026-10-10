@@ -23,7 +23,7 @@ firmware/components/board_hal/      the C drivers
 Which backends a board has is an argument rather than a `#[cfg]`:
 
 ```rust
-Board::from_backends(power, wifi, audio, mic, imu, input, storage, web, system)  // the composition root decides
+Board::from_backends(power, wifi, audio, mic, imu, input, storage, web, system, nas)  // the composition root decides
 Board::simulated()                                                             // the desktop simulator
 ```
 
@@ -55,9 +55,11 @@ about *themselves* — the part number, the version, the heap, the uptime and th
 read: `SystemEvent::Tick`, a once-a-second pulse from the firmware's event pump, which is what a page
 showing a running time waits for instead of asking for frames.
 
-`Board::from_backends` takes the nine backends in the order `power, wifi, audio, mic, imu, input,
-storage, web, system`; boxes rather than generics, so a caller can mix concrete backends and a test can
-pass fakes.
+`Board::from_backends` takes the ten backends in the order `power, wifi, audio, mic, imu, input,
+storage, web, system, nas`; boxes rather than generics, so a caller can mix concrete backends and a test
+can pass fakes. New backends are appended to that list rather than slotted into it wherever they would
+read better — the order is one line per backend in every composition root there is, and inserting one
+moves every argument below it.
 `Board::init` and `Board::tick` are the two lifecycle calls: initialise once at boot, tick once per
 frame.
 

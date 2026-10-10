@@ -4,14 +4,12 @@
 # this table is what makes them one project: one `Cargo.lock`, `cargo test --workspace` in one
 # command, and `cargo run -p <app>` from here.
 #
-# There is deliberately **no `[patch]` table**. A root's patches decide which iced and which renderer
-# the whole graph gets, and in this repository that answer is "the real one, from crates.io, with a
-# window" — that is what an app is when nobody is building it for the board. The firmware's roots
-# have their own tables and depend on these crates by path: the same manifests, a different graph.
-#
 # The three crates the apps share (`pomelo-hal`, `pomelo-widgets`, `pomelo-material-symbols`) come
 # from GitHub, pinned by revision in the manifests that need them, because this project builds on
-# its own: only the applications are here.
+# its own: only the applications are here. The `[patch]` tables below are what makes a *checkout* of
+# this repository build the apps against the sibling directories rather than against those revisions —
+# so `cargo test --workspace` here tests the code in the tree, while a manifest on its own (and the
+# firmware's roots, which have their own tables) builds against what was published.
 [workspace]
 resolver = "2"
 
@@ -20,6 +18,7 @@ members = [
     "app-launcher",
     "calculator",
     "music-player",
+    "nas-monitor",
     "settings",
     "terminal",
     "web-manager",

@@ -1,5 +1,7 @@
 //! Strongly-typed data structures shared across HAL backends.
 
+use std::time::{Duration, Instant};
+
 /// How much of `total` is taken by `used`, in `0.0..=100.0`.
 ///
 /// The one place this arithmetic lives. A heap and a volume are both "some of a whole", and two
@@ -468,6 +470,141 @@ impl WebStatus {
     }
 }
 
+/// How a look at the NAS went, and whether there has been one.
+///
+/// [`NasStatus::Connecting`] and [`NasStatus::Offline`] are different answers and both are ordinary
+/// states of a home NAS: one is a machine that has not answered *yet* — the board just booted, or the
+/// drive woke up a second ago — and the other is one that answered with a refusal. A page that drew
+/// them the same way would turn "wait a moment" into "something is broken".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NasStatus {
+    /// This box has not been told which NAS to watch. Nothing has been tried, and nothing is wrong.
+    #[default]
+    Unconfigured,
+    /// Pointed at a NAS, and no reading has come back yet.
+    Connecting,
+    /// The last reading arrived.
+    Online,
+    /// The last attempt did not arrive, and this is why.
+    Offline(NasFault),
+}
+
+/// Why a look at the NAS did not come back with a reading.
+///
+/// A closed list rather than the platform's error, because these four are the ones a person can *do*
+/// something about — and they want different things. One is a Wi-Fi switch, one is a NAS that is
+/// asleep, one is a password, and one is a host key that changed under the board's feet, which is the
+/// only one of the four that should stop somebody and make them think about why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NasFault {
+    /// The board is not on a network, so there is nothing to reach the NAS through.
+    NoNetwork,
+    /// The name did not resolve, or nothing answered on the port.
+    Unreachable,
+    /// The server answered, and refused the user or the password.
+    Authentication,
+    /// The host key the server offered is not the one this box remembers.
+    HostKeyChanged,
+    /// The server answered and the conversation could not be had — no shared key exchange or cipher,
+    /// or an answer that made no sense. The one fault that means "these two versions have drifted",
+    /// which is why it is separate from [`NasFault::Unreachable`].
+    Protocol,
+    /// This board cannot watch a NAS at all: its image has no SSH client in it. Not a fault of the
+    /// NAS, and not the same screen as one — nothing a person does to the NAS changes this, and it is
+    /// the answer while the device's backend is a placeholder. See `pomelo-hal-esp32`'s `nas`.
+    Unsupported,
+}
+
+/// The NAS's CPU, as the machine's own tools report it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NasCpu {
+    /// How busy, in `0.0..=100.0`, over the interval between the last two readings — which is why a
+    /// first reading has no usage to report and a `None` CPU rather than a zero.
+    pub usage_percent: f32,
+    /// The package temperature, when the machine can be asked for it.
+    pub temperature_c: Option<f32>,
+}
+
+/// What the NAS's network did in the last interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NasNetwork {
+    /// Bytes per second sent, over the interval between the last two readings.
+    pub sent_per_sec: u64,
+    /// The same, received.
+    pub received_per_sec: u64,
+}
+
+/// One disk in the NAS, as its dashboard's table lists them.
+///
+/// A `Vec` of these rather than fixed slots: a NAS is a machine somebody put drives into, and the
+/// count is theirs. The board draws as many rows as it is given and scrolls the rest.
+///
+/// Not `Eq`, and the only type in this file that is not: a disk has temperatures and a busy share on
+/// it, and those are floats.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NasDisk {
+    /// The kernel's name for it — `sdb`, `nvme0n1` — which is what every other number here is keyed
+    /// by, and the row's own identity on a table that has no other.
+    pub device: String,
+    /// The drive's model, when it can be read.
+    pub model: String,
+    /// How big it is, when the machine reports a size for it.
+    pub size_bytes: Option<u64>,
+    /// How hot it is, when the drive reports a temperature. `None` for the accounts that cannot see
+    /// the sensors — a NAS read over an unprivileged login is the usual case.
+    pub temperature_c: Option<f32>,
+    /// How much of the interval it spent with work in flight, in `0.0..=100.0` — what `iostat` calls
+    /// `%util`, and the column that tells a slow disk from a busy one.
+    pub busy_percent: f32,
+    /// Bytes per second read, over the interval.
+    pub read_per_sec: u64,
+    /// The same, written.
+    pub write_per_sec: u64,
+    /// What the NAS uses it for, in the NAS's own words — 系统安装, 存储空间 1. Empty when nothing
+    /// claims it, which is what an unpartitioned disk looks like.
+    pub purpose: String,
+}
+
+/// Everything the board knows about the NAS, from one look at it.
+///
+/// Every field but the status is optional, for the reason the board's own readings are: a NAS is a
+/// machine across a network, and a look at it can come back half-answered — the CPU and the memory
+/// but not the drive temperatures, because the account the board logs in as cannot read them. A page
+/// that hid everything behind the one field it did not get would spend its life empty.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NasReading {
+    /// How the last look went, and whether there has been one.
+    pub status: NasStatus,
+    /// When the last reading that arrived was taken. `None` until one has.
+    pub at: Option<Instant>,
+    /// How long the NAS has been up.
+    pub uptime: Option<Duration>,
+    pub cpu: Option<NasCpu>,
+    pub memory: Option<MemoryInfo>,
+    pub network: Option<NasNetwork>,
+    /// The disks, in the order the machine listed them.
+    pub disks: Vec<NasDisk>,
+    /// The host key the server offered, as the last look saw it.
+    ///
+    /// Here and not in the credentials file, because the two are written by different sides: the
+    /// *backend* is the one that talks to the server and can say what it answered, and the *app* is
+    /// the one that holds the file. So the first look reports a key, somebody decides it is the NAS,
+    /// and it goes in the file — after which a different key is [`NasFault::HostKeyChanged`] and not a
+    /// surprise. See `nas_credentials::NasCredentials::host_key`.
+    pub host_key: Option<String>,
+}
+
+impl NasReading {
+    /// How long ago the last reading was taken, or `None` if none has been.
+    ///
+    /// The question a monitor is actually asked — "is this number current" — and the reason a reading
+    /// carries the instant it was taken rather than an age: an age computed once and stored is wrong
+    /// by the time anybody reads it, and this is one subtraction.
+    pub fn age(&self) -> Option<Duration> {
+        self.at.map(|at| at.elapsed())
+    }
+}
+
 /// Metadata describing an audio stream.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AudioMeta {
@@ -495,12 +632,17 @@ impl Vec3 {
     }
 }
 
-/// The heap the firmware runs on: what there is, and what is left of it.
+/// A memory pool: what there is, and what is left of it.
 ///
 /// The two counts and not a percentage. A percentage is a share of *something*, and which something
 /// is the reader's question to answer: the same bytes are a comfortable margin on a chip with 8 MB
 /// of PSRAM beside them, and nearly nothing on one without. So the backend reports what it measured
 /// and [`MemoryInfo::used_percent`] is the arithmetic a caller does with it.
+///
+/// One type for two machines, because it is one question. The board's heap
+/// ([`SystemBackend::memory`][crate::traits::SystemBackend::memory]) and the NAS's RAM
+/// ([`NasReading::memory`]) are both "some of a whole", and the arithmetic between the two numbers is
+/// the same arithmetic — [`percent`] below, which is where it lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryInfo {
     /// Every byte the allocator was given.

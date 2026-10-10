@@ -1,0 +1,41 @@
+[package]
+name = "nas-monitor"
+version = "0.1.0"
+edition = "2021"
+description = "A standard iced program: the NAS on the network, and how it is doing"
+license = "GPL-3.0-only"
+
+# A member of the workspace at the root of this repository (`Cargo.toml`): that is what lets
+# `cargo test --workspace` run every app against one lock while each stays its own crate, with its own
+# `main.rs` and its own `desktop` feature.
+#
+# That is also why the firmware cannot list this as a *member* — the apps are a project of their own —
+# so `rust_main` depends on it by path. Patches and features are the root's business, and the
+# firmware's root is the one that has them.
+
+[dependencies]
+# The facade, like any other iced program. No `canvas`: the bars on this page are rectangles, and a
+# ring would have to come from the settings app's crate or move into the shared widgets first — see
+# the crate documentation.
+iced = { version = "0.14", default-features = false, features = ["thread-pool", "x11", "wayland"] }
+
+# The board, and through it the machine at the other end of the wire. This app's whole subject is a
+# reading — of a *different* computer — and the reading is the HAL's, not this crate's: `NasBackend`
+# is what knows how to ask, and what an SSH client is stays behind it.
+#
+# From GitHub by revision like its siblings: sibling repositories, and this project builds on its own.
+pomelo-hal = { git = "https://github.com/pomelos-on-sale/pomelo-hal.git", rev = "20eaa910f0a05cd68684d6aa868fd78457c51be9" }
+
+# The shared preferences: the theme, the language, and the font tier every measurement here comes out
+# of.
+pomelo-widgets = { git = "https://github.com/pomelos-on-sale/pomelo-widgets.git", rev = "f499da5cc17ef16ced6e6b1e62286bb020837a0b" }
+
+# The icons: the one in the header, and the four on the cards.
+pomelo-material-symbols = { git = "https://github.com/pomelos-on-sale/pomelo-material-symbols.git", rev = "7dc390fb1924dc69b375e5ae77806857f798cc58" }
+
+[features]
+# On by default, because a project of its own is a desktop program: iced needs *a* renderer, and this is
+# the one that needs no GPU. The board is the other way round — `rust_main` and `app-launcher` depend on
+# this crate with `default-features = false` and the platform layer turns `pomelo` on instead.
+desktop = ["iced/tiny-skia"]
+default = ["desktop"]

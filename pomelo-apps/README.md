@@ -8,7 +8,7 @@ same source is what the firmware image hosts on the panel — which layer answer
 graph root that builds it, not by the app.
 
 ```bash
-cargo run -p calculator            # any of the six, by name
+cargo run -p calculator            # any of them, by name
 cargo test --workspace             # every app's own suite
 ```
 
@@ -24,6 +24,9 @@ A window that feels slow is a *debug* build — iced's tiny-skia rasteriser is s
 | `music-player` | a playlist, a transport and a readout, over the HAL's audio backend |
 | `settings` | a list of sections, one of which is a live Wi-Fi page with a password prompt |
 | `terminal` | a shell over LittleFS, with its own on-screen keyboard |
+| `task-viewer` | the `htop` of this board: the scheduler's tasks, their stacks and the two memory pools |
+| `web-manager` | the LAN management server's switch and its address |
+| `nas-monitor` | another computer on the network — a NAS — as cards and a disk table |
 
 ## What it depends on
 
@@ -33,7 +36,7 @@ revision, because this repository has to build on its own:
 
 | crate | who needs it | why it is not in here |
 | :--- | :--- | :--- |
-| [`pomelo-hal`](https://github.com/pomelos-on-sale/pomelo-hal) | `app-launcher`, `music-player`, `settings` | the board interfaces and their desktop simulator — every app that talks to hardware talks to this |
+| [`pomelo-hal`](https://github.com/pomelos-on-sale/pomelo-hal) | `app-launcher`, `music-player`, `nas-monitor`, `settings`, `task-viewer` | the board interfaces and their desktop simulator — every app that talks to hardware talks to this |
 | [`pomelo-widgets`](https://github.com/pomelos-on-sale/pomelo-widgets) | `settings`, `terminal` | the widgets two or more apps draw: today the on-screen keyboard, so that a password prompt and a shell cannot drift apart |
 | [`pomelo-material-symbols`](https://github.com/pomelos-on-sale/pomelo-material-symbols) | `app-launcher` | one font of the whole Material Symbols catalogue, and one `const` per icon |
 

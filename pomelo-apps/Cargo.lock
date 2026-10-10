@@ -1773,6 +1773,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nas-monitor"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "pomelo-hal",
+ "pomelo-material-symbols",
+ "pomelo-widgets",
+]
+
+[[package]]
 name = "ndk"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

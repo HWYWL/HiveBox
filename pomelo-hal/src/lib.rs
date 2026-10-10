@@ -28,6 +28,7 @@ pub mod app_data;
 pub mod board;
 pub mod error;
 pub mod music_settings;
+pub mod nas_credentials;
 pub mod pcm;
 pub mod probe;
 pub mod traits;
@@ -47,14 +48,15 @@ pub mod sim;
 pub use board::Board;
 pub use error::HalError;
 pub use music_settings::MusicSettings;
+pub use nas_credentials::NasCredentials;
 pub use traits::{
-    AudioBackend, ImuBackend, InputBackend, MicBackend, PowerBackend, StorageBackend, SystemBackend,
-    WebBackend, WifiBackend,
+    AudioBackend, ImuBackend, InputBackend, MicBackend, NasBackend, PowerBackend, StorageBackend,
+    SystemBackend, WebBackend, WifiBackend,
 };
 pub use types::{
     ApInfo, AudioMeta, ChipInfo, FirmwareInfo, FlashLayout, FlashRegion, FlashRegionKind,
-    InputAction, MemoryInfo, ScanState, SystemEvent, TaskInfo, TaskState, Vec3, VolumeInfo,
-    VolumeKind, WebStatus, WifiState, WifiStatus,
+    InputAction, MemoryInfo, NasCpu, NasDisk, NasFault, NasNetwork, NasReading, NasStatus, ScanState,
+    SystemEvent, TaskInfo, TaskState, Vec3, VolumeInfo, VolumeKind, WebStatus, WifiState, WifiStatus,
 };
 pub use wifi_credentials::WifiCredentials;
 
@@ -63,14 +65,16 @@ pub mod prelude {
     pub use crate::board::Board;
     pub use crate::error::HalError;
     pub use crate::traits::{
-        AudioBackend, ImuBackend, InputBackend, MicBackend, PowerBackend, StorageBackend,
-        SystemBackend, WebBackend, WifiBackend,
+        AudioBackend, ImuBackend, InputBackend, MicBackend, NasBackend, PowerBackend,
+        StorageBackend, SystemBackend, WebBackend, WifiBackend,
     };
     pub use crate::types::{
         ApInfo, AudioMeta, ChipInfo, FirmwareInfo, FlashLayout, FlashRegion, FlashRegionKind,
-        InputAction, MemoryInfo, ScanState, SystemEvent, TaskInfo, TaskState, Vec3, VolumeInfo,
-        VolumeKind, WebStatus, WifiState, WifiStatus,
+        InputAction, MemoryInfo, NasCpu, NasDisk, NasFault, NasNetwork, NasReading, NasStatus,
+        ScanState, SystemEvent, TaskInfo, TaskState, Vec3, VolumeInfo, VolumeKind, WebStatus,
+        WifiState, WifiStatus,
     };
     pub use crate::music_settings::MusicSettings;
+    pub use crate::nas_credentials::NasCredentials;
     pub use crate::wifi_credentials::WifiCredentials;
 }

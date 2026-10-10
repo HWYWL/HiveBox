@@ -39,6 +39,7 @@ mod audio;
 mod imu;
 mod input;
 mod mic;
+mod nas;
 mod power;
 mod storage;
 mod system;
@@ -54,6 +55,7 @@ pub use audio::EspAudio;
 pub use imu::EspImu;
 pub use input::EspInput;
 pub use mic::EspMic;
+pub use nas::EspNas;
 pub use power::EspPower;
 pub use storage::EspStorage;
 pub use system::EspSystem;
@@ -76,6 +78,7 @@ pub fn board() -> Arc<Board> {
         Box::new(storage::EspStorage::new()),
         Box::new(web::EspWeb::new()),
         Box::new(system::EspSystem::new()),
+        Box::new(nas::EspNas::new()),
     ));
     event::start_event_pump(Arc::clone(&board));
     board
