@@ -15,7 +15,9 @@ pub const ROWS: usize = 2;
 /// The apps one page of the grid holds.
 pub const PER_PAGE: usize = COLUMNS * ROWS;
 
-use pomelo_widgets::{FontSizeTier, SystemPreferences};
+use std::time::Duration;
+
+use pomelo_widgets::{Curve, FontSizeTier, SystemPreferences};
 
 /// The font size tiers obtained from SystemPreferences: [18.0, 20.0, 24.0, 30.0].
 #[allow(dead_code)]
@@ -135,6 +137,15 @@ pub const EDGE_ZONE: f32 = 24.0;
 /// detector's own flick escape — 250 px/s — is what covers the quick flick that never travels this
 /// far.
 pub const EDGE_SWIPE: f32 = 96.0;
+
+/// How long a page takes to settle after the finger leaves, and on what curve.
+///
+/// 240 ms on `EaseOutCubic`, which is the shape every phone's page turn has: a decisive start and a
+/// stop that arrives rather than stops. The same 240 ms at a constant speed reads as slower than it
+/// is, and much longer than this turns a turn into a wait — a flick commits the turn on release, so
+/// what the finger is watching is only the settle.
+pub const PAGE_SETTLE: Duration = Duration::from_millis(240);
+pub const PAGE_CURVE: Curve = Curve::EaseOutCubic;
 
 /// The page dots: one per page, the page that is up lit.
 ///

@@ -35,18 +35,24 @@
 //! firmware injects the ESP32-S3 one, this project's `main.rs` the HAL's desktop simulator. Nothing
 //! here decides which hardware this is — the same argument as the music player's.
 //!
-//! # The grid is paged, and the pager is this file's
+//! # The grid is paged, and the page slides under the finger
 //!
 //! A page is [`PER_PAGE`] apps, one to a quadrant, so the five the catalogue has are two pages: four
-//! and one. A
-//! finger turning one is a **drag**: down on the grid, across, up. iced has no widget for that — a
+//! and one.
+//! A finger turning one is a **drag**: down on the grid, across, up. iced has no widget for that — a
 //! `button` captures the press it is given, and `Scrollable` scrolls for a wheel, a touch or its own
-//! scrollbar and for nothing else — so the gesture is read here.
+//! scrollbar and for nothing else — so the gesture is read by `pomelo-widgets`' pager.
 //!
-//! The drag decides a turn and the finger leaving *is* the turn: past halfway the page changes, and
-//! short of it nothing moved. There is no slide, for the same reason there is never a second page on
-//! screen: a page that slid would need two pages and the frames to move them, and a page change here
-//! is one frame — the one after the release.
+//! While the finger is down the pages follow it: the next page comes in as the current one leaves,
+//! both drawn in the same frame, and a drag past the first or the last page meets a resistance
+//! instead of empty space — the edge says there is nothing beyond it. The finger leaving *is* the
+//! decision: past halfway, or a flick faster than a slow drag, commits the turn and the page settles
+//! onto it over [`style::PAGE_SETTLE`]; short of that it settles back where it was.
+//!
+//! The pager owns all of that, including the frames it needs while settling (one `request_redraw`
+//! per step, which `Host` turns into the next frame). What the launcher owns is the page it is on:
+//! the index it hands the pager, and the [`Message::PageChanged`] it is told about when a turn
+//! commits.
 //!
 //! # The task switcher is a layer, and the top edge is where it comes from
 //!
@@ -444,10 +450,8 @@ impl Launcher {
 
     /// The screen showing the grid.
     ///
-    /// The screen showing the grid.
-    ///
-    /// Paged with [`pomelo_widgets::pager`], providing horizontal swipe gestures with
-    /// interactive previews and threshold snapping.
+    /// Paged with [`pomelo_widgets::pager`]: the pages follow the finger while it is down, and settle
+    /// onto — or back from — the turn it decided when it leaves. See the module docs.
     fn launcher(&self) -> Element<'_, Message> {
         let pages: Vec<Element<'_, Message>> =
             (0..self.pages()).map(|p| self.page(p)).collect();
@@ -456,6 +460,8 @@ impl Launcher {
             .current_page(self.page)
             .swipe_commit(style::SWIPE_COMMIT)
             .touch_slop(style::SLOP)
+            .anim_duration(style::PAGE_SETTLE)
+            .curve(style::PAGE_CURVE)
             .on_change(Message::PageChanged);
 
         let screen = column![
