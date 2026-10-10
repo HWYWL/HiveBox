@@ -1,6 +1,6 @@
 # 推一个 `v*` 的 tag，就出一版固件：编译 → 生成合并镜像 → 挂到 Releases。
 #
-# 也可以手动触发（Actions → 固件发布 → Run workflow）：只产出构建产物，不发布会话
+# 也可以手动触发（Actions → 固件发布 → Run workflow）：只产出构建产物，不发布
 # —— 手动跑没有 tag，就没有版本号可核对，也没有 Release 可挂。
 #
 # 工具链版本是钉住的，不跟着「最新」走：`components/rust_main/CMakeLists.txt` 里写的是
@@ -72,7 +72,9 @@ jobs:
             ~/.rustup/toolchains/esp198
             ~/.rustup/settings.toml
             ~/export-esp.sh
-          key: espup-${{ env.XTENSA_TOOLCHAIN }}-${{ env.XTENSA_TOOLCHAIN_VERSION }}-${{ runner.os }}-v1
+          # v2：v1 里缓存的是没加 `--std` 时装的那份（多带一套 GCC）。升一版让它按现在的
+          # 装法重下一次，免得哪天 PATH 顺序被改回去时那份 GCC 又冒出来顶掉 ESP-IDF 的编译器。
+          key: espup-${{ env.XTENSA_TOOLCHAIN }}-${{ env.XTENSA_TOOLCHAIN_VERSION }}-${{ runner.os }}-v2
 
       # 注意这里没有 `| head` 这类会提前退出管道的写法：`set -o pipefail` 下，
       # 提前退出的读者会让写者吃 SIGPIPE，整步以 141 失败（第一次跑就栽在这儿）。
