@@ -14,42 +14,97 @@
 - **可移植性**：应用与 UI 框架与硬件解耦，移植仅需适配屏幕刷新、触摸输入及 `pomelo-hal` 外设 Trait。
 - **产品官方文档**：[微雪 ESP32-S3-Touch-AMOLED-2.16 文档](https://docs.waveshare.net/ESP32-S3-Touch-AMOLED-2.16)
 
+### 基于 pomelo-ui 深度定制
+
+本项目是 [**pomelo-ui**](https://github.com/pomelos-on-sale/pomelo-ui) 的深度定制版，两者的关系写在这里，以免读的人以为这套界面是从零写的：
+
+- **上游 [pomelo-ui](https://github.com/pomelos-on-sale/pomelo-ui) 提供框架**：`ui-framework/` 下的 iced 移植、渲染后端（`iced-pomelo-gfx`）、软件光栅器（`pomelo-gfx`）、字体资产与烘焙工具（`pomelo-font`）、图标库（`pomelo-material-symbols`），以及它们各自的设计与文档。
+- **本项目在框架之上做定制**：板级固件与板级驱动（`pomelo-firmware/`）、外设抽象与模拟后端（`pomelo-hal/`）、应用（`pomelo-apps/`）、应用共享控件（`pomelo-widgets/`），以及界面本身 —— 具体每一条见下方「版本时间线」。
+- **上游的名字与目录都保留**：`ui-framework/` 的结构、各组件的 `README.md` 与 `LICENSE`、`pomelo-*` 的命名照旧，便于与上游逐项对照。上游组件按需做最小的修改（例如字体子集补字），这类改动同样在这里可见。
+
+---
+
+## 📷 界面预览
+
+下面都是**真机屏幕**（480×480 AMOLED）的实拍，不是设计稿：
+
+| 桌面 | 设置 · 读数面板 | 设置 · 主列表 | 设置 · 系统信息 |
+| :---: | :---: | :---: | :---: |
+| ![桌面](docs/images/desktop.png) | ![读数面板](docs/images/settings-summary.png) | ![设置列表](docs/images/settings-list.png) | ![系统信息](docs/images/settings-about.png) |
+| 状态栏、四个应用与分页点 | 三个环 + 芯片与固件卡，页脚是编译/系统时间与已启动 | 无线网络、内存、存储、电池、主题、日期与时间 | 规格与读数分开：操作系统一栏说明来源，固件版本是镜像自报 |
+
+| 音乐播放器 | 网页管理 | 终端 | 计算器 |
+| :---: | :---: | :---: | :---: |
+| ![音乐播放器](docs/images/music-player.png) | ![网页管理](docs/images/web-manager.png) | ![终端](docs/images/terminal.png) | ![计算器](docs/images/calculator.png) |
+| 读 TF 卡里的音乐，列表点击播放，进度与音量可直接拖动 | 板子自己起 HTTP 服务，同一网络里用浏览器打开 | 触屏键盘输入，板内命令行 | 用 iced 自带控件写的计算器 |
+
 ---
 
 ## 🚀 快速上手
 
-如需克隆包含所有子模块的完整工程：
+### 1. 拿到代码
 
 ```bash
-git clone --recurse-submodules https://github.com/pomelos-on-sale/pomelo-ui.git
+git clone https://github.com/HWYWL/HiveBox.git
+cd HiveBox
 ```
 
-### 1. 在 PC 上运行应用
+上游框架组件（`ui-framework/`）在本仓库里是普通目录，会跟着主仓库一起下来，不需要 `--recurse-submodules`。上游项目本身见 [pomelo-ui](https://github.com/pomelos-on-sale/pomelo-ui)。
+
+### 2. 在 PC 上跑起来（不需要板子）
 
 ```bash
-cd pomelo-apps 
-cargo run -p calculator
-
-cd pomelo-apps 
-cargo run -p app-launcher
+cd pomelo-apps
+cargo run -p app-launcher   # 整机界面：桌面、状态栏、应用切换
+cargo run -p calculator     # 单个应用
 ```
 
-Q 键为返回键，W 键为退出键。
+Q 键为返回键，W 键为退出键。读数来自桌面模拟后端（`pomelo-hal/src/sim/`），所以不接板子也能看到完整界面。
 
-### 2. 烧录至硬件设备
+### 3. 刷到板子上
 
-- 安装 **ESP-IDF** (v6.1 或兼容版本)
-- 安装 **Rust Xtensa 工具链** (`espup`)
-- 将开发板用 USB 连接至电脑
+板子：**微雪 ESP32-S3-Touch-AMOLED-2.16**。
+
+#### 3.1 直接刷现成固件（推荐：不用装 ESP-IDF 和 Rust 工具链）
+
+到 [**Releases**](https://github.com/HWYWL/HiveBox/releases/latest) 下载 `hivebox-firmware-*.bin`，用 USB 连上板子，然后：
+
+```bash
+pip install esptool
+esptool --chip esp32s3 --port COM3 --baud 921600 write_flash 0x0 hivebox-firmware-<版本>.bin
+```
+
+- **烧到 `0x0`**：这个 `.bin` 是**合并镜像**（bootloader + 分区表 + 应用），一条命令写完，不用管偏移。
+- **不会抹掉已有数据**：镜像只覆盖 `0x0` 到约 `0xAC0000`，而 Wi-Fi 凭据与音乐设置存在 `0xC10000` 的数据分区上，刷完还在。想回到出厂状态，先 `esptool --chip esp32s3 --port COM3 erase_flash`，再刷一次。
+- `--port` 换成你自己的串口：Windows 是 `COM3` 这类（设备管理器 → 端口），Linux 是 `/dev/ttyACM0`，macOS 是 `/dev/tty.usbmodem*`。
+- 正常情况下 esptool 会用 DTR/RTS 自动让板子进下载模式；连不上时按住 **BOOT** 键再插 USB。
+
+#### 3.2 从源码编译烧录（改代码时用）
+
+先装工具链：
+
+- **ESP-IDF v6.1**（或兼容版本）
+- **Rust Xtensa 工具链**：`cargo install espup && espup install`
+
+然后是：
 
 ```bash
 cd pomelo-firmware/firmware
 
-# 编译并烧录固件
-./flash.sh
+./flash.sh          # Linux/macOS：默认串口 /dev/ttyACM0，结尾会进 monitor（Ctrl+] 退出）
+./flash.sh COM3     # Windows：把串口当第一个参数传进去
 ```
 
-按下 PWR 键开机。开机后进入桌面，左右滑动翻页，点击应用图标打开应用，左按钮最小化应用，右按钮退出应用，中键长按关机。  
+`flash.sh` 在找不到 `idf.py` 时会去 source `$IDF_PATH`（默认 `~/.espressif/v6.1/esp-idf`）的 export 脚本；ESP-IDF 装在别处就先 `export IDF_PATH=...`。不想用脚本也可以直接：
+
+```bash
+idf.py -p COM3 flash monitor   # 编译 + 烧录 + 串口日志
+idf.py -p COM3 app-flash       # 只写应用区（0x10000），日常改代码够用
+```
+
+### 4. 第一次开机
+
+按下 **PWR** 键开机。开机后进入桌面，左右滑动翻页，点击应用图标打开应用，左按钮最小化应用，右按钮退出应用，中键长按关机。
 
 ---
 
@@ -86,7 +141,45 @@ cd pomelo-firmware/firmware
 
 ---
 
+## 🕒 版本时间线
+
+本项目按日期记录，每次对外发布会在 [**Releases**](https://github.com/HWYWL/HiveBox/releases) 里打一个 `v0.1.0-<日期>` 的 tag，并附上可直接烧录的固件（刷法见「快速上手」3.1）。每条是从 `git log` 里挑出来的一句话——「改了哪一页、哪条读数」这类细节以提交信息为准，这里只留对人有用的一行。新的一天加在最上面。
+
+> 维护方式：改完一批东西，在最上面那一天的列表里加一行；跨天的改动另起一个日期。写「做了什么、对用的人意味着什么」，不写「改了哪个文件」。
+
+### 2026-10-10
+
+- **电池改为自己画**：电量数字写进电池形状里面，不再跟在数字后面的那个 `%`；充电改用一支闪电，不再借绿色电池表示「正在充电」。
+- **顶边下拉的后台面板**：从屏幕顶边往下拉，列出正在运行的应用（最近用过的排在前面），每张卡右侧一个 ⊗ 可以单个结束，标题栏右侧可以一次全部清除。它是盖在桌面上的一层，收起时不会结束任何应用。
+- **固件版本带上编译时间**：读数面板的页脚多了「编译时间」，和「系统时间」「已启动」排在一起——三条都来自镜像自己，从编译到开机到现在。
+- **系统信息的操作系统行**改为一句话说明来源：基于 pomelo-ui 深度定制；镜像自己的名字与版本移到了同一页的「固件版本」行。
+- **网页管理页的「浏」不再是方框**：字体子集补入该字并重烘字形表，页面上「启动后即可在浏览器中打开」整句可以正常显示。
+- **首次对外发布**：README 换成自己的仓库地址、补上真机预览图与「下载后怎么刷」的说明；固件以合并镜像的形式挂到 Releases，一条 `esptool` 命令即可刷进板子。
+
+### 2026-10-09
+
+- 设置页顶部新增**系统信息读数**：内存占用、芯片温度、存储占用三个环，芯片型号与固件版本两张卡，以及时间与运行时长。
+- 系统信息页的固件行改为读**镜像自报**的名字与版本，不再写字面量（此前写的是 `Pomelo OS v0.2.0 (Build 2026.09)`，一个并不存在的镜像）。
+- 桌面只留五个应用，删掉示例应用并重排两页。
+- 音乐播放器：进度条与音量条可以直接拖动；列表点击才播放；音量与 Wi-Fi 一样记住。
+- 网页管理端：板级 HTTP 服务（网络自检、遥控触控、日志、试听喇叭）与配套的 `web-manager` 应用（文件/网络/设备三页签）。
+- 列表轻触不再被误判为滚动（新增 18px 触控阈值），行内按钮恢复可点。
+- 字体子集补入「渲」，设置页「渲染器」不再画成方框；修复画布：开放路径不再被强行闭合（圆环曾被画成楔形）。
+
+### 2026-10-08
+
+- **起点**：以上游 [pomelo-ui](https://github.com/pomelos-on-sale/pomelo-ui) 提供的框架为基础，导入完整的 Rust ESP32-S3 UI 工程（`ui-framework/` 保留上游全部组件）。
+- Wi-Fi 凭据改为经 C 侧真正落盘，无线开机默认开启，烧录不再覆盖数据分区。
+- 手机式边缘手势：底部上滑回桌面，左右边缘滑动返回上一页。
+- 设置页新增重启；电池页温度改为真实 PMIC 读数。
+- 存储页展示整块 16 MB 闪存与分区；修复按钮点击后的残留高亮。
+
+---
+
 ## 🎨 iced 框架移植（`ui-framework/`）
+
+> 这一层来自上游 **pomelo-ui**，本项目按需做最小的改动（例如字体子集的补字）。改动同样记录在上面时间线的日期里。
+
 
 - **`ui-framework/iced`**：针对嵌入式环境定制的 iced 分支，移除了 Xtensa 架构不支持的 64 位原子操作与 `mmap` 系统依赖。
 - **`ui-framework/iced-pomelo-winit`**（包名 `iced_winit`）：嵌入式平台适配层，负责事件循环派发、RGB565 帧缓冲呈现、脏区追踪以及字体加载。
