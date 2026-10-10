@@ -7,22 +7,30 @@
 use std::time::Duration;
 
 use pomelo_hal::TaskState;
+use pomelo_widgets::preferences::Language;
 
 /// What a task is doing, in one character.
 ///
 /// One character because a column of states is read *across*: 运 and 阻 line up down the page the way
 /// `R` and `S` do, where 运行中 and 阻塞 would make one column as wide as a sentence.
 ///
-/// The characters are the four states this scheduler has, named the way Chinese names them — 运行,
-/// 阻塞, 挂起, 退出 — and they are exactly the four `htop` prints as `R`, `S`, `T` and `Z`, in the same
-/// order and for the same reason. That is the mapping worth keeping in mind when reading the column:
-/// a task waiting on a delay or a queue is 阻, which is what a `ps` calls `S`.
-pub fn state_char(state: TaskState) -> char {
-    match state {
-        TaskState::Running => '运',
-        TaskState::Blocked => '阻',
-        TaskState::Suspended => '挂',
-        TaskState::Deleted => '退',
+/// Which character it is depends on the language the system is set to, and the two sets name the same
+/// four states: 运 / 阻 / 挂 / 退 are 运行, 阻塞, 挂起 and 退出, and `R` / `S` / `T` / `Z` are the letters
+/// `htop` prints for exactly those four, in the same order. A reader of either language gets a column
+/// they can run their eye down; a page that fixed on one of the two would be a page half in the other.
+///
+/// The mapping worth keeping in mind, in either language: a task waiting on a delay or a queue is 阻 —
+/// which is what a `ps` prints as `S`, and what most of a settled board's rows are.
+pub fn state_char(state: TaskState, language: Language) -> char {
+    match (state, language) {
+        (TaskState::Running, Language::Chinese) => '运',
+        (TaskState::Blocked, Language::Chinese) => '阻',
+        (TaskState::Suspended, Language::Chinese) => '挂',
+        (TaskState::Deleted, Language::Chinese) => '退',
+        (TaskState::Running, Language::English) => 'R',
+        (TaskState::Blocked, Language::English) => 'S',
+        (TaskState::Suspended, Language::English) => 'T',
+        (TaskState::Deleted, Language::English) => 'Z',
     }
 }
 
@@ -55,12 +63,14 @@ pub fn clock_of(uptime: Duration) -> String {
 mod tests {
     use super::*;
 
-    /// Every state has one character, and no two states share one.
+    /// Every state has one character in each language, and no two states share one.
     ///
     /// The sharing check is the one that matters: a column of states that spelled two of them the same
-    /// way would be a column that could not be read at all, and nothing else on the page would say so.
+    /// way would be a column that could not be read at all, and nothing else on the page would say so —
+    /// and it is checked per language, because two sets that are each right can still be one set with a
+    /// hole in it.
     #[test]
-    fn every_state_has_its_own_character() {
+    fn every_state_has_its_own_character_in_each_language() {
         let states = [
             TaskState::Running,
             TaskState::Blocked,
@@ -68,15 +78,33 @@ mod tests {
             TaskState::Deleted,
         ];
 
-        assert_eq!(state_char(states[0]), '运');
-        assert_eq!(state_char(states[1]), '阻');
-        assert_eq!(state_char(states[2]), '挂');
-        assert_eq!(state_char(states[3]), '退');
+        for language in [Language::Chinese, Language::English] {
+            let mut seen: Vec<char> = states
+                .iter()
+                .copied()
+                .map(|state| state_char(state, language))
+                .collect();
+            seen.sort_unstable();
+            seen.dedup();
 
-        let mut seen: Vec<char> = states.iter().copied().map(state_char).collect();
-        seen.sort_unstable();
-        seen.dedup();
-        assert_eq!(seen.len(), states.len(), "four states, four characters");
+            assert_eq!(
+                seen.len(),
+                states.len(),
+                "{language:?}: four states, four characters"
+            );
+        }
+
+        // And the two sets are the ones a reader of each language expects: the names of the states in
+        // Chinese, and the letters `htop` prints for the same four.
+        assert_eq!(state_char(TaskState::Running, Language::Chinese), '运');
+        assert_eq!(state_char(TaskState::Blocked, Language::Chinese), '阻');
+        assert_eq!(state_char(TaskState::Suspended, Language::Chinese), '挂');
+        assert_eq!(state_char(TaskState::Deleted, Language::Chinese), '退');
+
+        assert_eq!(state_char(TaskState::Running, Language::English), 'R');
+        assert_eq!(state_char(TaskState::Blocked, Language::English), 'S');
+        assert_eq!(state_char(TaskState::Suspended, Language::English), 'T');
+        assert_eq!(state_char(TaskState::Deleted, Language::English), 'Z');
     }
 
     /// A stack is spelled so that the interesting end of the range stays exact.

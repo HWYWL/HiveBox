@@ -1,7 +1,8 @@
 //! The web manager, built from iced widgets — **a standard iced program**.
 //!
-//! One switch and one address. The switch turns on [`Board::web`][pomelo_hal::Board::web] — the
-//! board's HTTP management server — and the address is where a browser on the same network finds it.
+//! One switch and one address. The switch turns the board's HTTP management server on and off
+//! ([`Board::web`][pomelo_hal::Board::web]), and the address is where a browser on the same network
+//! finds it.
 //!
 //! # The server is the board's; this is the panel over it
 //!
@@ -15,13 +16,20 @@
 //! desktop simulator reports the same [`WebStatus`] the board does, so the layout, the address rule
 //! and the tests around them are the same code whether a window or a panel is drawing it.
 //!
-//! # There is no password, and the app says so before it starts the server
+//! # There is no password, and the server is up from boot
 //!
-//! Anyone on the same network can read and write the box's files and change its network. The server
-//! is therefore **off until somebody asks for it**, and the note under the switch says why a person
-//! might not want to ask. Starting it on the app's own initiative — the moment the tile is tapped —
-//! would make the decision for whoever holds the box, which is the one thing this page exists to
-//! avoid.
+//! Anyone on the same network can read and write the box's files and change its network. That is a
+//! decision about the *box* rather than about a screen, so it is made where the box boots: the boot
+//! sequence starts the server, and `rust_main` is where the decision and its consequences are written
+//! down. This app is the switch over it — it reads the state it finds, turns the server on and off, and
+//! keeps the note that says what turning it on means.
+//!
+//! Which is a change from how this page was first built, and the change is worth naming: the app used to
+//! be the only thing that could start the server, on the argument that a page reachable from the whole
+//! network should not come up without somebody asking for it. The argument was sound and the conclusion
+//! was wrong for what the page is *for* — reaching the box from another device, which a server that waits
+//! to be switched on at the panel defeats. The passwordless part did not change; only where the decision
+//! is made, and who can walk up to the box to undo it (the switch, here).
 //!
 //! # The address is a rule, not a preference
 //!

@@ -20,22 +20,28 @@
 //! run-time-stats clock the port does not keep, and the memory a task holds is not something a
 //! FreeRTOS task records.
 //!
-//! # Why the page looks like `htop`, and speaks this system's language
+//! # Why the page looks like `htop`, and speaks this interface's language
 //!
 //! Because that is the whole request, and because a shape someone already knows is worth more than a
-//! nicer one they have to learn: meters at the top, a table under them, a footnote at the bottom. The
-//! *shape* is `htop`'s, down to the row of column heads above the rows.
+//! nicer one they have to learn: meters at the top, a table under them. The *shape* is `htop`'s, down to
+//! the row of column heads above the rows.
 //!
-//! The words in it are this interface's, and that is the part the first version got wrong: it copied
-//! `htop`'s English heads — `TASK S PRI FREE CORE` — arguing that they are the names of things in a
-//! scheduler. They are that, but they are also *labels on a screen*, and every other label on this panel
-//! is in the language the system is set to; a table that switched languages halfway down the page read
-//! as somebody else's. So the heads are 任务 / 状态 / 优先级 / 空闲栈 / 核心, and the state column is one
-//! character of the same language — the same four states `htop` prints as `R`, `S`, `T` and `Z`, for
-//! anyone who knows that table by heart. See [`format::state_char`].
+//! Every word on it follows the language the system is set to: the heads (任务 / 状态 / 优先级 / 空闲栈 /
+//! 核心, or `TASK S PRI FREE CORE`), the meter labels (内存 / 外部内存, or `MEM` / `PSRAM`), the header's
+//! summary, and the state column, which is one character of whichever language is up — 运 / 阻 / 挂 / 退,
+//! or the four letters `htop` prints for the same four states, `R` / `S` / `T` / `Z`. See [`columns`]
+//! and [`format::state_char`].
 //!
-//! One label is still Latin, and should be: `PSRAM` is the name of a part. A translated part number is a
-//! word nobody can look up, which is the same rule the settings app's chip card follows with `ESP32-S3`.
+//! The first version of this page got that wrong, and paid for it twice. It copied `htop`'s English
+//! heads whatever the system was set to, arguing that they are the names of things in a scheduler. They
+//! are that, but they are also labels on a screen, and a table that switched languages halfway down the
+//! page read as somebody else's — so the heads became the system's, and *then* the widths became a
+//! language question: 优先级 needs three full-width characters where `PRI` needs three narrow ones, and a
+//! column has to fit whichever of the two is up.
+//!
+//! 外部内存 and not the acronym, which is where this page parts company with the settings app: that app's
+//! memory page is read by someone looking the part up, and this page by someone glancing at a panel.
+//! Both are right for where they are.
 //!
 //! # Readings, and the clock they arrive on
 //!
@@ -56,7 +62,7 @@ use std::time::{Duration, Instant};
 
 use iced::theme::Palette;
 use iced::widget::{column, container, row, scrollable, text, Column, Row, Space};
-use iced::{Alignment, Color, Element, Length, Subscription, Theme};
+use iced::{Alignment, Color, Element, Length, Padding, Subscription, Theme};
 
 use pomelo_hal::{Board, MemoryInfo, TaskInfo, TaskState};
 use pomelo_material_symbols::Icon;
@@ -216,7 +222,13 @@ impl TaskViewer {
         iced::window::frames().map(Message::Tick)
     }
 
-    /// The page: a header, the meters, the table, and a line under it.
+    /// The page: a header, the meters and the table.
+    ///
+    /// No line under the table, and its absence is deliberate rather than an omission: it used to carry
+    /// the refresh interval and what the `*` marks, which is one line of a screen spent telling a reader
+    /// something they can see (the table fills itself in every second) or ask about (the marks are on the
+    /// row of the task drawing the page). What the table's own columns cannot say is worth a row; a
+    /// footnote is not.
     pub fn view(&self) -> Element<'_, Message> {
         let theme = self.preferences.theme;
         let sizes = style::Sizes::of(self.preferences.font_tier);
@@ -227,7 +239,6 @@ impl TaskViewer {
             self.header(sizes, ink, muted),
             self.meters(sizes, theme, ink, muted),
             self.table(sizes, theme, ink, muted),
-            self.footer(sizes, muted),
         ]
         .spacing(style::GAP)
         .padding(style::MARGIN)
@@ -244,8 +255,6 @@ impl TaskViewer {
             .into()
     }
 
-    /// The line at the top: the icon, how many tasks there are, and how long the board has been up.
-    ///
     /// How many of the last reading's tasks are making progress.
     ///
     /// The one number in a task list worth having at a glance, which is why `htop` puts it in its
@@ -259,6 +268,9 @@ impl TaskViewer {
             .count()
     }
 
+    /// The line at the top: the icon, how many tasks there are, how many of them are moving, and how long
+    /// the board has been up.
+    ///
     /// A heading and not a title, because this page has no name of its own to draw — the desktop tiles
     /// it with a name, and a second copy of it here would be a name written down twice. What a reader
     /// wants at the top of a task list is the size of it, and how much of it is moving.
@@ -296,6 +308,9 @@ impl TaskViewer {
     /// row of bars, the whole point is that a reader knows how to read one, and the two pools here are
     /// exactly the two questions worth asking of this board — the internal heap this program runs out
     /// of, and the external RAM it goes and gets when it wants a framebuffer.
+    ///
+    /// Their labels follow the interface's language, like every other word on the page — the same rule
+    /// [`columns`] applies to the table's heads.
     fn meters(
         &self,
         sizes: style::Sizes,
@@ -303,12 +318,19 @@ impl TaskViewer {
         ink: Color,
         muted: Color,
     ) -> Element<'_, Message> {
+        let (heap, external) = match self.preferences.language {
+            Language::Chinese => ("内存", "外部内存"),
+            Language::English => ("MEM", "PSRAM"),
+        };
+
         Column::with_children(vec![
-            meter("内存", self.reading.memory, sizes, theme, ink, muted),
-            // `PSRAM` stays as it is, and it is the one label here that should: it is the name of a
-            // part, like `ESP32-S3` on the settings app's chip card, and a translation of a part number
-            // is a word nobody can look up.
-            meter("PSRAM", self.reading.psram, sizes, theme, ink, muted),
+            meter(heap, self.reading.memory, sizes, theme, ink, muted),
+            // The external pool written out rather than by its acronym, which is what the label column
+            // was widened for: this page is read on a panel by whoever is holding the box, and 外部内存
+            // says which of the two pools it is without asking them to know what `PSRAM` stands for. The
+            // part's own spelling is where a reader goes looking for it — `Octal-SPI` on the settings
+            // app's memory page.
+            meter(external, self.reading.psram, sizes, theme, ink, muted),
         ])
         .spacing(style::ROW_GAP)
         .width(Length::Fill)
@@ -326,27 +348,26 @@ impl TaskViewer {
         ink: Color,
         muted: Color,
     ) -> Element<'_, Message> {
+        let language = self.preferences.language;
         let mut rows = Column::new()
             .spacing(style::ROW_GAP)
             .width(Length::Fill);
 
-        rows = rows.push(head_row(sizes, muted));
+        rows = rows.push(head_row(sizes, language, muted));
 
         for task in &self.reading.tasks {
-            rows = rows.push(task_row(task, sizes, theme, ink, muted));
+            rows = rows.push(task_row(task, sizes, language, theme, ink, muted));
         }
 
-        scrollable(rows).height(Length::Fill).into()
-    }
-
-    /// The line at the bottom: what the table cannot say about itself.
-    fn footer(&self, sizes: style::Sizes, muted: Color) -> Element<'_, Message> {
-        let hint = match self.preferences.language {
-            Language::Chinese => "每秒刷新 · * 是正在画这张表的任务",
-            Language::English => "every second · * is the task drawing this",
-        };
-
-        text(hint).size(sizes.small).color(muted).into()
+        // The scrollbar's width is kept clear rather than drawn over, and it is kept clear *here* so that
+        // the heads and the rows are narrowed together: iced paints the bar along the content's right
+        // edge, which is where the last column ends — and was where 核心's head lost its second half.
+        scrollable(container(rows).padding(Padding {
+            right: style::SCROLLBAR,
+            ..Padding::ZERO
+        }))
+        .height(Length::Fill)
+        .into()
     }
 }
 
@@ -444,39 +465,51 @@ struct Field {
     align: Alignment,
 }
 
-/// The table's columns, in order.
+/// The table's columns, in the language the system is set to.
 ///
 /// Five, in the order a reader asks their questions: *what* is it, *is it making progress*, *who runs
-/// next*, *how much stack has it left at its worst*, *where*. The widths are the widest thing that goes
-/// in each column plus the air a column of digits wants; what sets the floor is the head, which is two
-/// or three characters of the system's language.
-const COLUMNS: [Field; 5] = [
-    Field {
-        head: "任务",
-        width: None,
-        align: Alignment::Start,
-    },
-    Field {
-        head: "状态",
-        width: Some(1.9),
-        align: Alignment::Center,
-    },
-    Field {
-        head: "优先级",
-        width: Some(3.5),
-        align: Alignment::End,
-    },
-    Field {
-        head: "空闲栈",
-        width: Some(3.0),
-        align: Alignment::End,
-    },
-    Field {
-        head: "核心",
-        width: Some(1.9),
-        align: Alignment::End,
-    },
-];
+/// next*, *how much stack has it left at its worst*, *where*. A function rather than a constant because
+/// the heads are *text*: the shape of the table is the same in both languages and the words in it are
+/// the reader's. The widths are the same for both, sized for the wider of the two heads.
+///
+/// What sets a column's floor is its head, whose width is a fact about the language rather than about
+/// the state of the board: three full-width characters for 优先级 and 空闲栈, and `PRI` / `FREE` in four
+/// narrow Latin glyphs — which is why these are chosen against the Chinese heads (see the test that
+/// holds both to their column) and why `S` and not `STATE` is the state column's English head.
+fn columns(language: Language) -> [Field; 5] {
+    let (task, state, priority, stack, core) = match language {
+        Language::Chinese => ("任务", "状态", "优先级", "空闲栈", "核心"),
+        Language::English => ("TASK", "S", "PRI", "FREE", "CORE"),
+    };
+
+    [
+        Field {
+            head: task,
+            width: None,
+            align: Alignment::Start,
+        },
+        Field {
+            head: state,
+            width: Some(1.9),
+            align: Alignment::Center,
+        },
+        Field {
+            head: priority,
+            width: Some(3.2),
+            align: Alignment::End,
+        },
+        Field {
+            head: stack,
+            width: Some(3.2),
+            align: Alignment::End,
+        },
+        Field {
+            head: core,
+            width: Some(2.6),
+            align: Alignment::End,
+        },
+    ]
+}
 
 /// One row of the table: its five columns, with these values in them.
 ///
@@ -485,11 +518,14 @@ const COLUMNS: [Field; 5] = [
 /// Nothing else in this file decides a column's width or which end it lines up on.
 fn table_row(
     sizes: style::Sizes,
+    language: Language,
     values: [String; 5],
     colors: [Color; 5],
     size: f32,
 ) -> Element<'static, Message> {
-    let cells = COLUMNS
+    let columns = columns(language);
+
+    let cells = columns
         .iter()
         .zip(values)
         .zip(colors)
@@ -511,10 +547,11 @@ fn table_row(
 }
 
 /// The column heads: the same five columns as the rows under them, with the heads' own words in them.
-fn head_row(sizes: style::Sizes, muted: Color) -> Element<'static, Message> {
+fn head_row(sizes: style::Sizes, language: Language, muted: Color) -> Element<'static, Message> {
     table_row(
         sizes,
-        COLUMNS.map(|column| column.head.to_string()),
+        language,
+        columns(language).map(|column| column.head.to_string()),
         [muted; 5],
         sizes.small,
     )
@@ -524,11 +561,12 @@ fn head_row(sizes: style::Sizes, muted: Color) -> Element<'static, Message> {
 ///
 /// The numbers are right-aligned and the names are not, which is what makes a column of them readable
 /// without a monospaced face: this panel has one font, and digits of different widths line up on their
-/// last character rather than their first. Which end each column's text sits on lives in [`COLUMNS`],
+/// last character rather than their first. Which end each column's text sits on lives in [`columns`],
 /// because the head above it has to sit on the same one.
 fn task_row(
     task: &TaskInfo,
     sizes: style::Sizes,
+    language: Language,
     theme: ThemeMode,
     ink: Color,
     muted: Color,
@@ -544,9 +582,10 @@ fn task_row(
 
     table_row(
         sizes,
+        language,
         [
             name,
-            format::state_char(task.state).to_string(),
+            format::state_char(task.state, language).to_string(),
             task.priority.to_string(),
             format::stack_of(task.stack_free_bytes),
             core,
@@ -632,16 +671,29 @@ mod tests {
         );
     }
 
-    /// The table's columns add up at every font tier, and every head fits the column it names.
+    /// The table and the meters fit the panel at every font tier, in both languages, with room kept
+    /// clear on the right for the list's scrollbar.
     ///
-    /// The first version of this page failed at exactly this and nothing said so: the head row and the
-    /// value rows were laid out separately, and one head cell was given no width at all — so the heads
-    /// packed themselves against the left edge while the rows' numbers sat against the right. Both are
-    /// built by [`table_row`] now, so that drift cannot come back; what is left to check is the
-    /// arithmetic: that the fixed columns leave room for the names, and that a head fits over its own.
+    /// This is the test the page needed and did not have. Two things went wrong without it: the head row
+    /// was laid out apart from the rows under it (see [`table_row`], now the only thing either is built
+    /// by), and the columns were checked against the panel's *full* width — while iced paints the
+    /// scrollbar along the content's right edge, so the last column arrived on the panel with its head
+    /// cut in half. Both are arithmetic, which is what makes them worth checking by hand.
     #[test]
-    fn the_columns_fit_the_panel_and_their_heads_fit_in_them() {
+    fn the_table_and_the_meters_fit_the_panel() {
         use pomelo_widgets::preferences::FontSizeTier;
+
+        /// How wide `text` is, as a column lays it out.
+        ///
+        /// An estimate, and a deliberately pessimistic one for what it is used on: a full-width character
+        /// of this interface is one em, a capital or a digit measurably under two thirds of one. An
+        /// estimate is the wrong tool for deciding a pixel and the right tool for catching 「three Chinese
+        /// characters in a column sized for two」, which is the mistake worth guarding.
+        fn width_of(text: &str, size: f32) -> f32 {
+            text.chars()
+                .map(|c| if c.is_ascii() { size * 0.62 } else { size })
+                .sum()
+        }
 
         let tiers = [
             FontSizeTier::ExtraSmall,
@@ -653,34 +705,64 @@ mod tests {
         for tier in tiers {
             let sizes = style::Sizes::of(tier);
 
-            let fixed: f32 = COLUMNS
-                .iter()
-                .filter_map(|column| column.width)
-                .map(|width| width * sizes.text)
-                .sum();
-            let gaps = style::CELL_PAD * (COLUMNS.len() - 1) as f32;
-            let names = style::PANEL - style::MARGIN * 2.0 - fixed - gaps;
+            for language in [Language::Chinese, Language::English] {
+                let columns = columns(language);
 
-            assert!(
-                names >= 150.0,
-                "{tier:?}: the name column is left {names} px, which is not a name"
-            );
+                // Every head fits over its own column, and so does the widest value that goes under it.
+                // The values are the same in both languages — a number, a byte count, one character — so
+                // they are the *same* list for both; what changes between the two is the head above them,
+                // and the state column's single character, which is why they are checked per language.
+                let widest = ["main *", "运", "29", "13.5K", "-"];
 
-            for column in COLUMNS {
-                let Some(width) = column.width else {
-                    continue;
-                };
+                for (column, widest) in columns.iter().zip(widest) {
+                    let Some(width) = column.width else {
+                        continue;
+                    };
+                    let room = width * sizes.text;
 
-                // A head is as wide as its characters, and a character of this interface is square: two
-                // of them take two of the head's size, whatever the glyphs are. Which is the check that
-                // a Chinese head needs and a Latin one did not — `CORE` is four narrow glyphs, 核心 is
-                // two full-width ones.
-                let head = column.head.chars().count() as f32 * sizes.small;
+                    assert!(
+                        width_of(column.head, sizes.small) <= room,
+                        "{tier:?} {language:?}: 「{}」 needs {} px of a {room} px column",
+                        column.head,
+                        width_of(column.head, sizes.small)
+                    );
+                    assert!(
+                        width_of(widest, sizes.text) <= room,
+                        "{tier:?}: {widest} needs {} px of a {room} px column",
+                        width_of(widest, sizes.text)
+                    );
+                }
+
+                // And what the fixed columns leave for the names is a name's worth. The scrollbar is
+                // subtracted because it is subtracted on the panel: see [`style::SCROLLBAR`].
+                let fixed: f32 = columns
+                    .iter()
+                    .filter_map(|column| column.width)
+                    .map(|width| width * sizes.text)
+                    .sum();
+                let gaps = style::CELL_PAD * (columns.len() - 1) as f32;
+                let names = style::PANEL - style::MARGIN * 2.0 - style::SCROLLBAR - fixed - gaps;
+
+                // The longest name this board has is `board_pwr_mon` — thirteen characters — and a
+                // lowercase Latin character measures half the body size on the panel. Half, and not the
+                // two thirds above: that figure is for capitals and digits, and using it here would be
+                // this test arguing with a ruler.
+                let longest = 13.0 * 0.5 * sizes.text;
+
                 assert!(
-                    head <= width * sizes.text,
-                    "{tier:?}: 「{}」 needs {head} px of a {} px column",
-                    column.head,
-                    width * sizes.text
+                    names >= longest,
+                    "{tier:?} {language:?}: {names} px of name column for a name that takes {longest} px"
+                );
+            }
+
+            // The meter's label column, which is the one measurement that is not a table column: it has
+            // to hold the longest label the page can write, 外部内存, in the size the labels are set in.
+            for label in ["外部内存", "PSRAM"] {
+                assert!(
+                    width_of(label, sizes.small) <= sizes.meter_label,
+                    "{tier:?}: {label} needs {} px of a {} px label column",
+                    width_of(label, sizes.small),
+                    sizes.meter_label
                 );
             }
         }

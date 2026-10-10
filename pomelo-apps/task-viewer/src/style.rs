@@ -21,6 +21,13 @@ pub const PANEL: f32 = 480.0;
 /// The room between the page and the panel, and between the parts of the page.
 pub const MARGIN: f32 = 14.0;
 pub const GAP: f32 = 10.0;
+/// What the table keeps clear on its right, for the list's scrollbar.
+///
+/// A reserve and not the bar's own measurement: iced draws the scrollbar *over* the content's right
+/// edge, so a table laid out to the panel's full width has its last column under the bar — which is
+/// exactly what happened to 核心, whose head arrived on the panel as a lone 核. This only has to be
+/// wider than the bar; the column widths are what has to fit inside what is left.
+pub const SCROLLBAR: f32 = 14.0;
 /// The room between two rows of the table.
 pub const ROW_GAP: f32 = 2.0;
 /// The room inside a row, on each side of its text.
@@ -29,14 +36,14 @@ pub const CELL_PAD: f32 = 4.0;
 /// Everything the page measures with, for one font tier.
 ///
 /// The *columns* of the table are not here: what a column is wide belongs with the column — see
-/// `COLUMNS` in the crate root — and it is expressed as a multiple of [`Sizes::text`], which is the one
-/// number in here those widths are derived from. What is left is the type scale and the meters.
+/// `columns` in the crate root — and it is expressed as a multiple of [`Sizes::text`], which is the
+/// one number in here those widths are derived from. What is left is the type scale and the meters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sizes {
-    /// The table's own text: task names, priorities, stacks.
-    pub text: f32,
-    /// The line above and below it: the column heads and the footer.
-    pub small: f32,
+/// The table's own text: task names, priorities, stacks.
+pub text: f32,
+/// The smaller line: the column heads, the meters' labels and the header.
+pub small: f32,
     /// One row of the table, tall enough for the text and a finger's worth of air.
     pub row: f32,
     /// A meter: the bar itself, the row it sits in, and the room its label takes.
@@ -52,7 +59,9 @@ impl Sizes {
     /// list needs: the body text is three quarters of the tier's base so that twelve rows fit where
     /// nine would, and every column is its widest content plus the padding a number wants on both
     /// sides. The meter's bar is a fraction taller than its own text, so that a row of them reads as
-    /// bars rather than as underlines.
+    /// bars rather than as underlines; its *label* column is sized for the longest label this page has
+    /// ever had to write, which is 外部内存 — four full-width characters, and the reason this is nearly
+    /// three quarters of the base rather than half of it.
     pub fn of(tier: FontSizeTier) -> Self {
         let base = tier.base_size();
 
@@ -62,7 +71,7 @@ impl Sizes {
             row: base * 1.15,
             bar: base * 0.6,
             meter_row: base * 0.95,
-            meter_label: base * 2.1,
+            meter_label: base * 2.9,
         }
     }
 }

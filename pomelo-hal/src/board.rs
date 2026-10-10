@@ -201,8 +201,9 @@ impl Board {
 
     /// Lock the management-server backend.
     ///
-    /// The app of the same name holds this to start and stop the server; nothing else does, and no
-    /// part of the page it serves comes through here.
+    /// Held to start and stop the server: the boot sequence starts it (`rust_main`, which is where the
+    /// decision and its consequences are written down), and the app of the same name is the switch over
+    /// it. No part of the page it serves comes through here.
     pub fn web(&self) -> MutexGuard<'_, Box<dyn WebBackend>> {
         lock(&self.web)
     }
