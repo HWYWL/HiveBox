@@ -65,17 +65,40 @@ jobs:
           "$HOME/esp-idf/install.sh" esp32s3
 
       # ----------------------------------------------------------- Rust / Xtensa
+      - name: 缓存 Xtensa 工具链
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rustup/toolchains/esp198
+            ~/.rustup/settings.toml
+            ~/export-esp.sh
+          key: espup-${{ env.XTENSA_TOOLCHAIN }}-${{ env.XTENSA_TOOLCHAIN_VERSION }}-${{ runner.os }}-v1
+
       # 注意这里没有 `| head` 这类会提前退出管道的写法：`set -o pipefail` 下，
       # 提前退出的读者会让写者吃 SIGPIPE，整步以 141 失败（第一次跑就栽在这儿）。
+      #
+      # 装工具链要下几百 MB，从云上跑偶尔会失败（同一个步骤第一次成功、第二次就挂过），
+      # 所以这里重试三次，并且每次失败都把日志尾部贴成注解 —— 不然外面只看得见一个退出码。
       - name: 安装 Xtensa 工具链
         run: |
           set -eo pipefail
           if ! rustup run "${XTENSA_TOOLCHAIN}" rustc --version >/dev/null 2>&1; then
-            cargo install espup --locked
-            espup install \
-              --name "${XTENSA_TOOLCHAIN}" \
-              --toolchain-version "${XTENSA_TOOLCHAIN_VERSION}" \
-              --targets esp32s3
+            log="${RUNNER_TEMP}/espup.log"
+            for attempt in 1 2 3; do
+              if { command -v espup >/dev/null 2>&1 || cargo install espup --locked; } &&
+                 espup install \
+                   --name "${XTENSA_TOOLCHAIN}" \
+                   --toolchain-version "${XTENSA_TOOLCHAIN_VERSION}" \
+                   --targets esp32s3 \
+                   --disable-timeouts > "${log}" 2>&1; then
+                break
+              fi
+              echo "::warning::Xtensa 工具链第 ${attempt} 次安装失败"
+              tail -n "${BUILD_LOG_TAIL}" "${log}" | while IFS= read -r line; do
+                echo "::error::espup: ${line}"
+              done
+              sleep 15
+            done
           fi
           rustup run "${XTENSA_TOOLCHAIN}" rustc --version
 
