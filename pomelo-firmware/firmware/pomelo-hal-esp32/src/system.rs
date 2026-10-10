@@ -26,7 +26,9 @@ use std::ffi::c_char;
 use std::mem::MaybeUninit;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use pomelo_hal::{ChipInfo, FirmwareInfo, HalError, MemoryInfo, SystemBackend};
+use pomelo_hal::{
+    ChipInfo, FirmwareInfo, HalError, MemoryInfo, SystemBackend, TaskInfo, TaskState,
+};
 
 mod ffi {
     use std::ffi::c_char;
@@ -39,6 +41,10 @@ mod ffi {
     pub const VERSION_MAX_LEN: usize = 32;
     /// Mirrors `HAL_SYSTEM_BUILD_MAX_LEN` — and `esp_app_desc_t`'s own `date` and `time`.
     pub const BUILD_MAX_LEN: usize = 16;
+    /// Mirrors `HAL_SYSTEM_TASK_NAME_MAX_LEN`.
+    pub const TASK_NAME_MAX_LEN: usize = 16;
+    /// Mirrors `HAL_SYSTEM_MAX_TASKS`.
+    pub const MAX_TASKS: usize = 32;
 
     /// Mirrors `hal_system_chip_t`.
     #[repr(C)]
@@ -67,11 +73,41 @@ mod ffi {
         pub free_bytes: u64,
     }
 
+    /// Mirrors `hal_system_task_t`.
+    ///
+    /// The state crosses as a `u8` and not as an enum: a C enum's width is the compiler's business,
+    /// and a field two languages disagree about the width of reads as garbage on the Rust side.
+    /// [`task_state`] is what puts a name to it.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct HalSystemTask {
+        pub name: [c_char; TASK_NAME_MAX_LEN],
+        pub state: u8,
+        pub priority: u8,
+        /// `0xff` for a task the scheduler may run on either core.
+        pub core: u8,
+        pub current: u8,
+        pub stack_free_bytes: u32,
+    }
+
+    /// Mirrors `hal_system_tasks_t`.
+    ///
+    /// A fixed array with a count, like the flash layout: the caller brings the buffer and the C side
+    /// says how much of it it filled. Nothing here allocates, on either side of the FFI.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct HalSystemTasks {
+        pub count: u32,
+        pub tasks: [HalSystemTask; MAX_TASKS],
+    }
+
     extern "C" {
         pub fn hal_system_get_chip(out: *mut HalSystemChip) -> i32;
         pub fn hal_system_get_firmware(out: *mut HalSystemFirmware) -> i32;
         pub fn hal_system_get_uptime_us() -> i64;
         pub fn hal_system_get_memory(out: *mut HalSystemMemory) -> i32;
+        pub fn hal_system_get_tasks(out: *mut HalSystemTasks) -> i32;
+        pub fn hal_system_get_psram(out: *mut HalSystemMemory) -> i32;
         pub fn hal_system_get_epoch(out_epoch: *mut i64) -> i32;
     }
 }
@@ -80,11 +116,29 @@ mod ffi {
 /// holding nothing sane, with nothing having set it since. Not a fault, and not 1970 either.
 const ESP_ERR_INVALID_STATE: i32 = 0x103;
 
+/// `ESP_ERR_NOT_FOUND`: the C side's "this board has none of that" — used by the external RAM read on
+/// a board without any, which is a fact about the board rather than a failure of the read.
+const ESP_ERR_NOT_FOUND: i32 = 0x105;
+
 /// A NUL-terminated C buffer as a `String`.
 fn c_buf_to_string(buf: &[c_char]) -> String {
     let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, len) };
     String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// `hal_system_task_t::state` as the enum it stands for.
+///
+/// Anything this does not know — a state a newer IDF has added — is reported as blocked rather than
+/// as running: three of the five scheduler states are ways of waiting, so it is the answer that is
+/// wrong least often, and it is not the one a reader would act on.
+fn task_state(state: u8) -> TaskState {
+    match state {
+        0 => TaskState::Running,
+        2 => TaskState::Suspended,
+        3 => TaskState::Deleted,
+        _ => TaskState::Blocked,
+    }
 }
 
 /// The board's own account of itself.
@@ -187,6 +241,60 @@ impl SystemBackend for EspSystem {
             total_bytes: raw.total_bytes,
             free_bytes: raw.free_bytes,
         })
+    }
+
+    /// The tasks the scheduler is running, read out of `uxTaskGetSystemState`.
+    ///
+    /// An empty `Vec` is a board with nothing to say — an image built without the trace facility —
+    /// rather than a failure: the C side answers `ESP_OK` with a count of zero for exactly that case,
+    /// and a page drawing "no tasks" is drawing the truth about such an image. The core comes across
+    /// as `0xff` for "either, or not reported", which is the one value a real core number cannot be.
+    fn tasks(&self) -> Result<Vec<TaskInfo>, HalError> {
+        let mut raw = MaybeUninit::<ffi::HalSystemTasks>::uninit();
+
+        let code = unsafe { ffi::hal_system_get_tasks(raw.as_mut_ptr()) };
+        if code != 0 {
+            return Err(HalError::Internal(code));
+        }
+
+        let raw = unsafe { raw.assume_init() };
+        // The count is the C side's, and this is what keeps a count larger than the array — which
+        // cannot happen from this C code and could from another — from walking off the end of it.
+        let count = (raw.count as usize).min(ffi::MAX_TASKS);
+
+        Ok(raw.tasks[..count]
+            .iter()
+            .map(|task| TaskInfo {
+                name: c_buf_to_string(&task.name),
+                state: task_state(task.state),
+                priority: task.priority,
+                stack_free_bytes: task.stack_free_bytes,
+                core: (task.core < 2).then_some(task.core),
+                current: task.current != 0,
+            })
+            .collect())
+    }
+
+    /// The external RAM, which this board has: the pool the framebuffer and the log ring come out of.
+    ///
+    /// `ESP_ERR_NOT_FOUND` is the C side saying the board has none, and becomes `Ok(None)` — a fact
+    /// about a board rather than a failure to read one. See the note on the C function for why this is
+    /// a separate reading from [`SystemBackend::memory`] and never a sum with it.
+    fn psram(&self) -> Result<Option<MemoryInfo>, HalError> {
+        let mut raw = MaybeUninit::<ffi::HalSystemMemory>::uninit();
+
+        match unsafe { ffi::hal_system_get_psram(raw.as_mut_ptr()) } {
+            0 => {}
+            ESP_ERR_NOT_FOUND => return Ok(None),
+            code => return Err(HalError::Internal(code)),
+        }
+
+        let raw = unsafe { raw.assume_init() };
+
+        Ok(Some(MemoryInfo {
+            total_bytes: raw.total_bytes,
+            free_bytes: raw.free_bytes,
+        }))
     }
 
     /// The board's clock, or nothing when it has never been told the time.

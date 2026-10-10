@@ -525,6 +525,67 @@ int64_t hal_system_get_uptime_us(void);
  */
 esp_err_t hal_system_get_memory(hal_system_memory_t *out);
 
+#define HAL_SYSTEM_TASK_NAME_MAX_LEN 16
+/* Enough for every task this image has been seen running, with room to spare. The array
+ * crosses the FFI, so it wants to be a size both sides agree on rather than a number that
+ * grows when a driver starts one more service task — tasks past this many are not listed,
+ * which is what `count` is for. */
+#define HAL_SYSTEM_MAX_TASKS 32
+
+typedef struct {
+    char     name[HAL_SYSTEM_TASK_NAME_MAX_LEN];
+    /* Maps to the Rust `TaskState`: 0 running or ready, 1 blocked, 2 suspended, 3 deleted. */
+    uint8_t  state;
+    uint8_t  priority;
+    /* 0xff for a task the scheduler may run on either core — and for an image built
+     * without `CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID`, which is the config that
+     * reports one at all. */
+    uint8_t  core;
+    uint8_t  current;
+    /* The least stack this task has ever had left, in bytes: the number worth looking at,
+     * because the day it reaches zero the task faults. */
+    uint32_t stack_free_bytes;
+} hal_system_task_t;
+
+typedef struct {
+    uint32_t          count;
+    hal_system_task_t tasks[HAL_SYSTEM_MAX_TASKS];
+} hal_system_tasks_t;
+
+/**
+ * @brief Read the tasks the scheduler is running.
+ *
+ * What an `htop`-style list is made of. The *apps* this interface hosts are not tasks —
+ * they are structs the launcher owns — while these are what the scheduler switches
+ * between, with stacks that can run out and priorities that decide who goes next.
+ *
+ * Expensive compared to the other reads here: the scheduler is briefly held still while
+ * the task list is walked, so this is the read a page wants once a second rather than
+ * every frame.
+ *
+ * @return
+ *      - ESP_OK on success, with `count` tasks filled in
+ *      - ESP_ERR_INVALID_ARG if out is NULL
+ *
+ * An image built without `CONFIG_FREERTOS_USE_TRACE_FACILITY` has no per-task read to
+ * make and answers with `count == 0`: an empty list rather than an invented one.
+ */
+esp_err_t hal_system_get_tasks(hal_system_tasks_t *out);
+
+/**
+ * @brief Read the external RAM (PSRAM), when the board has any.
+ *
+ * The pool the framebuffer and the log ring come out of, reported separately from the
+ * default heap and never summed with it — see the note on `hal_system_get_memory`, which
+ * says the same thing from the other side.
+ *
+ * @return
+ *      - ESP_OK on success
+ *      - ESP_ERR_INVALID_ARG if out is NULL
+ *      - ESP_ERR_NOT_FOUND when the board has no external RAM
+ */
+esp_err_t hal_system_get_psram(hal_system_memory_t *out);
+
 /**
  * @brief Read the board's clock as a Unix epoch.
  *

@@ -34,6 +34,7 @@ pomelo-hal = { git = "https://github.com/pomelos-on-sale/pomelo-hal.git", rev = 
 calculator = { path = "../calculator", default-features = false }
 music-player = { path = "../music-player", default-features = false }
 settings = { path = "../settings", default-features = false }
+task-viewer = { path = "../task-viewer", default-features = false }
 terminal = { path = "../terminal", default-features = false }
 web-manager = { path = "../web-manager", default-features = false }
 

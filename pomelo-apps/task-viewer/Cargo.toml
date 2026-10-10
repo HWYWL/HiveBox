@@ -1,0 +1,45 @@
+[package]
+name = "task-viewer"
+version = "0.1.0"
+edition = "2021"
+description = "A standard iced program: the task list, update and view"
+license = "GPL-3.0-only"
+
+# A member of the workspace at the root of this repository (`Cargo.toml`): that is what lets
+# `cargo test --workspace` run every app against one lock while each stays its own crate, with its own
+# `main.rs` and its own `desktop` feature. Nothing in this graph patches anything, so `cargo run` here
+# builds against iced from crates.io, exactly like any other iced program.
+#
+# That is also why the firmware cannot list this as a *member* — the apps are a project of their own —
+# so `rust_main` and `firmware/panel-tests` depend on it by path. Patches and features are the root's
+# business, and the firmware's root is the one that has them.
+
+[dependencies]
+# The facade, like any other iced program, and no `advanced` or `canvas`: every shape this page draws
+# is a rectangle `iced`'s own widgets can make — see the crate documentation for why the meters are
+# bars rather than the settings app's rings.
+iced = { version = "0.14", default-features = false, features = ["thread-pool", "x11", "wayland"] }
+
+# The board. This is the one app whose *whole subject* is a reading rather than an interface: the task
+# list, the two memory pools and the uptime all come from here, and none of them is this app's to keep.
+# From GitHub by revision like its siblings: sibling repositories, and this project builds on its own.
+pomelo-hal = { git = "https://github.com/pomelos-on-sale/pomelo-hal.git", rev = "20eaa910f0a05cd68684d6aa868fd78457c51be9" }
+
+# The shared preferences: the theme and the language are the system's, not this app's, and the font
+# tier is what every measurement in `style` is derived from.
+pomelo-widgets = { git = "https://github.com/pomelos-on-sale/pomelo-widgets.git", rev = "f499da5cc17ef16ced6e6b1e62286bb020837a0b" }
+
+# The icons: the one at the head of the page, and the two beside the meters.
+pomelo-material-symbols = { git = "https://github.com/pomelos-on-sale/pomelo-material-symbols.git", rev = "7dc390fb1924dc69b375e5ae77806857f798cc58" }
+
+[features]
+# On by default, because a project of its own is a desktop program: iced needs *a* renderer, and this is
+# the one that needs no GPU. The board is the other way round — `rust_main`, `app-launcher` and
+# `firmware/panel-tests` depend on this crate with `default-features = false` and the platform layer
+# turns `pomelo` on instead.
+desktop = ["iced/tiny-skia"]
+default = ["desktop"]
+
+[dev-dependencies]
+# The widget-tree tester: the real widget tree, no host, no window, no pixels.
+iced_test = "0.14"

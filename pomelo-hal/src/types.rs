@@ -522,6 +522,52 @@ impl MemoryInfo {
     }
 }
 
+/// One task the board's scheduler is running.
+///
+/// The unit an `htop`-style list is made of, and the honest one on a board like this one: the *apps*
+/// this interface hosts are not tasks — they are structs the launcher owns and draws — while these are
+/// what the scheduler is actually switching between, with stacks that can run out and priorities that
+/// decide who goes next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskInfo {
+    /// What the scheduler calls it: `main`, `IDLE0`, `ipc1`, `esp_timer`, and whatever the layers above
+    /// named themselves. Data, not interface text — a task's name is its own.
+    pub name: String,
+    /// What it is doing.
+    pub state: TaskState,
+    /// Its priority. Higher runs first on this scheduler, and the idle tasks sit at the bottom of it.
+    pub priority: u8,
+    /// The least stack it has ever had left, in bytes.
+    ///
+    /// The reading that makes a list like this worth drawing at all: a task whose stack has been nearly
+    /// used up is one that will fault the day something calls a function deeper, and nothing else on
+    /// this board would say so before it did.
+    pub stack_free_bytes: u32,
+    /// Which core it runs on, when the platform says — `None` for a task the scheduler may put on
+    /// either, and for a platform that does not report it at all.
+    pub core: Option<u8>,
+    /// Whether this is the task the reading was taken from.
+    pub current: bool,
+}
+
+/// What a task is doing.
+///
+/// The states a `ps`-style list prints as letters, named rather than spelled: a page drawing one is
+/// free to draw `R` or `运行中`, and the HAL has no business choosing between them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskState {
+    /// Running, or ready to be — the highest priority of those that are. The two are one state here
+    /// because the difference between them is measured in microseconds: what a reader wants to know is
+    /// whether the task is *making progress*, and any task that is running or waiting its turn to is.
+    Running,
+    /// Waiting for something: a delay, a queue, a lock, the radio.
+    Blocked,
+    /// Stopped by an explicit call, going nowhere until another one starts it again.
+    Suspended,
+    /// Gone, or on its way out.
+    Deleted,
+}
+
 /// The chip the firmware is running on.
 ///
 /// The three facts a "what is this machine" card has room for, and all three are the silicon's own

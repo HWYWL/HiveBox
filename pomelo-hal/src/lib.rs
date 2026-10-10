@@ -53,8 +53,8 @@ pub use traits::{
 };
 pub use types::{
     ApInfo, AudioMeta, ChipInfo, FirmwareInfo, FlashLayout, FlashRegion, FlashRegionKind,
-    InputAction, MemoryInfo, ScanState, SystemEvent, Vec3, VolumeInfo, VolumeKind, WebStatus,
-    WifiState, WifiStatus,
+    InputAction, MemoryInfo, ScanState, SystemEvent, TaskInfo, TaskState, Vec3, VolumeInfo,
+    VolumeKind, WebStatus, WifiState, WifiStatus,
 };
 pub use wifi_credentials::WifiCredentials;
 
@@ -68,8 +68,8 @@ pub mod prelude {
     };
     pub use crate::types::{
         ApInfo, AudioMeta, ChipInfo, FirmwareInfo, FlashLayout, FlashRegion, FlashRegionKind,
-        InputAction, MemoryInfo, ScanState, SystemEvent, Vec3, VolumeInfo, VolumeKind, WebStatus,
-        WifiState, WifiStatus,
+        InputAction, MemoryInfo, ScanState, SystemEvent, TaskInfo, TaskState, Vec3, VolumeInfo,
+        VolumeKind, WebStatus, WifiState, WifiStatus,
     };
     pub use crate::music_settings::MusicSettings;
     pub use crate::wifi_credentials::WifiCredentials;

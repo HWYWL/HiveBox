@@ -19,7 +19,7 @@ use iced::Size;
 use iced_test::Simulator;
 use pomelo_hal::sim::SimSystem;
 use pomelo_hal::{
-    ApInfo, Board, ChipInfo, FirmwareInfo, HalError, MemoryInfo, ScanState, SystemBackend,
+    ApInfo, Board, ChipInfo, FirmwareInfo, HalError, MemoryInfo, ScanState, SystemBackend, TaskInfo,
     WifiState, WifiStatus,
 };
 use pomelo_material_symbols::Icon;
@@ -1356,6 +1356,17 @@ impl SystemBackend for CountingSystem {
 
     fn memory(&self) -> Result<MemoryInfo, HalError> {
         self.inner.memory()
+    }
+
+    /// Delegated like the rest, and deliberately *not* counted: the counter is here to catch a readout
+    /// that never re-reads what a tick is about, and neither of these two is part of the settings app's
+    /// readout — the task viewer re-reads its list through a tick of its own.
+    fn tasks(&self) -> Result<Vec<TaskInfo>, HalError> {
+        self.inner.tasks()
+    }
+
+    fn psram(&self) -> Result<Option<MemoryInfo>, HalError> {
+        self.inner.psram()
     }
 
     fn clock(&self) -> Result<Option<SystemTime>, HalError> {

@@ -25,6 +25,9 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 /* ---------------------------------------------------------------------------
  * Chip
  * ------------------------------------------------------------------------- */
@@ -183,6 +186,96 @@ esp_err_t hal_system_get_epoch(int64_t *out_epoch)
     }
 
     *out_epoch = (int64_t)epoch;
+
+    return ESP_OK;
+}
+
+/* ---------------------------------------------------------------------------
+ * Tasks
+ * ------------------------------------------------------------------------- */
+
+esp_err_t hal_system_get_tasks(hal_system_tasks_t *out)
+{
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    memset(out, 0, sizeof *out);
+
+#if CONFIG_FREERTOS_USE_TRACE_FACILITY
+    /* `uxTaskGetSystemState` is the one read that fills in everything a list wants at
+     * once — name, state, priority, core and stack high-water mark — and it is also the
+     * only one of these reads that costs anything: the scheduler is briefly held while
+     * the task list is walked. That is why a page showing this wants it once a second
+     * and not once a frame. */
+    TaskStatus_t statuses[HAL_SYSTEM_MAX_TASKS];
+    UBaseType_t   count = uxTaskGetSystemState(statuses, HAL_SYSTEM_MAX_TASKS, NULL);
+    TaskHandle_t  self  = xTaskGetCurrentTaskHandle();
+
+    if (count > HAL_SYSTEM_MAX_TASKS) {
+        count = HAL_SYSTEM_MAX_TASKS;
+    }
+
+    for (UBaseType_t i = 0; i < count; i++) {
+        hal_system_task_t *task = &out->tasks[i];
+
+        if (statuses[i].pcTaskName != NULL) {
+            strncpy(task->name, statuses[i].pcTaskName, sizeof task->name - 1);
+        }
+
+        /* "Ready" and "running" are one answer here: the difference between them is a
+         * scheduling decision measured in microseconds, and what a reader wants to know
+         * is whether the task is making progress. */
+        switch (statuses[i].eCurrentState) {
+        case eBlocked:   task->state = 1; break;
+        case eSuspended: task->state = 2; break;
+        case eDeleted:   task->state = 3; break;
+        default:         task->state = 0; break;
+        }
+
+        task->priority = (uint8_t)statuses[i].uxCurrentPriority;
+
+        /* Which core it may run on, asked of the scheduler rather than read out of the status
+         * struct: whether `TaskStatus_t` carries a core id at all depends on
+         * `CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID`, which in turn depends on the
+         * stats-formatting functions — a `vTaskList` this image has no use for. The cast is
+         * deliberate: `tskNO_AFFINITY` is a big number, and it comes out as 0xff, which is
+         * the value the Rust side reads as "the scheduler may run it on either". */
+        task->core = (uint8_t)xTaskGetCoreID(statuses[i].xHandle);
+
+        task->stack_free_bytes = (uint32_t)statuses[i].usStackHighWaterMark;
+        task->current          = (statuses[i].xHandle == self) ? 1 : 0;
+    }
+
+    out->count = (uint32_t)count;
+#else
+    /* Built without the trace facility: there is no per-task read to make, and an empty
+     * list is the honest answer. A list of made-up tasks would be worse than none. */
+    out->count = 0;
+#endif
+
+    return ESP_OK;
+}
+
+/* ---------------------------------------------------------------------------
+ * External RAM
+ * ------------------------------------------------------------------------- */
+
+esp_err_t hal_system_get_psram(hal_system_memory_t *out)
+{
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    size_t total = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+    if (total == 0) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    memset(out, 0, sizeof *out);
+
+    out->total_bytes = (uint64_t)total;
+    out->free_bytes  = (uint64_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
 
     return ESP_OK;
 }

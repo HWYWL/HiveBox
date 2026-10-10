@@ -116,6 +116,7 @@ mod status;
 mod style;
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use iced::theme::Palette;
 use iced::widget::{button, column, container, stack, text, Column, Row, Space};
@@ -128,6 +129,7 @@ use calculator::Calculator;
 use music_player::Player;
 use pomelo_hal::Board;
 use settings::Settings;
+use task_viewer::TaskViewer;
 use terminal::Terminal;
 use web_manager::WebManager;
 
@@ -175,12 +177,13 @@ enum Screen {
 ///
 /// Indices, because that is what the grid hands over when a tile is tapped. The tests assert that
 /// each of these still names the app it says it does, and every entry has one: the catalogue and
-/// the list of apps are the same five things, in the same order.
+/// the list of apps are the same six things, in the same order.
 pub const MUSIC: usize = 0;
 pub const WEB_MANAGER: usize = 1;
 pub const TERMINAL: usize = 2;
 pub const SETTINGS: usize = 3;
 pub const CALCULATOR: usize = 4;
+pub const TASK_VIEWER: usize = 5;
 
 /// What the launcher reacts to.
 ///
@@ -245,9 +248,10 @@ pub enum Message {
     /// A second has passed on the board ([`pomelo_hal::SystemEvent::Tick`]).
     ///
     /// The launcher has no clock of its own to advance: the status bar's minute arrives with the
-    /// battery push. This exists for the one hosted app that shows a *running* time — the settings
-    /// list's readout — which is told to look at the board again rather than being handed a value
-    /// to draw. Nothing else here reacts, and an app that was never opened makes this one match arm.
+    /// battery push. This exists for the two hosted apps that show something *moving* — the settings
+    /// list's readout and the task viewer's list — which are told to look at the board again rather
+    /// than being handed values to draw. Neither is read while it is not being looked at, and an app
+    /// that was never opened makes this one match arm.
     Tick,
     /// The screen changed size: a window on a desktop, the panel on the board.
     Resized(Size),
@@ -257,6 +261,7 @@ pub enum Message {
     Music(music_player::Message),
     Terminal(terminal::Message),
     WebManager(web_manager::Message),
+    TaskViewer(task_viewer::Message),
 }
 
 /// The layer over the desktop that is moving, and which way it is going.
@@ -327,6 +332,7 @@ pub struct Launcher {
     music: Option<Player>,
     terminal: Option<Terminal>,
     web_manager: Option<WebManager>,
+    task_viewer: Option<TaskViewer>,
     /// Apps currently running in memory (foreground or background).
     running_apps: Vec<usize>,
     board: Arc<Board>,
@@ -384,6 +390,7 @@ impl Launcher {
             page: 0,
             recents: false,
             transition: None,
+            task_viewer: None,
             clock,
             battery,
             charging,
@@ -429,6 +436,9 @@ impl Launcher {
             app.set_preferences(prefs);
         }
         if let Some(app) = &mut self.web_manager {
+            app.set_preferences(prefs);
+        }
+        if let Some(app) = &mut self.task_viewer {
             app.set_preferences(prefs);
         }
     }
@@ -504,6 +514,18 @@ impl Launcher {
         self.web_manager.as_mut().unwrap()
     }
 
+    /// The task viewer, which is the one app here that is nothing *but* its readings: it is handed the
+    /// board and reads the task list, the two memory pools and the uptime from it. There is no state of
+    /// its own to seed.
+    pub fn get_or_create_task_viewer(&mut self) -> &mut TaskViewer {
+        if self.task_viewer.is_none() {
+            let mut app = TaskViewer::new(Arc::clone(&self.board));
+            app.set_preferences(self.preferences);
+            self.task_viewer = Some(app);
+        }
+        self.task_viewer.as_mut().unwrap()
+    }
+
     /// The hosted apps, for the host and the tests.
     pub fn calculator(&mut self) -> &Calculator {
         self.get_or_create_calculator()
@@ -523,6 +545,10 @@ impl Launcher {
 
     pub fn web_manager(&mut self) -> &WebManager {
         self.get_or_create_web_manager()
+    }
+
+    pub fn task_viewer(&mut self) -> &TaskViewer {
+        self.get_or_create_task_viewer()
     }
 
     /// Sets what the status bar shows.
@@ -570,6 +596,7 @@ impl Launcher {
             SETTINGS => self.settings = None,
             MUSIC => self.music = None,
             WEB_MANAGER => self.web_manager = None,
+            TASK_VIEWER => self.task_viewer = None,
             _ => {}
         }
 
@@ -723,6 +750,14 @@ impl Launcher {
     fn web_manager_screen(&self) -> Element<'_, Message> {
         if let Some(app) = &self.web_manager {
             app.view().map(Message::WebManager)
+        } else {
+            Space::new().into()
+        }
+    }
+
+    fn task_viewer_screen(&self) -> Element<'_, Message> {
+        if let Some(app) = &self.task_viewer {
+            app.view().map(Message::TaskViewer)
         } else {
             Space::new().into()
         }
@@ -980,6 +1015,9 @@ impl Launcher {
                     WEB_MANAGER => {
                         self.get_or_create_web_manager();
                     }
+                    TASK_VIEWER => {
+                        self.get_or_create_task_viewer();
+                    }
                     _ => {}
                 }
 
@@ -1038,6 +1076,14 @@ impl Launcher {
                 if let Some(settings) = &mut self.settings {
                     settings.refresh_system();
                 }
+
+                // The task viewer is the other way round, and the launcher is the one that knows:
+                // reading the task list holds the scheduler still for a moment, and a page nobody is
+                // on does not need that — while the app cannot tell whether it is the page being
+                // looked at. So the question is asked here, and only while it is the screen.
+                if let (Screen::App(TASK_VIEWER), Some(viewer)) = (self.screen, &mut self.task_viewer) {
+                    viewer.update(task_viewer::Message::Tick(Instant::now()));
+                }
             }
             Message::Resized(size) => {
                 self.size = size;
@@ -1051,6 +1097,7 @@ impl Launcher {
             Message::Music(message) => self.get_or_create_music().update(message),
             Message::Terminal(message) => self.get_or_create_terminal().update(message),
             Message::WebManager(message) => self.get_or_create_web_manager().update(message),
+            Message::TaskViewer(message) => self.get_or_create_task_viewer().update(message),
             Message::Settings(settings::Message::Back) => return self.go_back(),
             Message::Settings(message) => {
                 let (task, new_prefs) = {
@@ -1508,6 +1555,7 @@ impl Launcher {
             SETTINGS => self.settings_screen(),
             MUSIC => self.music_screen(),
             WEB_MANAGER => self.web_manager_screen(),
+            TASK_VIEWER => self.task_viewer_screen(),
             _ => self.launcher(),
         }
     }
@@ -1910,10 +1958,14 @@ mod tests {
         assert_eq!(CATALOGUE[TERMINAL].localized_name(Language::Chinese), "终端");
         assert_eq!(CATALOGUE[SETTINGS].localized_name(Language::Chinese), "设置");
         assert_eq!(CATALOGUE[CALCULATOR].localized_name(Language::Chinese), "计算器");
+        assert_eq!(
+            CATALOGUE[TASK_VIEWER].localized_name(Language::Chinese),
+            "任务查看器"
+        );
     }
 
-    /// The grid's two pages, in the order they are drawn: the four the box is for, then the one it
-    /// is not.
+    /// The grid's two pages, in the order they are drawn: the four the box is for, then the two that
+    /// are about the box itself.
     ///
     /// Written out rather than derived, because the order *is* the interface: a page and a position
     /// are what a finger learns, and a reshuffle that left this test green would be the one kind of
@@ -1924,13 +1976,20 @@ mod tests {
 
         assert_eq!(
             names,
-            ["Music", "Web Manager", "Terminal", "Settings", "Calculator"]
+            [
+                "Music",
+                "Web Manager",
+                "Terminal",
+                "Settings",
+                "Calculator",
+                "Tasks"
+            ]
         );
-        assert_eq!(CATALOGUE.len(), 5, "and the five are all the tiles there are");
+        assert_eq!(CATALOGUE.len(), 6, "and the six are all the tiles there are");
         assert_eq!(
             Launcher::new(Arc::new(Board::simulated())).pages(),
             2,
-            "four on the first page leaves the fifth on the second"
+            "four on the first page leaves two on the second"
         );
     }
 

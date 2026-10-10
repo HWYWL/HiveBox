@@ -29,6 +29,16 @@ CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 # FreeRTOS
 CONFIG_FREERTOS_HZ=1000
 
+# The task viewer's whole reading: `uxTaskGetSystemState` is behind this, and without it
+# there is no per-task name, state, priority or stack high-water mark to list. It costs a
+# few bytes per task rather than any run time.
+#
+# `CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID` is deliberately *not* set beside it. The core
+# a task runs on is worth a column, but that config is gated behind the stats-formatting
+# functions — a `vTaskList` this image never calls — and `xTaskGetCoreID`, which the C side
+# asks instead, gives the same answer for nothing.
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+
 # Console over USB-Serial-JTAG for Waveshare AMOLED board
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y

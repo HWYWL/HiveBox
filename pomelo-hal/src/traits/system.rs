@@ -3,7 +3,7 @@
 use std::time::{Duration, SystemTime};
 
 use crate::error::HalError;
-use crate::types::{ChipInfo, FirmwareInfo, MemoryInfo};
+use crate::types::{ChipInfo, FirmwareInfo, MemoryInfo, TaskInfo};
 
 /// The board's own account of itself: the chip, the firmware on it, and the three readings that
 /// move while it runs.
@@ -41,6 +41,27 @@ pub trait SystemBackend: Send + Sync {
 
     /// The heap.
     fn memory(&self) -> Result<MemoryInfo, HalError>;
+
+    /// The tasks the board's scheduler is running.
+    ///
+    /// A reading, like everything else here, and the one a page is most likely to want again a second
+    /// later: what a task list is *for* is watching it change.
+    ///
+    /// Ordered as the platform lists them rather than sorted here. A platform that knows a better
+    /// order — the scheduler's own — should not have it thrown away, and sorting is the page's
+    /// business.
+    fn tasks(&self) -> Result<Vec<TaskInfo>, HalError>;
+
+    /// The external RAM, when the board has any.
+    ///
+    /// Deliberately *not* folded into [`SystemBackend::memory`]: that reading is the built-in heap, and
+    /// adding PSRAM to it would turn "the heap is nearly full" into "two thirds of it is free" — see
+    /// its own note, and the same note in `board_system.c`. Both numbers are worth drawing, and they
+    /// are two numbers because they are two pools.
+    ///
+    /// `Ok(None)` for a board that has none, which is a different answer from a board whose external
+    /// RAM is empty: a `MemoryInfo` of zeroes would divide by zero on the way to a percentage.
+    fn psram(&self) -> Result<Option<MemoryInfo>, HalError>;
 
     /// The clock, when the board has one and it has been set.
     ///
