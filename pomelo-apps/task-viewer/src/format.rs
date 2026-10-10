@@ -8,18 +8,21 @@ use std::time::Duration;
 
 use pomelo_hal::TaskState;
 
-/// What a task is doing, as the letter a `ps`-style list prints.
+/// What a task is doing, in one character.
 ///
-/// One letter per state, and the same letters `htop` uses, because the point of a table that looks
-/// like `htop` is that someone who has read one can read this: `R` for a task that is running or
-/// waiting its turn to, `S` for one that is waiting for something, `T` for one that has been stopped,
-/// `Z` for one that is gone.
-pub fn state_letter(state: TaskState) -> char {
+/// One character because a column of states is read *across*: 运 and 阻 line up down the page the way
+/// `R` and `S` do, where 运行中 and 阻塞 would make one column as wide as a sentence.
+///
+/// The characters are the four states this scheduler has, named the way Chinese names them — 运行,
+/// 阻塞, 挂起, 退出 — and they are exactly the four `htop` prints as `R`, `S`, `T` and `Z`, in the same
+/// order and for the same reason. That is the mapping worth keeping in mind when reading the column:
+/// a task waiting on a delay or a queue is 阻, which is what a `ps` calls `S`.
+pub fn state_char(state: TaskState) -> char {
     match state {
-        TaskState::Running => 'R',
-        TaskState::Blocked => 'S',
-        TaskState::Suspended => 'T',
-        TaskState::Deleted => 'Z',
+        TaskState::Running => '运',
+        TaskState::Blocked => '阻',
+        TaskState::Suspended => '挂',
+        TaskState::Deleted => '退',
     }
 }
 
@@ -52,13 +55,28 @@ pub fn clock_of(uptime: Duration) -> String {
 mod tests {
     use super::*;
 
-    /// Every state has a letter, and they are the ones a `ps`-style list uses.
+    /// Every state has one character, and no two states share one.
+    ///
+    /// The sharing check is the one that matters: a column of states that spelled two of them the same
+    /// way would be a column that could not be read at all, and nothing else on the page would say so.
     #[test]
-    fn every_state_has_its_letter() {
-        assert_eq!(state_letter(TaskState::Running), 'R');
-        assert_eq!(state_letter(TaskState::Blocked), 'S');
-        assert_eq!(state_letter(TaskState::Suspended), 'T');
-        assert_eq!(state_letter(TaskState::Deleted), 'Z');
+    fn every_state_has_its_own_character() {
+        let states = [
+            TaskState::Running,
+            TaskState::Blocked,
+            TaskState::Suspended,
+            TaskState::Deleted,
+        ];
+
+        assert_eq!(state_char(states[0]), '运');
+        assert_eq!(state_char(states[1]), '阻');
+        assert_eq!(state_char(states[2]), '挂');
+        assert_eq!(state_char(states[3]), '退');
+
+        let mut seen: Vec<char> = states.iter().copied().map(state_char).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), states.len(), "four states, four characters");
     }
 
     /// A stack is spelled so that the interesting end of the range stays exact.

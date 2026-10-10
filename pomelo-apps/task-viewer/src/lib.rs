@@ -20,13 +20,22 @@
 //! run-time-stats clock the port does not keep, and the memory a task holds is not something a
 //! FreeRTOS task records.
 //!
-//! # Why the page looks like `htop`
+//! # Why the page looks like `htop`, and speaks this system's language
 //!
 //! Because that is the whole request, and because a shape someone already knows is worth more than a
 //! nicer one they have to learn: meters at the top, a table under them, a footnote at the bottom. The
-//! column heads and the state letters are in English — `TASK`, `S`, `R`, `S`, `T`, `Z` — for the same
-//! reason `htop`'s are: they are the names of things in a scheduler, and translating `S` into a word
-//! would be inventing an interface for a table nobody reads as prose.
+//! *shape* is `htop`'s, down to the row of column heads above the rows.
+//!
+//! The words in it are this interface's, and that is the part the first version got wrong: it copied
+//! `htop`'s English heads — `TASK S PRI FREE CORE` — arguing that they are the names of things in a
+//! scheduler. They are that, but they are also *labels on a screen*, and every other label on this panel
+//! is in the language the system is set to; a table that switched languages halfway down the page read
+//! as somebody else's. So the heads are 任务 / 状态 / 优先级 / 空闲栈 / 核心, and the state column is one
+//! character of the same language — the same four states `htop` prints as `R`, `S`, `T` and `Z`, for
+//! anyone who knows that table by heart. See [`format::state_char`].
+//!
+//! One label is still Latin, and should be: `PSRAM` is the name of a part. A translated part number is a
+//! word nobody can look up, which is the same rule the settings app's chip card follows with `ESP32-S3`.
 //!
 //! # Readings, and the clock they arrive on
 //!
@@ -49,7 +58,7 @@ use iced::theme::Palette;
 use iced::widget::{column, container, row, scrollable, text, Column, Row, Space};
 use iced::{Alignment, Color, Element, Length, Subscription, Theme};
 
-use pomelo_hal::{Board, MemoryInfo, TaskInfo};
+use pomelo_hal::{Board, MemoryInfo, TaskInfo, TaskState};
 use pomelo_material_symbols::Icon;
 use pomelo_widgets::preferences::{Language, SystemPreferences, ThemeMode};
 
@@ -237,14 +246,29 @@ impl TaskViewer {
 
     /// The line at the top: the icon, how many tasks there are, and how long the board has been up.
     ///
+    /// How many of the last reading's tasks are making progress.
+    ///
+    /// The one number in a task list worth having at a glance, which is why `htop` puts it in its
+    /// header: everything else in the list is a task *waiting* for something, and a board where that
+    /// count has gone to zero is a board that has stopped doing anything while looking perfectly busy.
+    fn running(&self) -> usize {
+        self.reading
+            .tasks
+            .iter()
+            .filter(|task| task.state == TaskState::Running)
+            .count()
+    }
+
     /// A heading and not a title, because this page has no name of its own to draw — the desktop tiles
     /// it with a name, and a second copy of it here would be a name written down twice. What a reader
-    /// wants at the top of a task list is the size of it.
+    /// wants at the top of a task list is the size of it, and how much of it is moving.
     fn header(&self, sizes: style::Sizes, ink: Color, muted: Color) -> Element<'_, Message> {
         let language = self.preferences.language;
-        let count = match language {
-            Language::Chinese => format!("任务 {}", self.reading.tasks.len()),
-            Language::English => format!("tasks {}", self.reading.tasks.len()),
+        let (tasks, running) = (self.reading.tasks.len(), self.running());
+
+        let summary = match language {
+            Language::Chinese => format!("任务 {tasks} · 运行 {running}"),
+            Language::English => format!("tasks {tasks} · {running} running"),
         };
 
         let uptime = self.reading.uptime.map_or_else(
@@ -258,7 +282,7 @@ impl TaskViewer {
                 .size(sizes.small)
                 .color(muted),
             Space::new().width(Length::Fixed(style::CELL_PAD * 2.0)),
-            text(count).size(sizes.small).color(ink),
+            text(summary).size(sizes.small).color(ink),
             Space::new().width(Length::Fill),
             text(uptime).size(sizes.small).color(muted),
         ]
@@ -280,7 +304,10 @@ impl TaskViewer {
         muted: Color,
     ) -> Element<'_, Message> {
         Column::with_children(vec![
-            meter("MEM", self.reading.memory, sizes, theme, ink, muted),
+            meter("内存", self.reading.memory, sizes, theme, ink, muted),
+            // `PSRAM` stays as it is, and it is the one label here that should: it is the name of a
+            // part, like `ESP32-S3` on the settings app's chip card, and a translation of a part number
+            // is a word nobody can look up.
             meter("PSRAM", self.reading.psram, sizes, theme, ink, muted),
         ])
         .spacing(style::ROW_GAP)
@@ -391,44 +418,121 @@ fn bar(share: f32, sizes: style::Sizes, theme: ThemeMode) -> Element<'static, Me
     .into()
 }
 
-/// The column heads, laid out by the same widths the rows use.
+/// One column of the table: what its head says, how wide it is, and which end its text sits on.
+///
+/// Not called `Column`: that name belongs to the widget these are laid out in. A field of a table is a
+/// column of it, and this is the description one is built from.
+///
+/// The table is built from these and from nothing else — the head row and every value row are the same
+/// five cells with different words in them — which is what keeps a head over its own column. The first
+/// version of this page laid the head out on its own, and it drifted on the very first frame: the cell
+/// meant to hold the name column's head was given no width at all, so the heads packed themselves
+/// against the left edge while the rows put their numbers against the right.
+#[derive(Debug, Clone, Copy)]
+struct Field {
+    /// What the head says.
+    head: &'static str,
+    /// How wide the column is, in multiples of the body text size — or `None` for the one column that
+    /// takes whatever is left, which is the task names and only ever the task names.
+    ///
+    /// Multiples rather than pixels, because the whole table scales with the font tier: a column
+    /// measured in pixels would clip its own head the moment the system's text size went up. See
+    /// [`style::Sizes::text`].
+    width: Option<f32>,
+    /// Which end the text lines up on: digits at the right, so that a column of them can be read down,
+    /// and names at the left.
+    align: Alignment,
+}
+
+/// The table's columns, in order.
+///
+/// Five, in the order a reader asks their questions: *what* is it, *is it making progress*, *who runs
+/// next*, *how much stack has it left at its worst*, *where*. The widths are the widest thing that goes
+/// in each column plus the air a column of digits wants; what sets the floor is the head, which is two
+/// or three characters of the system's language.
+const COLUMNS: [Field; 5] = [
+    Field {
+        head: "任务",
+        width: None,
+        align: Alignment::Start,
+    },
+    Field {
+        head: "状态",
+        width: Some(1.9),
+        align: Alignment::Center,
+    },
+    Field {
+        head: "优先级",
+        width: Some(3.5),
+        align: Alignment::End,
+    },
+    Field {
+        head: "空闲栈",
+        width: Some(3.0),
+        align: Alignment::End,
+    },
+    Field {
+        head: "核心",
+        width: Some(1.9),
+        align: Alignment::End,
+    },
+];
+
+/// One row of the table: its five columns, with these values in them.
+///
+/// The head and the value rows are both made here, which is the whole point of it being a function: a
+/// head laid out separately from the rows under it is a head that can drift, and on this table it did.
+/// Nothing else in this file decides a column's width or which end it lines up on.
+fn table_row(
+    sizes: style::Sizes,
+    values: [String; 5],
+    colors: [Color; 5],
+    size: f32,
+) -> Element<'static, Message> {
+    let cells = COLUMNS
+        .iter()
+        .zip(values)
+        .zip(colors)
+        .map(|((column, value), color)| {
+            let cell = container(text(value).size(size).color(color)).align_x(column.align);
+
+            let cell: Element<'static, Message> = match column.width {
+                Some(width) => cell.width(Length::Fixed(sizes.text * width)).into(),
+                None => cell.width(Length::Fill).into(),
+            };
+
+            cell
+        });
+
+    Row::with_children(cells)
+        .spacing(style::CELL_PAD)
+        .align_y(Alignment::Center)
+        .into()
+}
+
+/// The column heads: the same five columns as the rows under them, with the heads' own words in them.
 fn head_row(sizes: style::Sizes, muted: Color) -> Element<'static, Message> {
-    let head = |label: &'static str, width: f32, end: bool| -> Element<'static, Message> {
-        let cell = text(label).size(sizes.small).color(muted);
-
-        let cell: Element<'static, Message> = if end {
-            container(cell).width(Length::Fixed(width)).align_x(Alignment::End).into()
-        } else {
-            container(cell).width(Length::Fixed(width)).into()
-        };
-
-        cell
-    };
-
-    row![
-        head("TASK", 0.0, false),
-        head("S", sizes.state, false),
-        head("PRI", sizes.priority, true),
-        head("FREE", sizes.stack, true),
-        head("CORE", sizes.core, true),
-    ]
-    .spacing(style::CELL_PAD)
-    .align_y(Alignment::Center)
-    .into()
+    table_row(
+        sizes,
+        COLUMNS.map(|column| column.head.to_string()),
+        [muted; 5],
+        sizes.small,
+    )
 }
 
 /// One row of the table.
 ///
 /// The numbers are right-aligned and the names are not, which is what makes a column of them readable
 /// without a monospaced face: this panel has one font, and digits of different widths line up on their
-/// last character rather than their first.
+/// last character rather than their first. Which end each column's text sits on lives in [`COLUMNS`],
+/// because the head above it has to sit on the same one.
 fn task_row(
     task: &TaskInfo,
     sizes: style::Sizes,
     theme: ThemeMode,
     ink: Color,
     muted: Color,
-) -> Element<'_, Message> {
+) -> Element<'static, Message> {
     let name = if task.current {
         // The task this page is being drawn by: the one row a reader can place, because it is *this*.
         format!("{} *", task.name)
@@ -438,27 +542,24 @@ fn task_row(
 
     let core = task.core.map_or_else(|| String::from("-"), |core| core.to_string());
 
-    let number = |value: String, width: f32, color: Color| -> Element<'_, Message> {
-        container(text(value).size(sizes.text).color(color))
-            .width(Length::Fixed(width))
-            .align_x(Alignment::End)
-            .into()
-    };
-
-    let state = text(format::state_letter(task.state))
-        .size(sizes.text)
-        .color(style::state_ink(task.state, theme));
-
-    row![
-        text(name).size(sizes.text).color(ink).width(Length::Fill),
-        container(state).width(Length::Fixed(sizes.state)),
-        number(task.priority.to_string(), sizes.priority, ink),
-        number(format::stack_of(task.stack_free_bytes), sizes.stack, muted),
-        number(core, sizes.core, muted),
-    ]
-    .spacing(style::CELL_PAD)
-    .align_y(Alignment::Center)
-    .into()
+    table_row(
+        sizes,
+        [
+            name,
+            format::state_char(task.state).to_string(),
+            task.priority.to_string(),
+            format::stack_of(task.stack_free_bytes),
+            core,
+        ],
+        [
+            ink,
+            style::state_ink(task.state, theme),
+            ink,
+            muted,
+            muted,
+        ],
+        sizes.text,
+    )
 }
 
 /// A byte count as the shortest thing that still means it: `8.5M`, `512K`, `912`.
@@ -529,6 +630,60 @@ mod tests {
             Some(boot + REFRESH),
             "a second later is"
         );
+    }
+
+    /// The table's columns add up at every font tier, and every head fits the column it names.
+    ///
+    /// The first version of this page failed at exactly this and nothing said so: the head row and the
+    /// value rows were laid out separately, and one head cell was given no width at all — so the heads
+    /// packed themselves against the left edge while the rows' numbers sat against the right. Both are
+    /// built by [`table_row`] now, so that drift cannot come back; what is left to check is the
+    /// arithmetic: that the fixed columns leave room for the names, and that a head fits over its own.
+    #[test]
+    fn the_columns_fit_the_panel_and_their_heads_fit_in_them() {
+        use pomelo_widgets::preferences::FontSizeTier;
+
+        let tiers = [
+            FontSizeTier::ExtraSmall,
+            FontSizeTier::Small,
+            FontSizeTier::Standard,
+            FontSizeTier::Large,
+        ];
+
+        for tier in tiers {
+            let sizes = style::Sizes::of(tier);
+
+            let fixed: f32 = COLUMNS
+                .iter()
+                .filter_map(|column| column.width)
+                .map(|width| width * sizes.text)
+                .sum();
+            let gaps = style::CELL_PAD * (COLUMNS.len() - 1) as f32;
+            let names = style::PANEL - style::MARGIN * 2.0 - fixed - gaps;
+
+            assert!(
+                names >= 150.0,
+                "{tier:?}: the name column is left {names} px, which is not a name"
+            );
+
+            for column in COLUMNS {
+                let Some(width) = column.width else {
+                    continue;
+                };
+
+                // A head is as wide as its characters, and a character of this interface is square: two
+                // of them take two of the head's size, whatever the glyphs are. Which is the check that
+                // a Chinese head needs and a Latin one did not — `CORE` is four narrow glyphs, 核心 is
+                // two full-width ones.
+                let head = column.head.chars().count() as f32 * sizes.small;
+                assert!(
+                    head <= width * sizes.text,
+                    "{tier:?}: 「{}」 needs {head} px of a {} px column",
+                    column.head,
+                    width * sizes.text
+                );
+            }
+        }
     }
 
     /// A byte count is shortened at the unit it is at, and stays exact below a kilobyte.

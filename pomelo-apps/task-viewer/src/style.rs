@@ -10,6 +10,14 @@ use iced::Color;
 use pomelo_hal::TaskState;
 use pomelo_widgets::preferences::{FontSizeTier, ThemeMode};
 
+/// The panel this page is laid out for: the 480 px square the rest of this project designs against.
+///
+/// The layout itself never reads this — an app fills whatever space it is given, and iced hands it the
+/// panel's. What reads it is the *table*, whose columns are fixed widths: the one thing that can go
+/// wrong with them is running out of room for the names, and that is checked against this number in a
+/// test rather than discovered on the panel.
+pub const PANEL: f32 = 480.0;
+
 /// The room between the page and the panel, and between the parts of the page.
 pub const MARGIN: f32 = 14.0;
 pub const GAP: f32 = 10.0;
@@ -19,6 +27,10 @@ pub const ROW_GAP: f32 = 2.0;
 pub const CELL_PAD: f32 = 4.0;
 
 /// Everything the page measures with, for one font tier.
+///
+/// The *columns* of the table are not here: what a column is wide belongs with the column — see
+/// `COLUMNS` in the crate root — and it is expressed as a multiple of [`Sizes::text`], which is the one
+/// number in here those widths are derived from. What is left is the type scale and the meters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sizes {
     /// The table's own text: task names, priorities, stacks.
@@ -27,15 +39,6 @@ pub struct Sizes {
     pub small: f32,
     /// One row of the table, tall enough for the text and a finger's worth of air.
     pub row: f32,
-    /// The width of the state column: one letter, and not one word — the letters are what a person
-    /// reads here, and the words are in the legend this page does not need.
-    pub state: f32,
-    /// The priority column. Two digits is the most this scheduler has.
-    pub priority: f32,
-    /// The stack column: `16.5K` is the widest it gets.
-    pub stack: f32,
-    /// The core column: one digit, or `-` for a task the scheduler may run anywhere.
-    pub core: f32,
     /// A meter: the bar itself, the row it sits in, and the room its label takes.
     pub bar: f32,
     pub meter_row: f32,
@@ -57,10 +60,6 @@ impl Sizes {
             text: base * 0.75,
             small: base * 0.65,
             row: base * 1.15,
-            state: base * 0.9,
-            priority: base * 1.1,
-            stack: base * 1.6,
-            core: base * 0.9,
             bar: base * 0.6,
             meter_row: base * 0.95,
             meter_label: base * 2.1,
@@ -137,7 +136,7 @@ mod tests {
 
     /// Every size grows with the tier, and none of them collapses.
     ///
-    /// The one thing that could go wrong here is a multiplier small enough to round a column away at
+    /// The one thing that could go wrong here is a multiplier small enough to round something away at
     /// the smallest tier — a table whose numbers overlap is worse than a table that is too small.
     #[test]
     fn every_measurement_grows_with_the_font_tier() {
@@ -153,13 +152,16 @@ mod tests {
         for pair in sizes.windows(2) {
             let (small, large) = (pair[0], pair[1]);
             assert!(large.text > small.text, "{small:?} then {large:?}");
+            assert!(large.small > small.small);
             assert!(large.row > small.row);
-            assert!(large.stack > small.stack);
+            assert!(large.bar > small.bar);
+            assert!(large.meter_label > small.meter_label);
         }
 
         for size in sizes {
             assert!(size.text >= 10.0, "text is {size:?}");
             assert!(size.row > size.text, "a row has to be taller than its text");
+            assert!(size.bar > 0.0 && size.meter_row > size.bar);
         }
     }
 
