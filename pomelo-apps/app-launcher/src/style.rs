@@ -161,24 +161,25 @@ pub const PAGE_CURVE: Curve = Curve::EaseOutCubic;
 pub const TRANSITION: Duration = Duration::from_millis(240);
 pub const TRANSITION_CURVE: Curve = Curve::EaseOutCubic;
 
-/// How far an app has to have been pulled for a finger leaving it to send it off the panel: a share
-/// of the panel — 0.35, about a third of the way, 168 px of this one.
+/// How far a layer has to have been pushed for a finger leaving it to send it the way it was going: a
+/// share of the panel — 0.2, a fifth of the way, which is 96 px of this one.
 ///
 /// A share rather than pixels because a share is what the transition is drawn in (see
-/// [`pomelo_widgets::Progress`]), and shorter than the page turn's [`SWIPE_COMMIT`] (45%) on purpose:
-/// a page turn is a move to the next page, which can be made again a moment later, while a back
-/// gesture is a dismissal — the shortest gesture a phone has, and the one a person expects a third
-/// of the way to be enough for.
-pub const TRANSITION_COMMIT: f32 = 0.35;
+/// [`pomelo_widgets::Progress`]), but the number is [`EDGE_SWIPE`]'s: 96 px is how far an edge swipe
+/// had to travel before any of this moved with the finger, and a gesture that *shows* someone what
+/// they are doing must not then ask for more than the gesture that did not. It is also well short of
+/// the page turn's [`SWIPE_COMMIT`] (45%), and that is the other half of the same point: a page turn
+/// is a move to the next page, which can be made again a moment later, while this is a dismissal —
+/// the shortest gesture a phone has.
+pub const TRANSITION_COMMIT: f32 = 0.2;
 
-/// How fast a flick sends an app away without having been pulled that far: 450 px/s, the speed the
-/// page turn flicks at.
+/// How fast a flick sends a layer the way it was going without having been pushed that far: 250 px/s.
 ///
-/// One number for both because it is one hand: whoever flicks a page across flicks an app off the
-/// panel at the same speed, and a threshold that disagreed would be a panel that felt like two
-/// different panels on the same finger. The detector's `PanEndDetails` hands over the whole drag's
-/// velocity, which is what a flick is.
-pub const TRANSITION_FLING: f32 = 450.0;
+/// The speed the detector's own flick escape judges an edge swipe by, for the same reason the distance
+/// is [`EDGE_SWIPE`]'s: this replaced a swipe, and it may not be harder than the swipe was. Note that
+/// it is *not* the page turn's 450 px/s — a page crossed the panel is a deliberate move, while a
+/// dismissal is a flick of a thumb, and the two are not the same effort on this panel either.
+pub const TRANSITION_FLING: f32 = 250.0;
 
 /// The page dots: one per page, the page that is up lit.
 ///

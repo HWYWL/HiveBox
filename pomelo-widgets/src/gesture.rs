@@ -229,6 +229,31 @@ impl<'a, Message, Theme, Renderer> GestureDetector<'a, Message, Theme, Renderer>
         self.swipe_origins[direction.index()]
     }
 
+    /// Whether this detector wants pans at all.
+    fn has_pans(&self) -> bool {
+        self.on_pan_start.is_some() || self.on_pan_update.is_some() || self.on_pan_end.is_some()
+    }
+
+    /// Whether a drag that began at `start` began in a band this detector pins a direction to.
+    ///
+    /// The question a *pan* asks, and not the one a swipe asks. A swipe is judged by the direction it
+    /// ends in; a pan is a gesture that has a *place* it began, and the place is the whole of what
+    /// makes it this detector's rather than the page's. Which matters because the first eighteen
+    /// pixels of a thumb's drag are not a direction: a swipe upwards that begins with a sideways
+    /// twitch is still the gesture the hand meant, and a detector that judged it at the slop — or a
+    /// caller that judged it by the direction the drag was going in then — would never hear about it.
+    ///
+    /// What this does not do is loosen the *grip*: [`GestureDetector::claims`] still decides whether
+    /// the press under the drag is cancelled, so a drag this detector merely reports is a drag the page
+    /// underneath also gets. That is deliberate — a page scrolling under a drag that means nothing to
+    /// this detector is a page that still works.
+    fn began_in_a_pinned_band(&self, start: Point, bounds: Rectangle) -> bool {
+        self.swipe_origins
+            .iter()
+            .flatten()
+            .any(|(edge, depth)| edge.contains(start, bounds, *depth))
+    }
+
     /// Whether a drag in `direction` that started at `start` is this detector's to act on.
     ///
     /// Both halves matter. A direction with no handler is not this detector's, whoever's it is —
@@ -326,11 +351,12 @@ impl<'a, Message, Theme, Renderer> GestureDetector<'a, Message, Theme, Renderer>
     /// Sets the callback for pan start: the frame the drag passed the slop and became this
     /// detector's.
     ///
-    /// The four pan callbacks are the detector's own drags and nothing else. What makes a drag this
-    /// detector's is [`GestureDetector::swipe_origin`], and a pan callback with *no* pin claims
-    /// nothing at all — so a caller who wants pans has to say where they begin. That is the whole
-    /// difference between a gesture layer and a layer that eats scrolls: a page under it keeps
-    /// scrolling wherever the pin does not reach.
+    /// The four pan callbacks are for drags that *began* in one of the bands this detector was given
+    /// with [`GestureDetector::swipe_origin`], whatever direction those drags first went in — see
+    /// `began_in_a_pinned_band` for why the direction at the slop is not the question. A pan callback
+    /// with *no* pin hears nothing at all, so a caller who wants pans has to say where they begin.
+    /// That is the whole difference between a gesture layer and a layer that eats scrolls: a page
+    /// under it keeps scrolling wherever the pins do not reach.
     pub fn on_pan_start(
         mut self,
         on_pan_start: impl Fn(PanStartDetails) -> Message + 'a,
@@ -551,11 +577,12 @@ where
                             state.start_pos,
                             bounds,
                         );
-                        // The pan callbacks are the detector's own drags and nothing else, for the
-                        // same reason the swipe messages are: a pan this detector did not claim is a
-                        // scroll of whatever is underneath, and a caller drawing a screen from it
-                        // would be drawing one for a finger that is reading a list.
-                        if state.owns {
+                        // A pan is the detector's when the drag began in one of its bands, and not
+                        // when the direction it *started* in happened to match one: the first eighteen
+                        // pixels of a thumb's drag are not a direction, and a caller that judged them
+                        // as one would never hear about the gestures that began with a twitch. See
+                        // `began_in_a_pinned_band`.
+                        if self.has_pans() && self.began_in_a_pinned_band(state.start_pos, bounds) {
                             if let Some(on_pan_start) = &self.on_pan_start {
                                 shell.publish(on_pan_start(PanStartDetails {
                                     point: state.start_pos,
@@ -564,7 +591,10 @@ where
                         }
                     }
 
-                    if state.is_dragging && state.owns {
+                    if state.is_dragging
+                        && self.has_pans()
+                        && self.began_in_a_pinned_band(state.start_pos, bounds)
+                    {
                         if let Some(on_pan_update) = &self.on_pan_update {
                             shell.publish(on_pan_update(PanUpdateDetails {
                                 point: pos,
@@ -603,11 +633,12 @@ where
                             state.start_pos,
                             bounds,
                         );
-                        // The pan callbacks are the detector's own drags and nothing else, for the
-                        // same reason the swipe messages are: a pan this detector did not claim is a
-                        // scroll of whatever is underneath, and a caller drawing a screen from it
-                        // would be drawing one for a finger that is reading a list.
-                        if state.owns {
+                        // A pan is the detector's when the drag began in one of its bands, and not
+                        // when the direction it *started* in happened to match one: the first eighteen
+                        // pixels of a thumb's drag are not a direction, and a caller that judged them
+                        // as one would never hear about the gestures that began with a twitch. See
+                        // `began_in_a_pinned_band`.
+                        if self.has_pans() && self.began_in_a_pinned_band(state.start_pos, bounds) {
                             if let Some(on_pan_start) = &self.on_pan_start {
                                 shell.publish(on_pan_start(PanStartDetails {
                                     point: state.start_pos,
@@ -616,7 +647,10 @@ where
                         }
                     }
 
-                    if state.is_dragging && state.owns {
+                    if state.is_dragging
+                        && self.has_pans()
+                        && self.began_in_a_pinned_band(state.start_pos, bounds)
+                    {
                         if let Some(on_pan_update) = &self.on_pan_update {
                             shell.publish(on_pan_update(PanUpdateDetails {
                                 point: pos,
@@ -648,10 +682,10 @@ where
 
                     if state.is_dragging {
                         state.is_dragging = false;
-                        // Asked with the answer from the moment the drag began and not with this
-                        // moment's direction: a pan is one gesture from one place, and the release is
+                        // Asked the same question the rest of the drag asked, and not about the
+                        // direction it ends in: a pan is one gesture from one place, and its release is
                         // its last frame rather than a new question about it.
-                        if state.owns {
+                        if self.has_pans() && self.began_in_a_pinned_band(state.start_pos, bounds) {
                             if let Some(on_pan_end) = &self.on_pan_end {
                                 shell.publish(on_pan_end(PanEndDetails {
                                     velocity,

@@ -120,7 +120,8 @@ use std::sync::Arc;
 use iced::theme::Palette;
 use iced::widget::{button, column, container, stack, text, Column, Row, Space};
 use iced::{
-    Alignment, Border, Color, Element, Length, Shadow, Size, Subscription, Task, Theme, Vector,
+    Alignment, Border, Color, Element, Length, Point, Rectangle, Shadow, Size, Subscription, Task,
+    Theme, Vector,
 };
 
 use calculator::Calculator;
@@ -216,14 +217,20 @@ pub enum Message {
     /// (`pomelo_widgets::ScreenTransition` publishes it on the frame the app stops moving), and it
     /// is what ends the transition — until it arrives, the app is still drawn over the desktop.
     TransitionSettled,
-    /// A finger the edge layer claimed, reported once a frame: how far it has taken the app from
-    /// where the app was.
+    /// A finger the edge layer is reporting, once a frame: where it came down and how far it has taken
+    /// the layer in front since.
     ///
-    /// A *drag* and not a swipe, because the app is what moves: what the finger has done so far is
-    /// where the app is drawn, and what it does next is where the app goes next. The message carries
-    /// the distance from where the finger came down, which is the same number every frame and grows —
-    /// see [`Launcher::pull_app`].
-    Pulled(Vector),
+    /// A *drag* and not a swipe, because what moves is the layer itself: what the finger has done so
+    /// far is where it is drawn, and what it does next is where it goes next. Both numbers are here
+    /// because both are needed — the *start* is what says which edge this gesture came out of, and
+    /// therefore which gesture it is, while the distance is what says how far it has gone. See
+    /// [`Launcher::layer_for`].
+    Pulled {
+        /// Where the finger came down, on the panel.
+        start: Point,
+        /// How far it has travelled since.
+        delta: Vector,
+    },
     /// The finger left the panel, at the end of a drag: how fast it was moving when it left.
     ///
     /// Speed is half of what decides where an app ends up — a short flick is a decision as much as a
@@ -1006,7 +1013,7 @@ impl Launcher {
                 // gesture decided, several frames ago.
                 self.transition = None;
             }
-            Message::Pulled(delta) => self.pull_layer(delta),
+            Message::Pulled { start, delta } => self.pull_layer(start, delta),
             Message::Released(velocity) => self.release_layer(velocity),
             Message::Exit => match self.screen {
                 Screen::App(index) => {
@@ -1208,7 +1215,7 @@ impl Launcher {
     /// Which layer that is, and which way it is going, come off the drag itself — see
     /// [`Launcher::layer_for`]. This is the arithmetic: how far along its own axis the finger has taken
     /// it, from where the drag was recognised.
-    fn pull_layer(&mut self, delta: Vector) {
+    fn pull_layer(&mut self, start: Point, delta: Vector) {
         use pomelo_widgets::{Motion, Progress};
 
         // A layer that is already on its way is not this finger's to take: what sent it owns it until
@@ -1219,12 +1226,12 @@ impl Launcher {
         }
 
         // The layer a finger has hold of: the one it already had, or — on the first frame of a drag —
-        // whichever layer this direction is about. A layer that changed the edge it was leaving by
+        // whichever layer this gesture is about. A layer that changed the edge it was leaving by
         // halfway through would be a layer that jumped.
         let held = self
             .transition
             .map(|transition| (transition.layer, transition.motion))
-            .or_else(|| self.layer_for(delta));
+            .or_else(|| self.layer_for(start, delta));
 
         let Some((layer, motion)) = held else {
             return;
@@ -1261,39 +1268,47 @@ impl Launcher {
         });
     }
 
-    /// Which layer a drag of `delta` takes hold of, and which way it takes it — or `None` for a drag
-    /// that is on its way to something else.
+    /// Which layer the gesture a finger is making takes hold of, and which way it takes it — or `None`
+    /// for a drag that is on its way to something else.
     ///
-    /// The edge a drag began at is not asked here, and could not be: the gesture detector reports a drag
-    /// to this launcher only when its origin pin matched, so a downward drag *is* one that began at the
-    /// head of the panel and an upward one began at its foot. What is left to decide is what a direction
-    /// means — and which layer is in front, because the switcher is over everything while it is down: a
+    /// The band the finger came *down* in decides what the gesture is about, and the direction it is
+    /// going now decides which way the layer moves. The band rather than the direction the drag started
+    /// in, because the first eighteen pixels of a thumb's drag are not a direction: a swipe up from the
+    /// foot of the panel that begins with a sideways twitch is still that gesture, and the edge a finger
+    /// came down beside is a fact about it that does not wobble. It is also what tells two gestures
+    /// apart that go the same way — down from the head of the panel is the switcher, while down from
+    /// anywhere else is nothing at all.
+    ///
+    /// The switcher comes first, and not by accident: it is over everything while it is down, so a
     /// finger on it is talking to it and not to the app behind it.
-    fn layer_for(&self, delta: Vector) -> Option<(Layer, pomelo_widgets::Motion)> {
-        use pomelo_widgets::Motion;
+    fn layer_for(&self, start: Point, delta: Vector) -> Option<(Layer, pomelo_widgets::Motion)> {
+        use pomelo_widgets::{Edge, Motion};
+
+        let panel = Rectangle::new(Point::ORIGIN, self.size);
+        let from = |edge: Edge| edge.contains(start, panel, style::EDGE_ZONE);
 
         if self.recents {
-            // The sheet is in front, and it only moves the way it came: up. A finger going down the
-            // panel with it down is pushing it the way it is already clamped, and a finger going
-            // sideways is on its way to something else — neither is a way to put it away. Those are the
-            // gesture from the foot of the panel, a tap on the wash, and the back key.
-            return (delta.y < 0.0).then_some((Layer::Switcher, Motion::Down));
+            // The sheet is in front, and it only moves the way it came: up, out of the foot of the
+            // panel. A finger going down the panel with it down is pushing it the way it is already
+            // clamped, and a finger that came down anywhere else is on its way to something else —
+            // neither is a way to put it away. Those are a tap on the wash and the back key.
+            return (from(Edge::Bottom) && delta.y < 0.0).then_some((Layer::Switcher, Motion::Down));
         }
 
         // Down from the head of the panel: the sheet comes down over whatever is up.
-        if delta.y > 0.0 && delta.y >= delta.x.abs() {
+        if from(Edge::Top) && delta.y > 0.0 {
             return Some((Layer::Switcher, Motion::Down));
         }
 
-        // Otherwise it is the app in front, if there is one: right takes it off to the right, and up
-        // puts it aside. A finger going down the panel or going left is on its way somewhere else.
+        // Otherwise it is the app in front, if there is one: a finger from the left edge going right
+        // takes it off to the right, and one from the foot of the panel going up puts it aside.
         let Screen::App(app) = self.screen else {
             return None;
         };
 
-        if delta.x > 0.0 && delta.x >= delta.y.abs() {
+        if from(Edge::Left) && delta.x > 0.0 {
             Some((Layer::App(app), Motion::Back))
-        } else if delta.y < 0.0 && -delta.y > delta.x.abs() {
+        } else if from(Edge::Bottom) && delta.y < 0.0 {
             Some((Layer::App(app), Motion::Home))
         } else {
             None
@@ -1526,7 +1541,13 @@ impl Launcher {
     /// is a page of drags. The origin is asked the moment a drag passes [`style::SLOP`], so a scroll in
     /// the middle of a page is never interrupted in the first place — see
     /// `GestureDetector::swipe_origin`. The pans need the pins as much as the swipes do, and for one
-    /// more reason: a pan callback with no pin claims nothing at all.
+    /// more reason: a pan callback with no pin hears nothing at all.
+    ///
+    /// What a pin means for a pan is *where the drag began* rather than which way it first went: the
+    /// first eighteen pixels of a thumb's drag are not a direction, and a gesture layer that judged them
+    /// as one would never hear about the gestures that began with a twitch. Turning the band into a
+    /// gesture — down from the head is the switcher, up from the foot puts an app aside, right out of
+    /// the left edge takes it off the panel — is [`Launcher::layer_for`]'s.
     ///
     /// The downward pin is not a formality, it is the reason the mechanism exists. Of the four
     /// directions it is the one a *page* is most likely to want for itself — every list on this board
@@ -1547,7 +1568,15 @@ impl Launcher {
             // The finger's path, and then its last velocity. Every gesture this layer knows is a drag:
             // what the finger has done so far is where the layer is drawn, and what it meant is decided
             // when it leaves. See [`Launcher::pull_layer`] and [`Launcher::release_layer`].
-            .on_pan_update(|details| Message::Pulled(details.total_delta))
+            //
+            // The start is recovered from the frame it is reported in — where the finger is, less how
+            // far it has travelled — because the band it came down in is what says which gesture this
+            // is, and `PanUpdateDetails` carries the two numbers that add up to it. See
+            // [`Launcher::layer_for`].
+            .on_pan_update(|details| Message::Pulled {
+                start: details.point - details.total_delta,
+                delta: details.total_delta,
+            })
             .on_pan_end(|details| Message::Released(details.velocity))
             // The one exception is the back gesture that comes in from the *right*, which is still a
             // swipe, with the behaviour
@@ -1808,9 +1837,38 @@ mod tests {
         // wants the sheet is not testing what happens to a finger that arrives in the middle of an app
         // sliding off the panel.
         launcher.update(Message::TransitionSettled);
-        launcher.update(Message::Pulled(Vector::new(0.0, 200.0)));
+        launcher.update(pulled_from_top(200.0));
         launcher.update(Message::Released(Vector::new(0.0, 0.0)));
         launcher.update(Message::TransitionSettled);
+    }
+
+    /// A finger's drag in from the left edge: how far it has since gone to the right.
+    ///
+    /// The start is what these carry and not just the distance, because the edge a finger came down
+    /// beside is what says which gesture it is making — see [`Launcher::layer_for`]. Written down once
+    /// here rather than in each test so that the geometry is in one place and the tests read as the
+    /// gestures they are.
+    fn pulled_from_left(dx: f32) -> Message {
+        Message::Pulled {
+            start: Point::new(style::EDGE_ZONE / 2.0, SCREEN as f32 / 2.0),
+            delta: Vector::new(dx, 0.0),
+        }
+    }
+
+    /// And from the foot of the panel: how far it has gone upwards.
+    fn pulled_from_bottom(up: f32) -> Message {
+        Message::Pulled {
+            start: Point::new(SCREEN as f32 / 2.0, SCREEN as f32 - style::EDGE_ZONE / 2.0),
+            delta: Vector::new(0.0, -up),
+        }
+    }
+
+    /// And from the head of the panel: how far it has gone downwards.
+    fn pulled_from_top(down: f32) -> Message {
+        Message::Pulled {
+            start: Point::new(SCREEN as f32 / 2.0, style::EDGE_ZONE / 2.0),
+            delta: Vector::new(0.0, down),
+        }
     }
     use super::*;
 
@@ -2224,7 +2282,7 @@ mod tests {
         // A finger down on the left edge and 118 px to the right of where the drag was recognised:
         // the app follows it, and nothing at all has been decided yet — it is still the screen, it is
         // still running, and it is where the finger has put it.
-        launcher.update(Message::Pulled(Vector::new(style::SLOP + 118.0, 4.0)));
+        launcher.update(pulled_from_left(style::SLOP + 118.0));
 
         assert_eq!(
             launcher.transition,
@@ -2244,7 +2302,7 @@ mod tests {
         assert!(launcher.is_app_running(SETTINGS));
 
         // The finger goes back to where it came down, and the app comes back with it.
-        launcher.update(Message::Pulled(Vector::new(style::SLOP, 0.0)));
+        launcher.update(pulled_from_left(style::SLOP));
         assert_eq!(
             launcher.transition,
             Some(Transition {
@@ -2275,7 +2333,7 @@ mod tests {
         // And now a flick: a short pull and a fast one. The app goes, and the desktop is the screen
         // from this frame — what is left is drawing the app sliding off a panel that has left it.
         launcher.update(Message::TransitionSettled);
-        launcher.update(Message::Pulled(Vector::new(style::SLOP + 20.0, 0.0)));
+        launcher.update(pulled_from_left(style::SLOP + 20.0));
         launcher.update(Message::Released(Vector::new(
             style::TRANSITION_FLING + 100.0,
             0.0,
@@ -2304,7 +2362,7 @@ mod tests {
 
         assert_eq!(launcher.screen, Screen::App(MUSIC));
 
-        launcher.update(Message::Pulled(Vector::new(0.0, 200.0)));
+        launcher.update(pulled_from_top(200.0));
 
         assert_eq!(
             launcher.transition,
@@ -2326,7 +2384,7 @@ mod tests {
         // With the sheet down it is the layer in front, and it moves the way it came: up. The app
         // behind it does not move at all, and a flick upwards is what puts the sheet away.
         launcher.update(Message::TransitionSettled);
-        launcher.update(Message::Pulled(Vector::new(0.0, -200.0)));
+        launcher.update(pulled_from_bottom(200.0));
 
         assert_eq!(
             launcher.transition,
@@ -2348,6 +2406,76 @@ mod tests {
 
         assert!(!launcher.recents, "an upward flick puts the sheet away");
         assert_eq!(launcher.screen, Screen::App(MUSIC));
+    }
+
+    /// A gesture is what the *edge* it came from says it is, and it does not have to be dragged nearly
+    /// as far as a page turn to count.
+    ///
+    /// Both halves of that are about how hard a gesture is to make. The band a finger comes down in
+    /// decides which gesture it is — a thumb that begins a swipe up from the foot of the panel with a
+    /// sideways twitch is still swiping up, and the twitch is most of the movement here — and 96 px of
+    /// travel is enough to mean it, which is the distance an edge swipe needed before any of this
+    /// followed a finger.
+    #[test]
+    fn a_gesture_is_judged_by_the_edge_it_came_from() {
+        use pomelo_widgets::{Motion, Progress};
+
+        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
+        launcher.update(Message::Open(MUSIC));
+        launcher.update(Message::TransitionSettled);
+
+        // A thumb down in the last 24 px of the panel, going up and a little sideways.
+        launcher.update(Message::Pulled {
+            start: Point::new(SCREEN as f32 / 2.0, SCREEN as f32 - style::EDGE_ZONE / 2.0),
+            delta: Vector::new(30.0, -50.0),
+        });
+
+        assert_eq!(
+            launcher.transition,
+            Some(Transition {
+                layer: Layer::App(MUSIC),
+                motion: Motion::Home,
+                start: 0.0,
+                progress: Progress::At((50.0 - style::SLOP) / SCREEN as f32),
+            }),
+            "up from the foot of the panel puts the app aside, whatever the wrist did first"
+        );
+
+        // Let go of short of the threshold and the app comes back, which is where it stays.
+        launcher.update(Message::Released(Vector::new(0.0, 0.0)));
+        launcher.update(Message::TransitionSettled);
+
+        assert_eq!(launcher.screen, Screen::App(MUSIC));
+
+        // Then 118 px out of the left edge: past the point of no return on distance alone, with no help
+        // from speed and without crossing a third of the panel.
+        launcher.update(pulled_from_left(style::SLOP + 118.0));
+        launcher.update(Message::Released(Vector::new(0.0, 0.0)));
+
+        assert_eq!(
+            launcher.transition,
+            Some(Transition {
+                layer: Layer::App(MUSIC),
+                motion: Motion::Back,
+                start: 0.0,
+                progress: Progress::To(1.0),
+            }),
+            "96 px of travel is what an edge swipe used to take"
+        );
+        assert_eq!(launcher.screen, Screen::Grid, "so the app leaves");
+
+        // And a finger that came down at the *head* of the panel going up takes nothing with it: that
+        // edge is where the switcher comes down from, and it does not come up.
+        launcher.update(Message::TransitionSettled);
+        launcher.update(Message::Pulled {
+            start: Point::new(SCREEN as f32 / 2.0, style::EDGE_ZONE / 2.0),
+            delta: Vector::new(0.0, -50.0),
+        });
+
+        assert_eq!(
+            launcher.transition, None,
+            "no layer moves for a finger going the wrong way out of an edge"
+        );
     }
 
     /// Every edge gesture is pinned to the edge it starts at.
@@ -2500,7 +2628,7 @@ mod tests {
         // The sheet is what a gesture is about while it is down, and it is the layer in front: a drag
         // up from the foot of the panel takes *it* away, and the app underneath is exactly where it
         // was — which is the whole difference between a layer and a screen.
-        launcher.update(Message::Pulled(Vector::new(0.0, -200.0)));
+        launcher.update(pulled_from_bottom(200.0));
         launcher.update(Message::Released(Vector::new(0.0, -600.0)));
 
         assert!(!launcher.recents, "a drag up closes it as well");
