@@ -90,6 +90,7 @@ jobs:
                    --name "${XTENSA_TOOLCHAIN}" \
                    --toolchain-version "${XTENSA_TOOLCHAIN_VERSION}" \
                    --targets esp32s3 \
+                   --std \
                    --disable-timeouts > "${log}" 2>&1; then
                 break
               fi
@@ -106,8 +107,11 @@ jobs:
       - name: 编译固件并生成合并镜像
         run: |
           set -eo pipefail
+          # 先 espup 再 ESP-IDF：两个脚本都往 PATH 前面插东西，后插的排在前面，
+          # 于是 C 编译器是 ESP-IDF 那套。反过来的话，espup 自带的 GCC 会盖住它，
+          # 而 ESP-IDF 会拿 `idf_tools.py check-tool-supported` 一比就拒绝开工。
+          . "$HOME/export-esp.sh"
           . "$HOME/esp-idf/export.sh"
-          . "$HOME/export-esp.sh"     # espup 生成的：PATH、LIBCLANG_PATH 与工具链名
 
           # 先单独探一下工具链：它不可用时，问题在这一行，而不在固件里。
           if ! cargo +${XTENSA_TOOLCHAIN} --version; then
@@ -130,9 +134,14 @@ jobs:
 
           if [ "${status}" -ne 0 ]; then
             echo "::error::idf.py 退出码 ${status}"
-            echo "::error::---- 日志里的可疑行 ----"
+            echo "::error::---- 日志里最早的可疑行 ----"
             grep -n -i -E 'error|fatal|failed|cannot find|undefined reference|no such file|panic' "${log}" \
-              | tail -n "${BUILD_LOG_TAIL}" | while IFS= read -r line; do
+              | sed -n '1,12p' | while IFS= read -r line; do
+                echo "::error::${line}"
+              done
+            echo "::error::---- 日志里最后的可疑行 ----"
+            grep -n -i -E 'error|fatal|failed|cannot find|undefined reference|no such file|panic' "${log}" \
+              | tail -n 20 | while IFS= read -r line; do
                 echo "::error::${line}"
               done
             echo "::error::---- 日志末尾 15 行 ----"
