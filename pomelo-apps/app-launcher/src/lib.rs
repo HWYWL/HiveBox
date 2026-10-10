@@ -54,6 +54,26 @@
 //! the index it hands the pager, and the [`Message::PageChanged`] it is told about when a turn
 //! commits.
 //!
+//! # An app arrives and leaves, rather than appearing
+//!
+//! The desktop is what an app is drawn *over*, and the two moments that matter are the ones a phone
+//! spends showing rather than cutting: the app slides in from the right when a tile is tapped, off
+//! the right when back is pressed, and off the top when a finger comes up from the foot of the
+//! panel. None of those is the screen changing. The screen changes when the gesture decides — on the
+//! tap, or on the finger leaving — and what happens after that is the app being *drawn* over a
+//! desktop that is already up. See [`Launcher::view`]: one frame, two screens, and
+//! [`pomelo_widgets::transition`] is what puts them both in it.
+//!
+//! Where the app's state lives while it leaves is what makes this a transition rather than a cut
+//! with a picture of the old screen in it: the app never went anywhere. Its pages, its scroll and
+//! its place in `running_apps` are still this launcher's, and the slide is drawn from *that* — by
+//! the same function that would draw the app if it were opened again. [`Launcher::app_screen`].
+//!
+//! And nothing else in the launcher changes while a screen moves, which is deliberate: the screen
+//! is the desktop from the frame the gesture is recognised on, so the status bar, the exit key, the
+//! switcher and a press that lands in the middle of a slide all get the answer a phone would give.
+//! What is in flight is a picture, and a picture is not a state machine.
+//!
 //! # The task switcher is a layer, and the top edge is where it comes from
 //!
 //! A drag down from the head of the panel brings [`recents`] over whatever is up: what is running,
@@ -173,6 +193,12 @@ pub enum Message {
     RecentsKill(usize),
     /// The switcher's "clear all": stop every app it lists.
     RecentsClearAll,
+    /// A transition reported itself over: the app that was on its way has arrived, or has gone.
+    ///
+    /// The one message here that comes from a widget rather than from a finger or a key
+    /// (`pomelo_widgets::ScreenTransition` publishes it on the frame the app stops moving), and it
+    /// is what ends the transition — until it arrives, the app is still drawn over the desktop.
+    TransitionSettled,
     /// The status bar's readings, driven by the [`Subscription`].
     ///
     /// Produced periodically by [`status_stream`] and whenever underlying
@@ -193,6 +219,24 @@ pub enum Message {
     Music(music_player::Message),
     Terminal(terminal::Message),
     WebManager(web_manager::Message),
+}
+
+/// An app on its way over the desktop, and which way it is going.
+///
+/// The *screen* is not part of this, and that is the point: an app that is arriving is already
+/// [`Screen::App`], and one that is leaving has already given way to the desktop. The screen
+/// changes when the gesture decides — a swipe home is home from the frame it is recognised on — and
+/// what is left to do for the next few hundred milliseconds is *show* it: the app is drawn over the
+/// desktop for as long as it takes to slide off it, by [`pomelo_widgets::transition`].
+///
+/// Which is why the app is remembered here by index rather than by element: its state never left
+/// this launcher — the same reason a backgrounded app comes back on the page it was on — and the
+/// view builds the app it draws from that state. See [`Launcher::view`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Transition {
+    motion: pomelo_widgets::Motion,
+    /// The app the transition is about.
+    app: usize,
 }
 
 /// The launcher.
@@ -218,6 +262,11 @@ pub struct Launcher {
     /// screen, and the screen under it is still what is running. What it lists is `running_apps`,
     /// which is the same list the status bar's row of icons is drawn from.
     recents: bool,
+    /// An app on its way in or out, while it is moving.
+    ///
+    /// `Some` for the few hundred milliseconds between the gesture and the app having arrived or
+    /// gone, and the only thing that makes the view draw two screens in one frame.
+    transition: Option<Transition>,
     clock: String,
     battery: u8,
     charging: bool,
@@ -254,6 +303,7 @@ impl Launcher {
             size: Size::new(SCREEN as f32, SCREEN as f32),
             page: 0,
             recents: false,
+            transition: None,
             clock,
             battery,
             charging,
@@ -445,6 +495,14 @@ impl Launcher {
 
         if self.screen == Screen::App(index) {
             self.screen = Screen::Grid;
+        }
+
+        // An app that has just been stopped is not on its way anywhere. Killing one is not a
+        // transition — there is nothing left to slide, and the state the view would draw it from is
+        // the state that was just freed — so a slide about this app ends with it. The switcher's
+        // cross is where this happens: it can be pressed while an app is still moving.
+        if self.transition.map(|transition| transition.app) == Some(index) {
+            self.transition = None;
         }
     }
 
@@ -810,6 +868,12 @@ impl Launcher {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Open(index) => {
+                // Whether this app is opening *over the desktop*, which is the only way one arrives:
+                // the desktop is what an app is drawn over, and two apps are never over each other.
+                // A tile in the switcher, or a tile of an app already running, changes the screen
+                // without a slide for that reason and not to save the frames.
+                let from_the_desktop = matches!(self.screen, Screen::Grid);
+
                 self.screen = Screen::App(index);
 
                 // Most recent last, and an app that is already running moves there rather than
@@ -844,12 +908,25 @@ impl Launcher {
                 // the size *once*, when the window or the panel opens, and an app that is not on
                 // screen at that moment never hears it. See [`Launcher::hand_over_size`].
                 self.hand_over_size();
+
+                if from_the_desktop {
+                    self.transition = Some(Transition {
+                        motion: pomelo_widgets::Motion::Open,
+                        app: index,
+                    });
+                }
             }
             Message::PageChanged(page) => {
                 self.page = page;
             }
             Message::Back => return self.go_back(),
             Message::Home => self.go_home(),
+            Message::TransitionSettled => {
+                // The app has stopped moving, so there is nothing left to draw over the desktop and
+                // nothing left to remember about how it got there: the screen is already the one
+                // that owns the panel now, and the next frame is the ordinary one.
+                self.transition = None;
+            }
             Message::Exit => match self.screen {
                 Screen::App(index) => {
                     self.kill_app(index);
@@ -944,6 +1021,14 @@ impl Launcher {
             return Task::none();
         }
 
+        // The app that would be leaving, for the case where the press is not the app's to take. It
+        // is read before the match rather than inside it because two of the arms answer with a
+        // `bool` that says nothing about *which* app answered.
+        let leaving = match self.screen {
+            Screen::App(index) => Some(index),
+            Screen::Grid => None,
+        };
+
         let (consumed, task) = match self.screen {
             Screen::Grid => (true, Task::none()),
             Screen::App(SETTINGS) => {
@@ -975,6 +1060,18 @@ impl Launcher {
         };
 
         if !consumed {
+            if let Some(app) = leaving {
+                // Leaving the app is a *transition*, and the screen is the desktop from here: the
+                // gesture has decided, and everything that asks which screen is up — the status bar,
+                // the exit key, a press that arrives in the middle of the slide — gets the answer a
+                // phone would give. What is left to do is draw the app sliding off the panel, which
+                // is [`Launcher::view`]'s and [`Message::TransitionSettled`]'s business.
+                self.transition = Some(Transition {
+                    motion: pomelo_widgets::Motion::Back,
+                    app,
+                });
+            }
+
             self.screen = Screen::Grid;
         }
 
@@ -990,7 +1087,18 @@ impl Launcher {
     ///
     /// It also puts the task switcher away, because the same gesture means the same thing to it: the
     /// sheet is in front, so "put this aside" is about the sheet.
+    ///
+    /// The app leaves the panel the way the finger went — upwards, which is the direction that says
+    /// "put this aside" rather than "go back". Which is the only difference between this and a back:
+    /// the screen, the effect on `running_apps` and the app's own page are the same either way.
     fn go_home(&mut self) {
+        if let Screen::App(app) = self.screen {
+            self.transition = Some(Transition {
+                motion: pomelo_widgets::Motion::Home,
+                app,
+            });
+        }
+
         self.screen = Screen::Grid;
         self.recents = false;
     }
@@ -1025,16 +1133,24 @@ impl Launcher {
     /// around this view is a gesture over every app the launcher hosts. One put inside an app would
     /// be a gesture that app had to know about.
     pub fn view(&self) -> Element<'_, Message> {
-        let screen = match self.screen {
-            Screen::Grid => self.launcher(),
-            Screen::App(TERMINAL) => self.terminal_screen(),
-            Screen::App(CALCULATOR) => self.calculator_screen(),
-            Screen::App(SETTINGS) => self.settings_screen(),
-            Screen::App(MUSIC) => self.music_screen(),
-            Screen::App(WEB_MANAGER) => self.web_manager_screen(),
-            // An index the catalogue does not have. The grid cannot produce one, but `usize` is not
-            // exhaustible, so the arm exists and shows the only screen that is always there.
-            Screen::App(_) => self.launcher(),
+        let screen = match self.transition {
+            // An app on its way in or out is two screens in one frame: the desktop it is over, and
+            // the app itself. Which of them the app *is* does not matter here — the motion decides
+            // where it is drawn, and the screen it is on its way to has already been decided by
+            // whoever started the transition.
+            Some(transition) => pomelo_widgets::screen_transition(
+                self.launcher(),
+                self.app_screen(transition.app),
+            )
+            .motion(transition.motion)
+            .duration(style::TRANSITION)
+            .curve(style::TRANSITION_CURVE)
+            .on_settled(Message::TransitionSettled)
+            .into(),
+            None => match self.screen {
+                Screen::Grid => self.launcher(),
+                Screen::App(index) => self.app_screen(index),
+            },
         };
 
         // The task switcher, when it is down, is a layer *over* that screen rather than a screen of
@@ -1055,6 +1171,25 @@ impl Launcher {
         };
 
         self.edge_gestures(screen).into()
+    }
+
+    /// The screen one of the apps draws.
+    ///
+    /// The same match [`Launcher::view`] used to make inline, and it is a method because a
+    /// transition needs an app's screen whether or not that app *is* the screen: one on its way out
+    /// has already given way to the desktop, and what makes it drawable anyway is that its state
+    /// never went anywhere — the pages it was on, the tool it was holding, its place in
+    /// `running_apps`. An index the catalogue does not have draws the desktop, the one screen that
+    /// is always there.
+    fn app_screen(&self, app: usize) -> Element<'_, Message> {
+        match app {
+            TERMINAL => self.terminal_screen(),
+            CALCULATOR => self.calculator_screen(),
+            SETTINGS => self.settings_screen(),
+            MUSIC => self.music_screen(),
+            WEB_MANAGER => self.web_manager_screen(),
+            _ => self.launcher(),
+        }
     }
 
     /// The screen, with the panel's edge gestures around it.
@@ -1644,6 +1779,81 @@ mod tests {
         // On the desktop there is nowhere further to go: the grid is what home is.
         launcher.update(Message::Home);
         assert_eq!(launcher.screen, Screen::Grid);
+    }
+
+    /// An app is drawn over the desktop while it moves, and the desktop is the screen from the frame
+    /// the gesture is recognised on.
+    ///
+    /// The design in one test: the screen changing and the app still being drawn are two different
+    /// events, and what ends the second is the widget reporting that the app has arrived or gone —
+    /// not the gesture, and not the launcher.
+    #[test]
+    fn an_app_is_drawn_over_the_desktop_while_it_moves() {
+        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
+
+        // 1. Opened from the desktop: an arrival, over a desktop that is still there. The app *is*
+        //    the screen already — an app that is arriving is an app that is up — and what the
+        //    transition says is that a second screen is being drawn underneath it.
+        launcher.update(Message::Open(SETTINGS));
+        assert_eq!(launcher.screen, Screen::App(SETTINGS));
+        assert_eq!(
+            launcher.transition,
+            Some(Transition {
+                motion: pomelo_widgets::Motion::Open,
+                app: SETTINGS,
+            }),
+            "an app opened from the desktop arrives over it"
+        );
+
+        // The end of it: the app is simply up, with nothing in flight.
+        launcher.update(Message::TransitionSettled);
+        assert!(launcher.transition.is_none());
+        assert_eq!(launcher.screen, Screen::App(SETTINGS));
+
+        // 2. A tile tapped while an app is up — the switcher's cards do this — is not an arrival:
+        //    the desktop is what an app is over, and two apps are never over each other.
+        launcher.update(Message::Recents);
+        launcher.update(Message::Open(MUSIC));
+        assert_eq!(launcher.screen, Screen::App(MUSIC));
+        assert!(
+            launcher.transition.is_none(),
+            "one app over another does not slide"
+        );
+
+        // 3. Home, from the app: the desktop is the screen at once, and the app is what is still
+        //    being drawn out of the state this launcher kept for it.
+        launcher.update(Message::Home);
+        assert_eq!(launcher.screen, Screen::Grid, "the gesture decides the screen");
+        assert_eq!(
+            launcher.transition,
+            Some(Transition {
+                motion: pomelo_widgets::Motion::Home,
+                app: MUSIC,
+            }),
+        );
+        assert!(
+            launcher.is_app_running(MUSIC),
+            "put aside rather than closed: the state the slide is drawn from is this launcher's"
+        );
+
+        // And the view builds both screens in one frame, which is the whole of what a transition is.
+        let _ = launcher.view();
+
+        launcher.update(Message::TransitionSettled);
+        assert!(launcher.transition.is_none());
+
+        // 4. An app stopped while it is still moving stops being drawn: there is nothing left to
+        //    slide. The switcher's cross is where this happens.
+        launcher.update(Message::Open(MUSIC));
+        launcher.update(Message::Home);
+        assert!(launcher.transition.is_some());
+
+        launcher.update(Message::Exit);
+        assert!(
+            launcher.transition.is_none(),
+            "a killed app is not on its way anywhere"
+        );
+        assert!(!launcher.is_app_running(MUSIC));
     }
 
     /// Every edge gesture is pinned to the edge it starts at.

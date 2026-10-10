@@ -147,6 +147,20 @@ pub const EDGE_SWIPE: f32 = 96.0;
 pub const PAGE_SETTLE: Duration = Duration::from_millis(240);
 pub const PAGE_CURVE: Curve = Curve::EaseOutCubic;
 
+/// The app layer: how long an app takes to arrive over the desktop or leave it, and on what curve.
+///
+/// The same quarter of a second and the same curve as [`PAGE_SETTLE`], because they are the same
+/// gesture family and the same panel — a page turn that started deliberately and an app that slid
+/// away over a different curve would read as two different systems.
+///
+/// The cost of this one is in a different league to a page turn, though, and it is worth knowing
+/// before turning it up: an app fills the panel, so *every* frame of this transition redraws the
+/// whole screen twice — the app at its new position and the desktop underneath it — where a page
+/// turn redraws two pages that were going to be drawn anyway. See
+/// [`pomelo_widgets::ScreenTransition::duration`].
+pub const TRANSITION: Duration = Duration::from_millis(240);
+pub const TRANSITION_CURVE: Curve = Curve::EaseOutCubic;
+
 /// The page dots: one per page, the page that is up lit.
 ///
 /// Exported, like [`SCREEN`], because the panel tests find what is on screen by its colour.

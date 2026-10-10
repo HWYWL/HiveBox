@@ -1,8 +1,8 @@
 //! The widgets Pomelo OS's apps share, in one crate.
 //!
 //! Every widget two or more apps draw lives here, so that one table, one palette and one geometry
-//! exist for all of them. Each widget is a module of this crate — today [`touch_keyboard`] — and an
-//! app depends on the crate and names the module it wants:
+//! exist for all of them. Each widget is a module of this crate — [`touch_keyboard`], [`pager`],
+//! [`gesture`], [`transition`] — and an app depends on the crate and names the module it wants:
 //!
 //! ```ignore
 //! use pomelo_widgets::touch_keyboard::{band, KeyAction, KeyboardMode};
@@ -32,6 +32,7 @@ pub mod gesture;
 pub mod pager;
 pub mod preferences;
 pub mod touch_keyboard;
+pub mod transition;
 
 pub use animation::{AnimationController, Curve};
 pub use app::{AppIcon, AppMeta, BitmapIcon};
@@ -42,6 +43,7 @@ pub use gesture::{
 pub use pager::{pager, Pager};
 pub use pomelo_material_symbols;
 pub use preferences::{FontSizeTier, Language, SystemPreferences, ThemeMode};
+pub use transition::{screen_transition, Motion, ScreenTransition};
 
 /// Builds an icon text widget from [`pomelo_material_symbols::Icon`] styled with Material Symbols.
 ///
