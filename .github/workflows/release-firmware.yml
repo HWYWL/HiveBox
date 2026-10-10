@@ -28,6 +28,8 @@ env:
   # 与本机 `espup install --name esp198 --toolchain-version …` 装出来的一致。
   XTENSA_TOOLCHAIN: esp198
   XTENSA_TOOLCHAIN_VERSION: 1.98.1.0
+  # 构建失败时贴几行日志尾部（贴成注解，可以从 check-run 注解接口读到）。
+  BUILD_LOG_TAIL: 40
 
 jobs:
   firmware:
@@ -48,7 +50,9 @@ jobs:
           path: |
             ~/esp-idf
             ~/.espressif
-          key: idf-${{ env.IDF_VERSION }}-${{ runner.os }}-${{ hashFiles('.github/workflows/release-firmware.yml') }}
+          # 键里不放本文件的内容哈希：改一句注释就重下一次 ESP-IDF 不划算。
+          # 工具链版本变了要手动把 -v1 往上调。
+          key: idf-${{ env.IDF_VERSION }}-${{ runner.os }}-v1
 
       - name: 安装 ESP-IDF
         run: |
@@ -81,8 +85,29 @@ jobs:
           set -eo pipefail
           . "$HOME/esp-idf/export.sh"
           . "$HOME/export-esp.sh"     # espup 生成的：PATH、LIBCLANG_PATH 与工具链名
+
+          # 先单独探一下工具链：它不可用时，问题在这一行，而不在固件里。
+          if ! cargo +${XTENSA_TOOLCHAIN} --version; then
+            echo "::error::cargo +${XTENSA_TOOLCHAIN} 不可用 —— rustup 没认出这个工具链"
+            exit 1
+          fi
+
           cd pomelo-firmware/firmware
-          idf.py build merge-bin
+
+          # 日志要写进文件再挑着贴出来：构建日志动辄上万行，而这里失败时唯一能
+          # 从外面读到的东西是 check-run 注解（下载完整日志要仓库管理员权限）。
+          # 失败时把尾部若干行逐行发成 `::error::`，就能用注解接口读到出错原因。
+          log="${RUNNER_TEMP}/build.log"
+          if ! idf.py build merge-bin > "${log}" 2>&1; then
+            echo "构建失败，下面是日志尾部 ${BUILD_LOG_TAIL} 行："
+            tail -n "${BUILD_LOG_TAIL}" "${log}" | while IFS= read -r line; do
+              echo "::error::${line}"
+            done
+            exit 1
+          fi
+
+          grep -E '^firmware(\.bin)? binary size|Successfully created' "${log}" || true
+          ls -l build/firmware.bin build/merged-binary.bin
 
       - name: 核对镜像自报的版本与 tag 一致
         run: |
