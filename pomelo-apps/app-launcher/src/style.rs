@@ -212,3 +212,39 @@ pub const STATUS_INSET: f32 = GUTTER + 7.0;
 /// the launcher accepts, not what it can draw: the icon font has three bars and a crossed-out one,
 /// so the fourth bar shows the third's picture. See `status::wifi_icon`.
 pub const WIFI_BARS: u8 = 4;
+
+/// The task switcher: the sheet that comes down over the launcher when the top edge is dragged.
+///
+/// A sheet and not another screen: it is a layer over whatever is up — the desktop, or an app still
+/// running behind it — and the wash and the rounded cards are what say so. Its cards wear the height
+/// of a finger rather than of their contents, because the cross on each of them has to be pressed
+/// while the finger is moving.
+pub const RECENTS_MARGIN: f32 = 24.0;
+pub const RECENTS_TITLE_FONT: f32 = FONT_SMALL;
+pub const RECENTS_CARD_H: f32 = 76.0;
+pub const RECENTS_CARD_GAP: f32 = 12.0;
+pub const RECENTS_CARD_RADIUS: f32 = 18.0;
+pub const RECENTS_PADDING: f32 = 14.0;
+pub const RECENTS_ICON: f32 = 48.0;
+pub const RECENTS_ICON_RADIUS: f32 = 12.0;
+pub const RECENTS_ICON_GLYPH: f32 = 26.0;
+pub const RECENTS_NAME_FONT: f32 = FONT_SMALL;
+/// The cross on a card, and the glyph beside the words that clear all of them at once.
+pub const RECENTS_KILL: f32 = 44.0;
+pub const RECENTS_KILL_GLYPH: f32 = 24.0;
+/// The room between the sheet's title row and its first card.
+pub const RECENTS_HEAD_GAP: f32 = 16.0;
+
+/// The wash over the launcher while the sheet is down.
+///
+/// The page behind it stays legible, which is what says the sheet is a *layer* over it — but nothing
+/// on that page is reachable, and a backdrop that left it looking pressable would be lying about
+/// that. Alpha, because what is under it is the wallpaper.
+pub const RECENTS_BACKDROP: (u8, u8, u8, u8) = (0, 0, 0, 178);
+
+/// A card in the sheet: a slab of light on the wash, in either theme.
+///
+/// Translucent rather than a pair of solid colours, so a card is a slab *of whatever it covers*
+/// rather than a patch of its own — which is the same trick the press wash on a grid tile uses.
+pub const RECENTS_CARD_DARK: (u8, u8, u8, u8) = (255, 255, 255, 41);
+pub const RECENTS_CARD_LIGHT: (u8, u8, u8, u8) = (0, 0, 0, 20);

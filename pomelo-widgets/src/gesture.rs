@@ -38,7 +38,15 @@ pub enum SwipeDirection {
 pub enum Edge {
     Left,
     Right,
+    /// The foot of the panel, where the "home" gesture starts.
     Bottom,
+    /// The head of it, which is where a phone puts its notification shade — and where this board puts
+    /// the task switcher, for the same reason: it is the one edge nothing else reaches for.
+    ///
+    /// A downward drag is the direction most likely to *be* something else — a list scrolling under
+    /// the finger — which is why the caller has to pin it to this edge before the detector will
+    /// claim it at all. See [`GestureDetector::swipe_origin`].
+    Top,
 }
 
 impl Edge {
@@ -50,6 +58,7 @@ impl Edge {
             Self::Left => point.x <= bounds.x + depth,
             Self::Right => point.x >= bounds.x + bounds.width - depth,
             Self::Bottom => point.y >= bounds.y + bounds.height - depth,
+            Self::Top => point.y <= bounds.y + depth,
         }
     }
 }

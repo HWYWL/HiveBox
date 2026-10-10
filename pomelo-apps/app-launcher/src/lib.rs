@@ -48,19 +48,32 @@
 //! screen: a page that slid would need two pages and the frames to move them, and a page change here
 //! is one frame — the one after the release.
 //!
+//! # The task switcher is a layer, and the top edge is where it comes from
+//!
+//! A drag down from the head of the panel brings [`recents`] over whatever is up: what is running,
+//! newest first, with a cross on each card and one control that stops all of them. It is a layer and
+//! not a screen — the apps behind it are still running, which is the whole of what it is *about* —
+//! so back, the swipe up from the foot, and a tap on the wash all put it away, and the wash sits
+//! under the cards rather than over them.
+//!
+//! That gesture is pinned to the top edge, and the pin is the reason the edge mechanism exists:
+//! downwards is the one direction a page on this board is most likely to want for itself, because
+//! every list here scrolls. See [`Launcher::edge_gestures`].
+//!
 //! Key layout notes:
 //!
 //! * a page evenly distributes apps across rows and columns using flexible spaces;
 //! * only the app's icon is the pressable touch target, leaving surrounding spaces for pager swipe gestures.
 
 mod apps;
+mod recents;
 mod status;
 mod style;
 
 use std::sync::Arc;
 
 use iced::theme::Palette;
-use iced::widget::{button, column, container, text, Column, Row, Space};
+use iced::widget::{button, column, container, stack, text, Column, Row, Space};
 use iced::{
     Alignment, Border, Color, Element, Length, Shadow, Size, Subscription, Task, Theme,
 };
@@ -142,6 +155,18 @@ pub enum Message {
     Home,
     /// The exit / kill button, or hardware button 2 (kills app and frees memory).
     Exit,
+    /// The top edge was dragged down: the task switcher.
+    ///
+    /// The counterpart of [`Message::Home`], and pinned to the opposite edge for the same reason.
+    /// A downward drag is what a *list* does when a finger is on it, so the detector only claims one
+    /// that began at the head of the panel — see [`Launcher::edge_gestures`].
+    Recents,
+    /// A tap on the wash under the switcher's cards: put the sheet away, stopping nothing.
+    RecentsClose,
+    /// The cross on one of the switcher's cards: stop that app.
+    RecentsKill(usize),
+    /// The switcher's "clear all": stop every app it lists.
+    RecentsClearAll,
     /// The status bar's readings, driven by the [`Subscription`].
     ///
     /// Produced periodically by [`status_stream`] and whenever underlying
@@ -181,6 +206,12 @@ pub struct Launcher {
     size: Size,
     /// Which page of the grid is currently up.
     page: usize,
+    /// Whether the task switcher is down.
+    ///
+    /// A `bool` and not a `Screen`, because it is not one: the sheet is a layer over whatever is on
+    /// screen, and the screen under it is still what is running. What it lists is `running_apps`,
+    /// which is the same list the status bar's row of icons is drawn from.
+    recents: bool,
     clock: String,
     battery: u8,
     charging: bool,
@@ -216,6 +247,7 @@ impl Launcher {
             // decided by. A launcher is *told* how big the screen is; it may not assume it.
             size: Size::new(SCREEN as f32, SCREEN as f32),
             page: 0,
+            recents: false,
             clock,
             battery,
             charging,
@@ -773,9 +805,13 @@ impl Launcher {
         match message {
             Message::Open(index) => {
                 self.screen = Screen::App(index);
-                if !self.running_apps.contains(&index) {
-                    self.running_apps.push(index);
-                }
+
+                // Most recent last, and an app that is already running moves there rather than
+                // staying where it was. "Which app did I just open" is the question three things
+                // ask — the switcher's list, the status bar's row of icons, and the exit key — and
+                // a list in the order they were *first* opened answers it only by accident.
+                self.running_apps.retain(|&running| running != index);
+                self.running_apps.push(index);
 
                 // Lazy load apps on demand when opened
                 match index {
@@ -821,6 +857,10 @@ impl Launcher {
             Message::Status(clock, battery, charging, wifi) => {
                 self.set_status(clock, battery, charging, wifi)
             }
+            Message::Recents => self.recents = true,
+            Message::RecentsClose => self.recents = false,
+            Message::RecentsKill(index) => self.kill_app(index),
+            Message::RecentsClearAll => self.kill_everything(),
             Message::Tick => {
                 // The call itself decides whether anything is worth reading — see
                 // `Settings::refresh_system`, which does nothing at all while some other page is
@@ -888,6 +928,16 @@ impl Launcher {
     /// Whatever the app's back press produced comes back out: the settings app scrolls its own
     /// body, and a widget operation has to travel as a [`Task`] from whoever owns the loop.
     fn go_back(&mut self) -> Task<Message> {
+        // The switcher first, and it is not about which screen is up: it is a layer over the screen,
+        // so a back press reaches it before it reaches the app underneath — the same order the
+        // settings app closes its password sheet and its restart question in, and for the same
+        // reason. A layer a press reaches *past* is not a layer.
+        if self.recents {
+            self.recents = false;
+
+            return Task::none();
+        }
+
         let (consumed, task) = match self.screen {
             Screen::Grid => (true, Task::none()),
             Screen::App(SETTINGS) => {
@@ -931,8 +981,35 @@ impl Launcher {
     /// not closed, it is put aside. It stays in `running_apps` and in the status bar, and its tile
     /// brings it back with the page it was on still up. On the grid there is nothing to do, because
     /// the grid *is* home.
+    ///
+    /// It also puts the task switcher away, because the same gesture means the same thing to it: the
+    /// sheet is in front, so "put this aside" is about the sheet.
     fn go_home(&mut self) {
         self.screen = Screen::Grid;
+        self.recents = false;
+    }
+
+    /// Stops every app that is running: what the switcher's "clear all" asks for.
+    ///
+    /// One at a time through [`Launcher::kill_app`], and not by clearing the fields: killing is what
+    /// gives an app the chance to release what it holds — the player its audio and its open track,
+    /// the terminal its transcript — and a wipe that skipped it would free the struct and strand the
+    /// device underneath it.
+    pub fn kill_everything(&mut self) {
+        for index in std::mem::take(&mut self.running_apps) {
+            self.kill_app(index);
+        }
+    }
+
+    /// The apps that are running, most recent first — what the switcher lists.
+    ///
+    /// Reversed, because `running_apps` is oldest-first: an app enters the list when it is opened
+    /// and moves to the back of it whenever it is opened again (see [`Message::Open`]), so its last
+    /// entry is the one a person was most recently looking at. The status bar draws the same list
+    /// from the other end, which is why the two agree about which app is newest without either of
+    /// them storing a second order.
+    fn recent_apps(&self) -> Vec<usize> {
+        self.running_apps.iter().rev().copied().collect()
     }
 
     /// Describes the interface for the current state.
@@ -954,13 +1031,31 @@ impl Launcher {
             Screen::App(_) => self.launcher(),
         };
 
+        // The task switcher, when it is down, is a layer *over* that screen rather than a screen of
+        // its own — the arrangement the settings app gives its restart question, and for the same
+        // reason: what is behind the sheet is what the sheet is about, and it is still running.
+        let screen: Element<'_, Message> = if self.recents {
+            stack![
+                screen,
+                recents::view(
+                    &self.recent_apps(),
+                    self.preferences.language,
+                    self.preferences.theme
+                )
+            ]
+            .into()
+        } else {
+            screen
+        };
+
         self.edge_gestures(screen).into()
     }
 
     /// The screen, with the panel's edge gestures around it.
     ///
-    /// Two gestures, and both are the ones a phone has: a swipe up from the foot of the panel goes
-    /// back to the desktop, and a swipe in from either side goes back a page.
+    /// Three gestures, and all three are ones a phone has: a swipe up from the foot of the panel goes
+    /// back to the desktop, a swipe down from its head brings the task switcher over whatever is up,
+    /// and a swipe in from either side goes back a page.
     ///
     /// Every one of them is pinned to the edge it *starts* at, and that pin is the whole of what
     /// makes this layer possible: an unpinned swipe would take every drag there is, and a page that
@@ -968,8 +1063,10 @@ impl Launcher {
     /// a scroll in the middle of a page is never interrupted in the first place — see
     /// `GestureDetector::swipe_origin`.
     ///
-    /// Downwards is given no handler and no origin on purpose: the detector does not claim what it
-    /// cannot act on, and a scroll that goes up has to stay a scroll.
+    /// The downward pin is not a formality, it is the reason the mechanism exists. Of the four
+    /// directions it is the one a *page* is most likely to want for itself — every list on this
+    /// board scrolls downwards — so the head of the panel is the only place it is claimed from, and
+    /// a drag that begins in the middle of an app stays that app's scroll.
     ///
     /// The two horizontal pins are opposite sides of the same idea: a phone's back gesture is a
     /// rightward drag that began at the **left** edge, and a leftward one that began at the right.
@@ -983,9 +1080,11 @@ impl Launcher {
             .touch_slop(style::SLOP)
             .swipe_threshold(style::EDGE_SWIPE)
             .on_swipe_up(Message::Home)
+            .on_swipe_down(Message::Recents)
             .on_swipe_left(Message::Back)
             .on_swipe_right(Message::Back)
             .swipe_origin(SwipeDirection::Up, Edge::Bottom, style::EDGE_ZONE)
+            .swipe_origin(SwipeDirection::Down, Edge::Top, style::EDGE_ZONE)
             .swipe_origin(SwipeDirection::Left, Edge::Right, style::EDGE_ZONE)
             .swipe_origin(SwipeDirection::Right, Edge::Left, style::EDGE_ZONE)
     }
@@ -1541,7 +1640,7 @@ mod tests {
         assert_eq!(launcher.screen, Screen::Grid);
     }
 
-    /// Every edge gesture is pinned to the edge it starts at, and the downward one is not a gesture.
+    /// Every edge gesture is pinned to the edge it starts at.
     ///
     /// The wiring, and not the dragging: a finger's path through the widget tree is the panel
     /// tests' business. What matters here — and what would still build if it went missing — is that
@@ -1571,11 +1670,127 @@ mod tests {
             Some((Edge::Right, style::EDGE_ZONE))
         );
 
+        // And the task switcher's drag is claimed only from the head of the panel — which is the
+        // pin that earns its keep, because downwards is what every list on this board does.
         assert_eq!(
             detector.origin(SwipeDirection::Down),
-            None,
-            "a downward drag is nobody's gesture here: it is a page scrolling"
+            Some((Edge::Top, style::EDGE_ZONE)),
+            "a downward drag is the switcher's only if it began at the top"
         );
+    }
+
+    /// The top edge brings the switcher down, and it lists what is running — the newest first.
+    #[test]
+    fn the_top_edge_lists_what_is_running_newest_first() {
+        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
+
+        for index in [TERMINAL, MUSIC] {
+            launcher.update(Message::Open(index));
+            launcher.update(Message::Back);
+        }
+
+        assert!(
+            !launcher.recents,
+            "the sheet is not down until the edge is dragged"
+        );
+
+        launcher.update(Message::Recents);
+
+        assert!(launcher.recents);
+        assert_eq!(
+            launcher.recent_apps(),
+            vec![MUSIC, TERMINAL],
+            "the one opened last is listed first"
+        );
+
+        // The same app opened again is the newest, wherever it was in the list before.
+        launcher.update(Message::RecentsClose);
+        launcher.update(Message::Open(TERMINAL));
+        launcher.update(Message::Back);
+
+        assert_eq!(launcher.recent_apps(), vec![TERMINAL, MUSIC]);
+    }
+
+    /// A tap on the wash puts the sheet away, and stops nothing: it is a layer, not a decision.
+    #[test]
+    fn putting_the_sheet_away_stops_nothing() {
+        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
+
+        launcher.update(Message::Open(MUSIC));
+        launcher.update(Message::Back);
+        launcher.update(Message::Recents);
+        launcher.update(Message::RecentsClose);
+
+        assert!(!launcher.recents);
+        assert!(launcher.is_app_running(MUSIC), "put away, not killed");
+    }
+
+    /// The cross stops one app; the clear-all stops every one of them, and frees what they held.
+    ///
+    /// "Freed" is the half a test can see: a kill that only forgot the index would leave the player
+    /// holding the audio device and the terminal holding its transcript, and both would go on
+    /// costing the board memory behind a sheet that claimed they were gone.
+    #[test]
+    fn the_sheet_stops_one_app_or_all_of_them() {
+        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
+
+        for index in [TERMINAL, MUSIC, SETTINGS] {
+            launcher.update(Message::Open(index));
+            launcher.update(Message::Back);
+        }
+
+        launcher.update(Message::Recents);
+        launcher.update(Message::RecentsKill(MUSIC));
+
+        assert!(!launcher.is_app_running(MUSIC), "the cross stopped that one");
+        assert!(
+            launcher.is_app_running(TERMINAL) && launcher.is_app_running(SETTINGS),
+            "and left the others alone"
+        );
+        assert!(
+            launcher.recents,
+            "and the sheet stayed down, with two cards left"
+        );
+
+        launcher.update(Message::RecentsClearAll);
+
+        assert!(launcher.running_apps().is_empty());
+        assert!(
+            launcher.terminal.is_none() && launcher.music.is_none() && launcher.settings.is_none(),
+            "each one was killed, which is what lets it release what it holds"
+        );
+        assert!(
+            launcher.recents,
+            "an empty sheet is a sheet that says it is empty"
+        );
+
+        // And a clear-all over an empty list is nothing at all, rather than a panic.
+        launcher.update(Message::RecentsClearAll);
+
+        assert!(launcher.running_apps().is_empty());
+    }
+
+    /// The sheet is a layer, so back and the swipe up are about *it* while it is down.
+    #[test]
+    fn back_puts_the_sheet_away_before_it_reaches_the_app() {
+        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
+
+        launcher.update(Message::Open(TERMINAL));
+        launcher.update(Message::Recents);
+        launcher.update(Message::Back);
+
+        assert!(!launcher.recents, "the sheet is what back closed");
+        assert_eq!(
+            launcher.screen,
+            Screen::App(TERMINAL),
+            "and the app underneath is still up"
+        );
+
+        launcher.update(Message::Recents);
+        launcher.update(Message::Home);
+
+        assert!(!launcher.recents, "the swipe up closes it as well");
+        assert_eq!(launcher.screen, Screen::Grid);
     }
 
     #[test]
