@@ -174,20 +174,21 @@ pub const PAGE_CURVE: Curve = Curve::EaseOutCubic;
 pub const TRANSITION: Duration = Duration::from_millis(240);
 pub const TRANSITION_CURVE: Curve = Curve::EaseOutCubic;
 
-/// How far a *finger* has to travel for letting go to send the layer the way it was going: 96 px,
-/// which is [`EDGE_SWIPE`] to the pixel.
+/// How far a *finger* has to travel for letting go to send the layer the way it was going: 64 px,
+/// which is a little over 5 mm of board and about an eighth of the panel.
 ///
 /// The finger's travel and not the layer's, which is the whole of why this is in pixels: the layer
 /// only starts moving once the drag has spent [`SLOP`] becoming a drag, so measuring the layer would
-/// quietly ask for 96 px plus that slop — and 96 px is how far an edge swipe had to travel before any
-/// of this moved with the finger at all. A gesture that *shows* someone what they are doing must not
-/// ask for more than the gesture that did not. See [`Launcher::release_layer`], which adds the slop
-/// back before comparing.
+/// quietly ask for the slop as well. See [`Launcher::release_layer`], which adds it back before
+/// comparing.
 ///
-/// It is also well short of the page turn's [`SWIPE_COMMIT`] (45%), and that is the other half of the
-/// same point: a page turn is a move to the next page, which can be made again a moment later, while
-/// this is a dismissal — the shortest gesture a phone has.
-pub const TRANSITION_COMMIT: f32 = 96.0;
+/// It was 96 px — [`EDGE_SWIPE`], the distance an edge swipe had to travel — for as long as this
+/// followed the finger at all, and it was reported as hard to complete. The number was the old
+/// gesture's rather than this one's: a swipe *had* to travel that far to be a swipe, because nothing
+/// on screen said whether it was one; a drag that has taken the layer an eighth of the way off the
+/// panel has already said what it means, and asking it to prove that with another eighth is asking
+/// for the old gesture's effort on top of the new gesture's clarity.
+pub const TRANSITION_COMMIT: f32 = 64.0;
 
 /// How fast a flick sends a layer the way it was going without having been pushed that far: 250 px/s.
 ///

@@ -2522,6 +2522,24 @@ mod tests {
             launcher.transition, None,
             "a finger that came down above the band is scrolling the page, not leaving it"
         );
+
+        // And a short pull that *leaves* fast is a flick: 40 px is under the distance and 700 px/s is
+        // far over the speed. This is the case that was reported as "it moves and then goes back" —
+        // the finger had travelled far enough for the layer to be visibly on its way, the hand paused
+        // first, and an average over the whole drag read as a crawl.
+        launcher.update(pulled_from_bottom(40.0));
+        launcher.update(Message::Released(Vector::new(0.0, -700.0)));
+
+        assert_eq!(
+            launcher.transition,
+            Some(Transition {
+                layer: Layer::App(MUSIC),
+                motion: Motion::Home,
+                start: 0.0,
+                progress: Progress::To(1.0),
+            }),
+            "40 px of travel is not far enough on its own, but 700 px/s is"
+        );
     }
 
     /// Every edge gesture is pinned to the edge it starts at.

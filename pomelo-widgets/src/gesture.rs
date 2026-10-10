@@ -111,7 +111,12 @@ pub struct PanUpdateDetails {
 /// Details provided when a pan/drag gesture ends.
 #[derive(Debug, Clone, Copy)]
 pub struct PanEndDetails {
-    /// Estimated velocity of the gesture (pixels per second).
+    /// How fast the pointer was moving when it left, in pixels a second.
+    ///
+    /// The *last* frame's speed and not the drag's average, which is the difference between a flick
+    /// being recognised and not: a hand that plants its thumb, waits a moment, and then throws the
+    /// pointer across the panel averages out to a crawl, and a caller deciding "this far or this fast"
+    /// would decide it was neither.
     pub velocity: Vector,
     /// Total displacement from start to release.
     pub total_delta: Vector,
@@ -375,10 +380,12 @@ impl<'a, Message, Theme, Renderer> GestureDetector<'a, Message, Theme, Renderer>
         self
     }
 
-    /// Sets the callback for pan release/end: where the drag stopped, and how fast.
+    /// Sets the callback for pan release/end: where the drag stopped, and how fast it was going when
+    /// it stopped.
     ///
-    /// The velocity is the whole drag's — its displacement over its duration — which is what a flick
-    /// is, and what a caller deciding between "this far" and "this fast" needs.
+    /// The speed is the pointer's last reading rather than the drag's average, which is what a flick
+    /// is and what a caller deciding between "this far" and "this fast" needs — see
+    /// [`PanEndDetails::velocity`].
     pub fn on_pan_end(
         mut self,
         on_pan_end: impl Fn(PanEndDetails) -> Message + 'a,
@@ -428,6 +435,14 @@ struct State {
     last_pos: Point,
     start_time: Option<Instant>,
     last_time: Option<Instant>,
+    /// How fast the pointer was moving at the last frame, smoothed.
+    ///
+    /// Smoothed towards the newest reading rather than replaced by it, because frames are not evenly
+    /// spaced and a single sample is at the mercy of the clock. And measured over the *end* of the
+    /// drag rather than over the whole of it, which is the reason it exists at all: a hand that plants
+    /// its thumb, thinks for a moment, and then flicks has an average that says crawl, and it is the
+    /// flick — not the pause — that the finger meant. See [`PanEndDetails::velocity`].
+    velocity: Vector,
     is_dragging: bool,
     has_dragged: bool,
     /// Whether this drag is the detector's to act on, decided the moment it became a drag.
@@ -526,6 +541,7 @@ where
                     state.last_pos = pos;
                     state.start_time = Some(now);
                     state.last_time = Some(now);
+                    state.velocity = Vector::ZERO;
                     state.is_dragging = false;
                     state.has_dragged = false;
                     state.owns = false;
@@ -543,6 +559,7 @@ where
                     state.last_pos = *position;
                     state.start_time = Some(now);
                     state.last_time = Some(now);
+                    state.velocity = Vector::ZERO;
                     state.is_dragging = false;
                     state.has_dragged = false;
                     state.owns = false;
@@ -564,6 +581,18 @@ where
                         pos.x - state.last_pos.x,
                         pos.y - state.last_pos.y,
                     );
+
+                    // How fast the finger is moving *now* — which is what a flick is. Blended towards
+                    // this frame rather than taken as it is, so that one long or short frame cannot
+                    // decide a gesture on its own. See `State::velocity`.
+                    if let Some(elapsed) = state
+                        .last_time
+                        .map(|last| now.duration_since(last).as_secs_f32())
+                    {
+                        if elapsed > 0.001 {
+                            state.velocity = state.velocity * 0.4 + frame_delta / elapsed * 0.6;
+                        }
+                    }
 
                     if !state.is_dragging && dist >= self.touch_slop {
                         state.is_dragging = true;
@@ -621,6 +650,18 @@ where
                         pos.y - state.last_pos.y,
                     );
 
+                    // How fast the finger is moving *now* — which is what a flick is. Blended towards
+                    // this frame rather than taken as it is, so that one long or short frame cannot
+                    // decide a gesture on its own. See `State::velocity`.
+                    if let Some(elapsed) = state
+                        .last_time
+                        .map(|last| now.duration_since(last).as_secs_f32())
+                    {
+                        if elapsed > 0.001 {
+                            state.velocity = state.velocity * 0.4 + frame_delta / elapsed * 0.6;
+                        }
+                    }
+
                     if !state.is_dragging && dist >= self.touch_slop {
                         state.is_dragging = true;
                         state.has_dragged = true;
@@ -674,11 +715,10 @@ where
                         pos.x - state.start_pos.x,
                         pos.y - state.start_pos.y,
                     );
-                    let duration = now
-                        .duration_since(state.start_time.unwrap_or(now))
-                        .as_secs_f32()
-                        .max(0.001);
-                    let velocity = total_delta / duration;
+                    // The speed the finger was moving at when it left, and not the drag's average: see
+                    // `State::velocity`. `now` is still the frame's clock — the swipe test below is
+                    // about the whole drag, but the speed a flick is judged by is the last reading.
+                    let velocity = state.velocity;
 
                     if state.is_dragging {
                         state.is_dragging = false;
