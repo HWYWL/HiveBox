@@ -16,6 +16,7 @@ dependencies = [
  "iced",
  "image",
  "music-player",
+ "nas-monitor",
  "pomelo-hal",
  "pomelo-material-symbols",
  "pomelo-widgets",
@@ -1020,6 +1021,16 @@ dependencies = [
  "rustc-hash 1.1.0",
  "thiserror 2.0.21",
  "unicode-ident",
+]
+
+[[package]]
+name = "nas-monitor"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "pomelo-hal",
+ "pomelo-material-symbols",
+ "pomelo-widgets",
 ]
 
 [[package]]

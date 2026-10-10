@@ -29,6 +29,7 @@ pub mod board;
 pub mod error;
 pub mod music_settings;
 pub mod nas_credentials;
+pub mod nas_sample;
 pub mod pcm;
 pub mod probe;
 pub mod traits;
