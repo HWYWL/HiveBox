@@ -64,15 +64,20 @@
 //! over a desktop that is already up. See [`Launcher::view`]: one frame, two screens, and
 //! [`pomelo_widgets::transition`] is what puts them both in it.
 //!
-//! # The two gestures that move an app follow the finger
+//! # Everything that can move follows the finger
 //!
-//! Which is the difference between this and a screen that waits to be told: a drag in from the left
-//! edge takes the app with it, frame by frame, and a drag up from the foot of the panel puts it aside
-//! the same way. Halfway through a drag nothing has been decided — the app is still the screen, still
-//! running, and drawn exactly where the finger has taken it — and what settles it is the finger
-//! leaving: far enough ([`style::TRANSITION_COMMIT`]) or fast enough ([`style::TRANSITION_FLING`])
-//! sends the app away, and anything else brings it back. See [`Launcher::pull_app`] and
-//! [`Launcher::release_app`].
+//! Which is the difference between this and a screen that waits to be told. A drag in from the left
+//! edge takes the app with it, frame by frame; a drag up from the foot of the panel puts it aside the
+//! same way; and a drag down from the head of the panel brings the task switcher down over whatever is
+//! up — or takes it away again when the finger goes back the other way.
+//!
+//! Halfway through a drag nothing has been decided: the app is still the screen and still running, the
+//! sheet is still the sheet, and both are drawn exactly where the finger has taken them. What settles
+//! it is the finger leaving — pushed far enough ([`style::TRANSITION_COMMIT`]) or fast enough
+//! ([`style::TRANSITION_FLING`]) and the layer goes to the end it was pushed towards, and anything else
+//! is it coming back to where it came from. One rule, four gestures: an app off the panel and an app
+//! put aside, a sheet pulled down and a sheet pushed back up. See [`Launcher::pull_layer`] and
+//! [`Launcher::release_layer`].
 //!
 //! The pinning that makes the edge layer possible at all is what makes this safe: only a drag that
 //! *began* in an edge band is ever reported to this app, so a list in the middle of a page goes on
@@ -195,13 +200,11 @@ pub enum Message {
     Home,
     /// The exit / kill button, or hardware button 2 (kills app and frees memory).
     Exit,
-    /// The top edge was dragged down: the task switcher.
-    ///
-    /// The counterpart of [`Message::Home`], and pinned to the opposite edge for the same reason.
-    /// A downward drag is what a *list* does when a finger is on it, so the detector only claims one
-    /// that began at the head of the panel — see [`Launcher::edge_gestures`].
-    Recents,
     /// A tap on the wash under the switcher's cards: put the sheet away, stopping nothing.
+    ///
+    /// The one way the sheet is left that is not a gesture of its own, and it is answered the same way
+    /// the drags are: the sheet goes back up under its own frames. Nothing it lists is stopped — the
+    /// crosses on the cards and "clear all" are the two things that stop anything.
     RecentsClose,
     /// The cross on one of the switcher's cards: stop that app.
     RecentsKill(usize),
@@ -249,32 +252,64 @@ pub enum Message {
     WebManager(web_manager::Message),
 }
 
-/// An app on its way over the desktop, and which way it is going.
+/// The layer over the desktop that is moving, and which way it is going.
 ///
-/// The *screen* is not part of this, and that is the point: an app that is arriving is already
-/// [`Screen::App`], and one that is leaving has already given way to the desktop — the screen changes
-/// on the frame the *gesture* decides, not on the frame the app has finished moving. What is left to
-/// do after that is *show* it: the app is drawn over the desktop for as long as it takes to slide off
-/// it, by [`pomelo_widgets::transition`].
+/// The *resting state* is not part of this, and that is the point: a layer that is arriving is already
+/// the thing it is arriving over — an app is [`Screen::App`], the switcher is `recents` — and one that
+/// is leaving has already given way. Either state changes on the frame the *gesture* decides, not on
+/// the frame the layer has finished moving. What is left to do after that is *show* it: the layer is
+/// drawn over the desktop for as long as it takes to slide off it, by
+/// [`pomelo_widgets::transition`].
 ///
-/// While a finger is still on the app, nothing has been decided at all: the app is the screen, it is
-/// drawn where the finger has put it, and the desktop behind it is only what the drag is uncovering.
+/// While a finger is still on it, nothing has been decided at all: the layer is drawn where the finger
+/// has put it, and what is behind it is only what the drag is uncovering.
 ///
-/// Which is why the app is remembered here by index rather than by element: its state never left this
+/// Which is why a layer is remembered by name rather than by element: an app's state never left this
 /// launcher — the same reason a backgrounded app comes back on the page it was on — and the view
-/// builds the app it draws from that state. See [`Launcher::view`].
+/// builds whatever it draws out of that. See [`Launcher::view`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Transition {
+    /// What is moving over the desktop.
+    layer: Layer,
     motion: pomelo_widgets::Motion,
-    /// The app the transition is about.
-    app: usize,
-    /// Where the app is, in the launcher's own copy of it: where a finger has pulled it to while one
-    /// is on it, or the place it was sent to when the finger left.
+    /// Where it was when the gesture reached it, in `0.0..=1.0`.
+    ///
+    /// An app rests on the panel; the switcher rests *off* it or *over* it, depending on whether it
+    /// was up when the finger arrived. It is where a release falls back to, and what tells a gesture
+    /// that meant it from one that changed its mind. See [`Launcher::release_layer`].
+    start: f32,
+    /// Where the layer is now, in the launcher's own copy of it: where a finger has pulled it to while
+    /// one is on it, or the place it was sent to when the finger left.
     ///
     /// Kept here rather than asked back out of the widget, because the widget decides nothing and is
-    /// only ever told where to draw. One answer to "where is the app" is worth more than a widget
-    /// that can be asked, and it is what makes the finger and the animation unable to disagree.
+    /// only ever told where to draw. One answer to "where is it" is worth more than a widget that can
+    /// be asked, and it is what makes the finger and the animation unable to disagree.
     progress: pomelo_widgets::Progress,
+}
+
+/// The two things that are drawn *over* the desktop, and can be taken off it by a finger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Layer {
+    /// One of the apps, by the index the grid hands over.
+    App(usize),
+    /// The task switcher: a sheet over whatever is up, which is what makes it the layer in front
+    /// whenever it is there at all.
+    Switcher,
+}
+
+impl Layer {
+    /// Where this layer rests when nothing is moving it.
+    ///
+    /// An app rests on the panel — `0.0`, drawn exactly where it always is — and the switcher rests
+    /// off the panel when it is down and over it when it is up. Which is the one place its resting
+    /// place has to be asked for rather than assumed, and the reason a drag of it is given a start.
+    fn rest(self, switcher_is_up: bool) -> f32 {
+        match self {
+            Self::App(_) => 0.0,
+            Self::Switcher if switcher_is_up => 1.0,
+            Self::Switcher => 0.0,
+        }
+    }
 }
 
 /// The launcher.
@@ -539,7 +574,7 @@ impl Launcher {
         // transition — there is nothing left to slide, and the state the view would draw it from is
         // the state that was just freed — so a slide about this app ends with it. The switcher's
         // cross is where this happens: it can be pressed while an app is still moving.
-        if self.transition.map(|transition| transition.app) == Some(index) {
+        if matches!(self.transition, Some(transition) if transition.layer == Layer::App(index)) {
             self.transition = None;
         }
     }
@@ -948,11 +983,14 @@ impl Launcher {
                 self.hand_over_size();
 
                 if from_the_desktop {
+                    let layer = Layer::App(index);
+
                     // An app opened from the desktop is *sent* to its place: no finger is on it, so
                     // the transition takes itself there. See [`pomelo_widgets::Progress`].
                     self.transition = Some(Transition {
+                        layer,
                         motion: pomelo_widgets::Motion::Open,
-                        app: index,
+                        start: layer.rest(self.recents),
                         progress: pomelo_widgets::Progress::To(1.0),
                     });
                 }
@@ -963,13 +1001,13 @@ impl Launcher {
             Message::Back => return self.go_back(),
             Message::Home => self.go_home(),
             Message::TransitionSettled => {
-                // The app has stopped moving, so there is nothing left to draw over the desktop and
-                // nothing left to remember about how it got there. The screen is not touched here: it
-                // changed when the gesture decided, which was several frames ago.
+                // The layer has stopped moving, so there is nothing left to draw over the desktop and
+                // nothing left to remember about how it got there. What it *is* was settled when the
+                // gesture decided, several frames ago.
                 self.transition = None;
             }
-            Message::Pulled(delta) => self.pull_app(delta),
-            Message::Released(velocity) => self.release_app(velocity),
+            Message::Pulled(delta) => self.pull_layer(delta),
+            Message::Released(velocity) => self.release_layer(velocity),
             Message::Exit => match self.screen {
                 Screen::App(index) => {
                     self.kill_app(index);
@@ -983,8 +1021,7 @@ impl Launcher {
             Message::Status(clock, battery, charging, wifi) => {
                 self.set_status(clock, battery, charging, wifi)
             }
-            Message::Recents => self.recents = true,
-            Message::RecentsClose => self.recents = false,
+            Message::RecentsClose => self.dismiss_switcher(),
             Message::RecentsKill(index) => self.kill_app(index),
             Message::RecentsClearAll => self.kill_everything(),
             Message::Tick => {
@@ -1059,7 +1096,7 @@ impl Launcher {
         // settings app closes its password sheet and its restart question in, and for the same
         // reason. A layer a press reaches *past* is not a layer.
         if self.recents {
-            self.recents = false;
+            self.dismiss_switcher();
 
             return Task::none();
         }
@@ -1104,17 +1141,21 @@ impl Launcher {
 
         if !consumed {
             if let Some(app) = leaving {
+                let layer = Layer::App(app);
+
                 // Leaving the app is a *transition*, and the screen is the desktop from here: the
                 // gesture has decided, and everything that asks which screen is up — the status bar,
                 // the exit key, a press that arrives in the middle of the slide — gets the answer a
-                // phone would give. What is left to do is draw the app sliding off the panel, which
-                // is [`Launcher::view`]'s and [`Message::TransitionSettled`]'s business.
+                // phone would give. What is left to do is draw the app sliding off the panel, which is
+                // [`Launcher::view`]'s and [`Message::TransitionSettled`]'s business.
                 //
                 // Sent rather than pulled: a back *key* has no finger on the panel, so the transition
-                // takes itself off the edge. The drag from the same edge is `Launcher::release_app`'s.
+                // takes itself off the edge. The drag from the same edge is
+                // [`Launcher::release_layer`]'s.
                 self.transition = Some(Transition {
+                    layer,
                     motion: pomelo_widgets::Motion::Back,
-                    app,
+                    start: layer.rest(self.recents),
                     progress: pomelo_widgets::Progress::To(1.0),
                 });
             }
@@ -1139,13 +1180,16 @@ impl Launcher {
     /// "put this aside" rather than "go back". Which is the only difference between this and a back:
     /// the screen, the effect on `running_apps` and the app's own page are the same either way.
     ///
-    /// Sent rather than pulled, like a back key: this is what a *gesture* that has already ended
-    /// arrives as. The drag that ends in the same place goes through `Launcher::release_app`.
+    /// Sent rather than pulled, like a back key: this is what a home *button* asks for. The drag up
+    /// from the foot of the panel that ends in the same place is [`Launcher::release_layer`]'s.
     fn go_home(&mut self) {
         if let Screen::App(app) = self.screen {
+            let layer = Layer::App(app);
+
             self.transition = Some(Transition {
+                layer,
                 motion: pomelo_widgets::Motion::Home,
-                app,
+                start: layer.rest(self.recents),
                 progress: pomelo_widgets::Progress::To(1.0),
             });
         }
@@ -1154,120 +1198,194 @@ impl Launcher {
         self.recents = false;
     }
 
-    /// Takes the app to where a finger has pulled it, and puts nothing away.
+    /// Takes the layer in front to where a finger has pulled it, and settles nothing.
     ///
-    /// What the edge layer sends once a frame while a finger is down. The app follows the finger: the
-    /// screen does not change here, `running_apps` is not touched and nothing is decided — a drag is a
-    /// question, and this is the answer being written down as the finger asks it. What the finger
-    /// meant is settled in [`Launcher::release_app`].
+    /// What the edge layer sends once a frame while a finger is down. The layer follows the finger:
+    /// nothing changes state here and nothing is decided — a drag is a question, and this is the answer
+    /// being written down as the finger asks it. What the finger *meant* is settled in
+    /// [`Launcher::release_layer`].
     ///
-    /// Which of the two motions a drag is, and which way it has to be going, come off the drag itself:
-    /// a finger going right is taking the app off to the right (a back), and one going up is doing what
-    /// the swipe from the foot of the panel does (a leaving). A finger coming *down* the panel, or
-    /// going left, is on its way to something else — the switcher, mostly — and nothing moves for it.
-    fn pull_app(&mut self, delta: Vector) {
-        use pomelo_widgets::Motion;
+    /// Which layer that is, and which way it is going, come off the drag itself — see
+    /// [`Launcher::layer_for`]. This is the arithmetic: how far along its own axis the finger has taken
+    /// it, from where the drag was recognised.
+    fn pull_layer(&mut self, delta: Vector) {
+        use pomelo_widgets::{Motion, Progress};
 
-        let Screen::App(app) = self.screen else {
-            return;
-        };
-
-        // The switcher is a layer over whatever is up, so while it is down it is what a finger is
-        // talking to — and a sheet that comes away under the finger is its own piece of work rather
-        // than a second meaning for this drag. See [`Message::Recents`].
-        if self.recents {
+        // A layer that is already on its way is not this finger's to take: what sent it owns it until
+        // it has arrived, and a second answer mid-animation would be a second animation.
+        if matches!(self.transition, Some(transition) if matches!(transition.progress, Progress::To(_)))
+        {
             return;
         }
 
-        let motion = match self.transition {
-            // A finger already on the app settles which way it goes, once, on the frame the drag became
-            // a drag. An app that changed the edge it was leaving by would be one that jumped.
-            Some(transition)
-                if matches!(transition.progress, pomelo_widgets::Progress::At(_)) =>
-            {
-                transition.motion
-            }
-            // And an app that is already on its way out is nobody's but the gesture that sent it: a
-            // second answer arriving mid-animation would be a second animation.
-            Some(_) => return,
-            None => {
-                if delta.x > 0.0 && delta.x.abs() >= delta.y.abs() {
-                    Motion::Back
-                } else if delta.y < 0.0 && delta.y.abs() > delta.x.abs() {
-                    Motion::Home
-                } else {
-                    return;
-                }
-            }
+        // The layer a finger has hold of: the one it already had, or — on the first frame of a drag —
+        // whichever layer this direction is about. A layer that changed the edge it was leaving by
+        // halfway through would be a layer that jumped.
+        let held = self
+            .transition
+            .map(|transition| (transition.layer, transition.motion))
+            .or_else(|| self.layer_for(delta));
+
+        let Some((layer, motion)) = held else {
+            return;
         };
+
+        let start = layer.rest(self.recents);
 
         // The slop is what a drag spends before it is a drag at all — the finger moved and the panel
         // had not decided yet — so a pull measures from where the drag was recognised rather than from
-        // where the finger came down. Without this the app jumps the slop's worth of pixels on the
-        // first frame of motion, which is the one frame it may not jump on.
+        // where the finger came down. Without taking it off here the layer jumps that much on the first
+        // frame it moves, which is the one frame it may not jump on.
+        // The slop comes off *towards the origin* rather than off the number: a finger travelling
+        // backwards spends the same 18 px becoming a drag as one travelling forwards, and subtracting a
+        // fixed amount from a negative displacement would make the layer travel further than the finger
+        // did — or, for a sheet being pushed back up, further than the panel.
         let (travelled, span) = match motion {
-            Motion::Back => ((delta.x - style::SLOP).max(0.0), self.size.width),
-            Motion::Home => ((-delta.y - style::SLOP).max(0.0), self.size.height),
+            Motion::Back => (delta.x - style::SLOP.copysign(delta.x), self.size.width),
+            Motion::Home => (-delta.y - style::SLOP.copysign(-delta.y), self.size.height),
+            Motion::Down => (delta.y - style::SLOP.copysign(delta.y), self.size.height),
             Motion::Open => return,
         };
 
         let pulled = if span > 0.0 {
-            (travelled / span).clamp(0.0, 1.0)
+            (start + travelled / span).clamp(0.0, 1.0)
         } else {
-            0.0
+            start
         };
 
         self.transition = Some(Transition {
+            layer,
             motion,
-            app,
-            progress: pomelo_widgets::Progress::At(pulled),
+            start,
+            progress: Progress::At(pulled),
         });
     }
 
-    /// Lets go of an app a finger was holding: it goes where the gesture decided.
+    /// Which layer a drag of `delta` takes hold of, and which way it takes it — or `None` for a drag
+    /// that is on its way to something else.
     ///
-    /// Two ways for a drag to mean "away", and a phone reads both of them: pulled far enough, or
-    /// moving fast enough when the finger left. Everything else is the app coming back — to where it
-    /// was, on the page it was on.
+    /// The edge a drag began at is not asked here, and could not be: the gesture detector reports a drag
+    /// to this launcher only when its origin pin matched, so a downward drag *is* one that began at the
+    /// head of the panel and an upward one began at its foot. What is left to decide is what a direction
+    /// means — and which layer is in front, because the switcher is over everything while it is down: a
+    /// finger on it is talking to it and not to the app behind it.
+    fn layer_for(&self, delta: Vector) -> Option<(Layer, pomelo_widgets::Motion)> {
+        use pomelo_widgets::Motion;
+
+        if self.recents {
+            // The sheet is in front, and it only moves the way it came: up. A finger going down the
+            // panel with it down is pushing it the way it is already clamped, and a finger going
+            // sideways is on its way to something else — neither is a way to put it away. Those are the
+            // gesture from the foot of the panel, a tap on the wash, and the back key.
+            return (delta.y < 0.0).then_some((Layer::Switcher, Motion::Down));
+        }
+
+        // Down from the head of the panel: the sheet comes down over whatever is up.
+        if delta.y > 0.0 && delta.y >= delta.x.abs() {
+            return Some((Layer::Switcher, Motion::Down));
+        }
+
+        // Otherwise it is the app in front, if there is one: right takes it off to the right, and up
+        // puts it aside. A finger going down the panel or going left is on its way somewhere else.
+        let Screen::App(app) = self.screen else {
+            return None;
+        };
+
+        if delta.x > 0.0 && delta.x >= delta.y.abs() {
+            Some((Layer::App(app), Motion::Back))
+        } else if delta.y < 0.0 && -delta.y > delta.x.abs() {
+            Some((Layer::App(app), Motion::Home))
+        } else {
+            None
+        }
+    }
+
+    /// Lets go of a layer a finger was holding: it goes where the gesture decided.
     ///
-    /// The decision changes the *screen* here, on this frame, because the gesture has decided: what is
-    /// left is drawing the app sliding off a panel that has already left it behind.
-    fn release_app(&mut self, velocity: Vector) {
+    /// Two ways for a drag to be a decision, and a phone reads both of them: pushed far enough from
+    /// where it started, or moving fast enough when the finger left. Either way the layer goes to the
+    /// end it was pushed *towards*; anything else is it coming back to where it came from.
+    ///
+    /// That is one rule for four gestures — an app taken off the panel and an app put aside, a sheet
+    /// pulled down and a sheet pushed back up — and it is why a transition carries the place it started
+    /// at: an app starts on the panel and a sheet starts over it, so the same push sends one away and
+    /// keeps the other.
+    ///
+    /// The decision changes the layer's *state* here, on this frame, because the gesture has decided:
+    /// what is left is drawing it sliding, over a desktop that has already been left behind or a sheet
+    /// that is already down.
+    fn release_layer(&mut self, velocity: Vector) {
         use pomelo_widgets::{Motion, Progress};
 
         let Some(transition) = self.transition else {
-            // A drag no app followed — the finger was over the desktop, or over the switcher. One of
-            // those still means something: with the sheet down, a flick upwards is the "put this
-            // aside" it has always been, and what is put aside is the sheet, because the sheet is what
-            // is in front. Decided on release, because a finger that changes its mind halfway up and
-            // comes back has not asked for anything.
-            if self.recents && velocity.y <= -style::TRANSITION_FLING {
-                self.recents = false;
-            }
-
+            // A drag no layer followed: the finger was over the desktop or over an app in the middle of
+            // the panel, and the gesture layer only reports those if their origin pin matched — so this
+            // is a drag that began at an edge and meant nothing. Nothing to do, and nothing to undo.
             return;
         };
 
-        // Only a held app can be let go of. One that is already on its way is on its way.
+        // Only a held layer can be let go of. One that is already on its way is on its way.
         let Progress::At(pulled) = transition.progress else {
             return;
         };
 
-        let leaving = pulled >= style::TRANSITION_COMMIT
-            || match transition.motion {
-                Motion::Back => velocity.x >= style::TRANSITION_FLING,
-                Motion::Home => -velocity.y >= style::TRANSITION_FLING,
-                Motion::Open => false,
-            };
+        // The distance is in shares of the panel and the speed in pixels a second, which is why they
+        // are compared against two thresholds that say the same thing in two units. The sign of the
+        // distance is the direction the finger pushed: a sheet pulled down and a sheet pushed up are
+        // one motion with two signs.
+        let (pushed, speed) = match transition.motion {
+            Motion::Back => (pulled - transition.start, velocity.x),
+            Motion::Home => (pulled - transition.start, -velocity.y),
+            Motion::Down => (pulled - transition.start, velocity.y),
+            // An arriving app is never held: what sends it is a tap, which is `Progress::To` from the
+            // start and never reaches this.
+            Motion::Open => return,
+        };
+
+        let meant_it = pushed.abs() >= style::TRANSITION_COMMIT
+            || pushed.signum() * speed >= style::TRANSITION_FLING;
+
+        // Where it ends up: the other resting place if the gesture meant it, its own if it did not.
+        let to = if meant_it {
+            if transition.start < 0.5 { 1.0 } else { 0.0 }
+        } else {
+            transition.start
+        };
 
         self.transition = Some(Transition {
-            progress: Progress::To(if leaving { 1.0 } else { 0.0 }),
+            progress: Progress::To(to),
             ..transition
         });
 
-        if leaving && transition.motion.leaves() {
-            self.screen = Screen::Grid;
+        match transition.layer {
+            // An app that has reached the far end is off the panel, and the desktop is the screen.
+            Layer::App(_) if to >= 1.0 => self.screen = Screen::Grid,
+            // And the sheet is down over whatever is up — or gone back above it.
+            Layer::Switcher => self.recents = to >= 1.0,
+            Layer::App(_) => {}
         }
+    }
+
+    /// Sends the switcher back up over the panel it came from.
+    ///
+    /// What a tap on the wash under the cards — [`Message::RecentsClose`] — and the back key both ask
+    /// for, and the same answer a finger pushing it back gets: the sheet is *sent*, because whoever
+    /// asked has already taken their hand away or never put one on it.
+    fn dismiss_switcher(&mut self) {
+        // Nothing to put away, or it is already moving: a sheet on its way somewhere is not asked twice.
+        if !self.recents || self.transition.is_some() {
+            return;
+        }
+
+        let layer = Layer::Switcher;
+        self.recents = false;
+
+        self.transition = Some(Transition {
+            layer,
+            motion: pomelo_widgets::Motion::Down,
+            start: layer.rest(true),
+            progress: pomelo_widgets::Progress::To(0.0),
+        });
     }
 
     /// Stops every app that is running: what the switcher's "clear all" asks for.
@@ -1300,42 +1418,47 @@ impl Launcher {
     /// around this view is a gesture over every app the launcher hosts. One put inside an app would
     /// be a gesture that app had to know about.
     pub fn view(&self) -> Element<'_, Message> {
-        let screen = match self.transition {
-            // An app on its way in or out is two screens in one frame: the desktop it is over, and
-            // the app itself. Which of them the app *is* does not matter here — the motion decides
-            // where it is drawn, and the screen it is on its way to has already been decided by
-            // whoever started the transition.
-            Some(transition) => pomelo_widgets::screen_transition(
-                self.launcher(),
-                self.app_screen(transition.app),
-            )
-            .motion(transition.motion)
-            // Who is taking the app where it is going: a finger, one frame at a time, or the
-            // transition itself once the gesture has decided. See [`Transition::progress`].
-            .progress(transition.progress)
-            .duration(style::TRANSITION)
-            .curve(style::TRANSITION_CURVE)
-            .on_settled(Message::TransitionSettled)
-            .into(),
-            None => match self.screen {
-                Screen::Grid => self.launcher(),
-                Screen::App(index) => self.app_screen(index),
-            },
+        let moving = self.transition;
+
+        let screen = match moving {
+            // A layer on its way in or out is two screens in one frame: what is behind it, and the
+            // layer itself. Which layer it is decides what the two are, and the motion decides where
+            // the one in front is drawn.
+            Some(transition) => {
+                let foreground = match transition.layer {
+                    Layer::App(index) => self.app_screen(index),
+                    Layer::Switcher => self.switcher(),
+                };
+
+                // What is behind it: the desktop for a layer over the desktop, and for the switcher the
+                // screen itself — a sheet is a layer over *that*, not over the desktop, which is what
+                // makes it a layer rather than another screen.
+                let background = match transition.layer {
+                    Layer::App(_) => self.launcher(),
+                    Layer::Switcher => self.current_screen(),
+                };
+
+                pomelo_widgets::screen_transition(background, foreground)
+                    .motion(transition.motion)
+                    // Who is taking it where it is going: a finger, one frame at a time, or the
+                    // transition itself once the gesture has decided. See [`Transition::progress`].
+                    .progress(transition.progress)
+                    .duration(style::TRANSITION)
+                    .curve(style::TRANSITION_CURVE)
+                    .on_settled(Message::TransitionSettled)
+                    .into()
+            }
+            None => self.current_screen(),
         };
 
-        // The task switcher, when it is down, is a layer *over* that screen rather than a screen of
-        // its own — the arrangement the settings app gives its restart question, and for the same
-        // reason: what is behind the sheet is what the sheet is about, and it is still running.
-        let screen: Element<'_, Message> = if self.recents {
-            stack![
-                screen,
-                recents::view(
-                    &self.recent_apps(),
-                    self.preferences.language,
-                    self.preferences.theme
-                )
-            ]
-            .into()
+        // The task switcher, when it is down and no transition of its own is drawing it, is a layer
+        // *over* that screen rather than a screen of its own — the arrangement the settings app gives
+        // its restart question, and for the same reason: what is behind the sheet is what the sheet is
+        // about, and it is still running.
+        let screen: Element<'_, Message> = if self.recents
+            && !matches!(moving, Some(transition) if transition.layer == Layer::Switcher)
+        {
+            stack![screen, self.switcher()].into()
         } else {
             screen
         };
@@ -1362,19 +1485,41 @@ impl Launcher {
         }
     }
 
+    /// The screen the launcher is on: the desktop, or the app that is up.
+    ///
+    /// The one place that question is answered, because two things ask it — the view, and a transition
+    /// whose layer is the switcher, which needs whatever the sheet has come down over.
+    fn current_screen(&self) -> Element<'_, Message> {
+        match self.screen {
+            Screen::Grid => self.launcher(),
+            Screen::App(index) => self.app_screen(index),
+        }
+    }
+
+    /// The task switcher, as the layer it is.
+    ///
+    /// A method because two places draw it — the view, over a screen that is not moving, and a
+    /// transition, over a screen the sheet has brought itself down over — and a sheet built twice would
+    /// be two answers to what is running.
+    fn switcher(&self) -> Element<'_, Message> {
+        recents::view(
+            &self.recent_apps(),
+            self.preferences.language,
+            self.preferences.theme,
+        )
+    }
+
     /// The screen, with the panel's edge gestures around it.
     ///
-    /// Three gestures, and all three are ones a phone has: a drag up from the foot of the panel goes
-    /// back to the desktop, a swipe down from its head brings the task switcher over whatever is up,
-    /// and a drag in from the **left** side goes back a page.
+    /// Three gestures, and all three are ones a phone has: a drag up from the foot of the panel puts
+    /// the app aside, a drag down from its head brings the task switcher over whatever is up, and a
+    /// drag in from the **left** side goes back a page.
     ///
-    /// Two of the three are *drags* and one is a swipe, which is the difference between an app that
-    /// moves under the finger and a sheet that appears once the finger has left. Going back and going
-    /// home both move the app, so what this layer reports for them is the finger's path
-    /// ([`Message::Pulled`], once a frame) and its last velocity ([`Message::Released`]): the app is
-    /// drawn where the finger has taken it, and whether it stays gone is decided when the finger
-    /// leaves. The switcher has no screen to move, so it keeps the older shape — a direction, reported
-    /// once, when the swipe is over.
+    /// All three are *drags*, and that is the whole of what this layer reports: the finger's path
+    /// ([`Message::Pulled`], once a frame) and its last velocity ([`Message::Released`]). Everything
+    /// they do is something that moves under the finger — an app off the panel, an app put aside, a
+    /// sheet coming down — and none of it is decided until the finger leaves. See
+    /// [`Launcher::pull_layer`], [`Launcher::release_layer`].
     ///
     /// Every one of them is pinned to the edge it *starts* at, and that pin is the whole of what makes
     /// this layer possible: an unpinned gesture would take every drag there is, and a page that scrolls
@@ -1399,15 +1544,13 @@ impl Launcher {
         gesture_detector(screen)
             .touch_slop(style::SLOP)
             .swipe_threshold(style::EDGE_SWIPE)
-            // The finger's path, and then its last velocity: an app taken off the panel and an app
-            // put aside are one gesture with two edges, and both are decided when the finger leaves.
-            // See [`Launcher::pull_app`] and [`Launcher::release_app`].
+            // The finger's path, and then its last velocity. Every gesture this layer knows is a drag:
+            // what the finger has done so far is where the layer is drawn, and what it meant is decided
+            // when it leaves. See [`Launcher::pull_layer`] and [`Launcher::release_layer`].
             .on_pan_update(|details| Message::Pulled(details.total_delta))
             .on_pan_end(|details| Message::Released(details.velocity))
-            // The switcher is still a swipe: all it needs to know is that the finger meant *down*,
-            // from the head of the panel. See [`Message::Recents`].
-            .on_swipe_down(Message::Recents)
-            // And the back gesture that comes in from the *right* is still a swipe, with the behaviour
+            // The one exception is the back gesture that comes in from the *right*, which is still a
+            // swipe, with the behaviour
             // it had before an app could follow a finger. An app drawn sliding left as it leaves is a
             // motion this interface does not have, and inventing one for the mirrored half of a gesture
             // would make two back gestures out of one. So this half is claimed (see the pins) and
@@ -1652,6 +1795,23 @@ mod tests {
     // The tests drive `update` by hand, and a test has no loop to return the `Task` it produces to.
     // What that task does — the settings app scrolling its own body — belongs to the loop.
     #![allow(unused_must_use)]
+
+    /// Opens the switcher the way a finger does: down from the head of the panel, and let go of once
+    /// it is far enough down to stay.
+    ///
+    /// A drag and not a field, because that is what it is now: the sheet follows the finger like
+    /// everything else on this panel, and a test that set `recents` itself would be testing a `bool`
+    /// rather than the gesture. The settle at the end is so that whatever comes next is not stepping
+    /// into a transition still in flight.
+    fn pull_the_switcher_down(launcher: &mut Launcher) {
+        // Whatever was in flight is finished first: a drag is one gesture at a time, and a test that
+        // wants the sheet is not testing what happens to a finger that arrives in the middle of an app
+        // sliding off the panel.
+        launcher.update(Message::TransitionSettled);
+        launcher.update(Message::Pulled(Vector::new(0.0, 200.0)));
+        launcher.update(Message::Released(Vector::new(0.0, 0.0)));
+        launcher.update(Message::TransitionSettled);
+    }
     use super::*;
 
     #[test]
@@ -1989,8 +2149,9 @@ mod tests {
         assert_eq!(
             launcher.transition,
             Some(Transition {
+                layer: Layer::App(SETTINGS),
                 motion: pomelo_widgets::Motion::Open,
-                app: SETTINGS,
+                start: 0.0,
                 progress: pomelo_widgets::Progress::To(1.0),
             }),
             "an app opened from the desktop arrives over it"
@@ -2003,7 +2164,6 @@ mod tests {
 
         // 2. A tile tapped while an app is up — the switcher's cards do this — is not an arrival:
         //    the desktop is what an app is over, and two apps are never over each other.
-        launcher.update(Message::Recents);
         launcher.update(Message::Open(MUSIC));
         assert_eq!(launcher.screen, Screen::App(MUSIC));
         assert!(
@@ -2018,8 +2178,9 @@ mod tests {
         assert_eq!(
             launcher.transition,
             Some(Transition {
+                layer: Layer::App(MUSIC),
                 motion: pomelo_widgets::Motion::Home,
-                app: MUSIC,
+                start: 0.0,
                 progress: pomelo_widgets::Progress::To(1.0),
             }),
         );
@@ -2068,8 +2229,9 @@ mod tests {
         assert_eq!(
             launcher.transition,
             Some(Transition {
+                layer: Layer::App(SETTINGS),
                 motion: Motion::Back,
-                app: SETTINGS,
+                start: 0.0,
                 progress: Progress::At(118.0 / SCREEN as f32),
             }),
             "drawn where the finger has taken it, and not where an animation would"
@@ -2086,8 +2248,9 @@ mod tests {
         assert_eq!(
             launcher.transition,
             Some(Transition {
+                layer: Layer::App(SETTINGS),
                 motion: Motion::Back,
-                app: SETTINGS,
+                start: 0.0,
                 progress: Progress::At(0.0),
             }),
         );
@@ -2099,8 +2262,9 @@ mod tests {
         assert_eq!(
             launcher.transition,
             Some(Transition {
+                layer: Layer::App(SETTINGS),
                 motion: Motion::Back,
-                app: SETTINGS,
+                start: 0.0,
                 progress: Progress::To(0.0),
             }),
             "coming back rather than going away"
@@ -2120,8 +2284,9 @@ mod tests {
         assert_eq!(
             launcher.transition,
             Some(Transition {
+                layer: Layer::App(SETTINGS),
                 motion: Motion::Back,
-                app: SETTINGS,
+                start: 0.0,
                 progress: Progress::To(1.0),
             }),
         );
@@ -2131,8 +2296,8 @@ mod tests {
             "and the app was put aside rather than closed"
         );
 
-        // A finger coming *down* the panel is on its way to the switcher, and the app does not move
-        // for it — not even to move back, which is what following the finger blindly would do.
+        // A finger coming *down* the panel is not about the app at all: down from the head of the
+        // panel is the switcher, and the app it comes down over is drawn exactly where it was.
         launcher.update(Message::TransitionSettled);
         launcher.update(Message::Open(MUSIC));
         launcher.update(Message::TransitionSettled);
@@ -2142,24 +2307,47 @@ mod tests {
         launcher.update(Message::Pulled(Vector::new(0.0, 200.0)));
 
         assert_eq!(
-            launcher.transition, None,
-            "a drag towards the head of the panel takes no app with it"
+            launcher.transition,
+            Some(Transition {
+                layer: Layer::Switcher,
+                motion: Motion::Down,
+                start: 0.0,
+                progress: Progress::At((200.0 - style::SLOP) / SCREEN as f32),
+            }),
+            "down from the head of the panel brings the sheet, not the app"
         );
+        assert_eq!(launcher.screen, Screen::App(MUSIC));
 
-        // And the switcher, which is a layer over everything: a drag while it is down moves no app,
-        // and a flick upwards still means what it has always meant — "put this aside", about the
-        // sheet, because the sheet is what is in front.
-        launcher.update(Message::Recents);
+        launcher.update(Message::Released(Vector::new(0.0, 0.0)));
+
+        assert!(launcher.recents, "and letting go of it leaves the sheet down");
+        assert_eq!(launcher.screen, Screen::App(MUSIC));
+
+        // With the sheet down it is the layer in front, and it moves the way it came: up. The app
+        // behind it does not move at all, and a flick upwards is what puts the sheet away.
+        launcher.update(Message::TransitionSettled);
         launcher.update(Message::Pulled(Vector::new(0.0, -200.0)));
 
         assert_eq!(
-            launcher.transition, None,
-            "no app is pulled out from under the switcher"
+            launcher.transition,
+            Some(Transition {
+                layer: Layer::Switcher,
+                motion: Motion::Down,
+                start: 1.0,
+                progress: Progress::At(1.0 - (200.0 - style::SLOP) / SCREEN as f32),
+            }),
+            "a finger on the sheet takes the sheet"
+        );
+        assert_eq!(
+            launcher.screen,
+            Screen::App(MUSIC),
+            "and never the app behind it"
         );
 
         launcher.update(Message::Released(Vector::new(0.0, -600.0)));
 
         assert!(!launcher.recents, "an upward flick puts the sheet away");
+        assert_eq!(launcher.screen, Screen::App(MUSIC));
     }
 
     /// Every edge gesture is pinned to the edge it starts at.
@@ -2216,7 +2404,7 @@ mod tests {
             "the sheet is not down until the edge is dragged"
         );
 
-        launcher.update(Message::Recents);
+        pull_the_switcher_down(&mut launcher);
 
         assert!(launcher.recents);
         assert_eq!(
@@ -2240,7 +2428,7 @@ mod tests {
 
         launcher.update(Message::Open(MUSIC));
         launcher.update(Message::Back);
-        launcher.update(Message::Recents);
+        pull_the_switcher_down(&mut launcher);
         launcher.update(Message::RecentsClose);
 
         assert!(!launcher.recents);
@@ -2261,7 +2449,7 @@ mod tests {
             launcher.update(Message::Back);
         }
 
-        launcher.update(Message::Recents);
+        pull_the_switcher_down(&mut launcher);
         launcher.update(Message::RecentsKill(MUSIC));
 
         assert!(!launcher.is_app_running(MUSIC), "the cross stopped that one");
@@ -2298,7 +2486,7 @@ mod tests {
         let mut launcher = Launcher::new(Arc::new(Board::simulated()));
 
         launcher.update(Message::Open(TERMINAL));
-        launcher.update(Message::Recents);
+        pull_the_switcher_down(&mut launcher);
         launcher.update(Message::Back);
 
         assert!(!launcher.recents, "the sheet is what back closed");
@@ -2308,11 +2496,19 @@ mod tests {
             "and the app underneath is still up"
         );
 
-        launcher.update(Message::Recents);
-        launcher.update(Message::Home);
+        pull_the_switcher_down(&mut launcher);
+        // The sheet is what a gesture is about while it is down, and it is the layer in front: a drag
+        // up from the foot of the panel takes *it* away, and the app underneath is exactly where it
+        // was — which is the whole difference between a layer and a screen.
+        launcher.update(Message::Pulled(Vector::new(0.0, -200.0)));
+        launcher.update(Message::Released(Vector::new(0.0, -600.0)));
 
-        assert!(!launcher.recents, "the swipe up closes it as well");
-        assert_eq!(launcher.screen, Screen::Grid);
+        assert!(!launcher.recents, "a drag up closes it as well");
+        assert_eq!(
+            launcher.screen,
+            Screen::App(TERMINAL),
+            "and the app underneath is still up, because the sheet is what was in front"
+        );
     }
 
     #[test]

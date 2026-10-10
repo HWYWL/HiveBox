@@ -68,6 +68,13 @@ pub enum Motion {
     Home,
     /// The app arrives from the right, over the desktop it was opened from.
     Open,
+    /// The screen in front comes down from above the panel: the task switcher, and the same gesture
+    /// in reverse when a finger takes it away again.
+    ///
+    /// The one motion whose *end* is a layer being on screen rather than off it, which is what
+    /// [`Motion::leaves`] answers no for. A drag of it works exactly like the others: the sheet is
+    /// where the finger has put it, and where it ends up is decided when the finger leaves.
+    Down,
 }
 
 impl Motion {
@@ -86,13 +93,18 @@ impl Motion {
             Self::Home => Vector::new(0.0, -size.height * progress),
             // In from the right: at 0.0 it is off the panel, at 1.0 it is where an app belongs.
             Self::Open => Vector::new(size.width * (1.0 - progress), 0.0),
+            // Down from above: at 0.0 it is wholly over the top edge, at 1.0 it is where the sheet
+            // belongs. `Open` turned a quarter turn, and the reason a sheet slides rather than fades.
+            Self::Down => Vector::new(0.0, -size.height * (1.0 - progress)),
         }
     }
 
     /// Whether the screen in front has left the panel by the end of this motion.
     ///
     /// The one thing an app on the other side of a transition needs to know: an app that arrived is
-    /// the screen, and an app that has gone leaves the desktop behind.
+    /// the screen, and an app that has gone leaves the desktop behind. [`Motion::Down`] is the other
+    /// answer for the other reason — the sheet is on the panel when it has arrived, so there is
+    /// nothing for the launcher to take away when it gets there.
     pub fn leaves(self) -> bool {
         matches!(self, Self::Back | Self::Home)
     }
@@ -581,6 +593,12 @@ mod tests {
         // an app belongs, which is what makes the swap that follows invisible.
         assert_eq!(Motion::Open.offset(0.0, panel()), Vector::new(480.0, 0.0));
         assert_eq!(Motion::Open.offset(1.0, panel()), Vector::new(0.0, 0.0));
+
+        // And a sheet comes down from above: wholly over the top edge at 0.0, in its place at 1.0 —
+        // the same shape as an open, a quarter turn away from it.
+        assert_eq!(Motion::Down.offset(0.0, panel()), Vector::new(0.0, -480.0));
+        assert_eq!(Motion::Down.offset(0.25, panel()), Vector::new(0.0, -360.0));
+        assert_eq!(Motion::Down.offset(1.0, panel()), Vector::new(0.0, 0.0));
     }
 
     /// A progress no finger could produce is clamped rather than extrapolated: a screen drawn a
@@ -590,15 +608,21 @@ mod tests {
         assert_eq!(Motion::Back.offset(2.0, panel()), Vector::new(480.0, 0.0));
         assert_eq!(Motion::Back.offset(-1.0, panel()), Vector::new(0.0, 0.0));
         assert_eq!(Motion::Open.offset(-1.0, panel()), Vector::new(480.0, 0.0));
+        assert_eq!(Motion::Down.offset(2.0, panel()), Vector::new(0.0, 0.0));
     }
 
-    /// Which motions end with the app off the panel — the question whoever owns the two screens
-    /// asks when the transition reports itself over.
+    /// Which motions end with the screen in front off the panel — the question whoever owns the two
+    /// screens asks when a transition reports itself over.
+    ///
+    /// The two arrivals are the interesting ones, and for opposite reasons: an app that has arrived
+    /// *is* the screen, and a sheet that has arrived is a layer over it. Neither leaves the launcher
+    /// anything to take away.
     #[test]
-    fn only_an_open_ends_with_the_app_still_up() {
+    fn only_the_departures_leave_the_panel() {
         assert!(Motion::Back.leaves());
         assert!(Motion::Home.leaves());
         assert!(!Motion::Open.leaves());
+        assert!(!Motion::Down.leaves());
     }
 
     /// A transition publishes its settle once, on the frame it arrives, and asks for frames until
