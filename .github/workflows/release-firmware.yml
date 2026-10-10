@@ -80,6 +80,11 @@ jobs:
       # 装工具链要下几百 MB，从云上跑偶尔会失败（同一个步骤第一次成功、第二次就挂过），
       # 所以这里重试三次，并且每次失败都把日志尾部贴成注解 —— 不然外面只看得见一个退出码。
       - name: 安装 Xtensa 工具链
+        # espup 要查 GitHub API 才能解析发行版里的产物；匿名请求从云端 IP 出去
+        # 经常撞上 60 次/小时的限流，直接 403。给它本工作流的 token 就好了。
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eo pipefail
           if ! rustup run "${XTENSA_TOOLCHAIN}" rustc --version >/dev/null 2>&1; then
