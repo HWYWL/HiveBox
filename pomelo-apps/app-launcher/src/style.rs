@@ -161,6 +161,25 @@ pub const PAGE_CURVE: Curve = Curve::EaseOutCubic;
 pub const TRANSITION: Duration = Duration::from_millis(240);
 pub const TRANSITION_CURVE: Curve = Curve::EaseOutCubic;
 
+/// How far an app has to have been pulled for a finger leaving it to send it off the panel: a share
+/// of the panel — 0.35, about a third of the way, 168 px of this one.
+///
+/// A share rather than pixels because a share is what the transition is drawn in (see
+/// [`pomelo_widgets::Progress`]), and shorter than the page turn's [`SWIPE_COMMIT`] (45%) on purpose:
+/// a page turn is a move to the next page, which can be made again a moment later, while a back
+/// gesture is a dismissal — the shortest gesture a phone has, and the one a person expects a third
+/// of the way to be enough for.
+pub const TRANSITION_COMMIT: f32 = 0.35;
+
+/// How fast a flick sends an app away without having been pulled that far: 450 px/s, the speed the
+/// page turn flicks at.
+///
+/// One number for both because it is one hand: whoever flicks a page across flicks an app off the
+/// panel at the same speed, and a threshold that disagreed would be a panel that felt like two
+/// different panels on the same finger. The detector's `PanEndDetails` hands over the whole drag's
+/// velocity, which is what a flick is.
+pub const TRANSITION_FLING: f32 = 450.0;
+
 /// The page dots: one per page, the page that is up lit.
 ///
 /// Exported, like [`SCREEN`], because the panel tests find what is on screen by its colour.

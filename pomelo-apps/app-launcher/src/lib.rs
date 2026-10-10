@@ -57,12 +57,26 @@
 //! # An app arrives and leaves, rather than appearing
 //!
 //! The desktop is what an app is drawn *over*, and the two moments that matter are the ones a phone
-//! spends showing rather than cutting: the app slides in from the right when a tile is tapped, off
-//! the right when back is pressed, and off the top when a finger comes up from the foot of the
-//! panel. None of those is the screen changing. The screen changes when the gesture decides — on the
-//! tap, or on the finger leaving — and what happens after that is the app being *drawn* over a
-//! desktop that is already up. See [`Launcher::view`]: one frame, two screens, and
+//! spends showing rather than cutting: the app slides in from the right when a tile is tapped, off the
+//! right when back is asked for, and off the top when a finger comes up from the foot of the panel.
+//! None of those is the screen changing. The screen changes when the gesture *decides* — on the tap,
+//! on the key press, or on the finger leaving — and what happens after that is the app being *drawn*
+//! over a desktop that is already up. See [`Launcher::view`]: one frame, two screens, and
 //! [`pomelo_widgets::transition`] is what puts them both in it.
+//!
+//! # The two gestures that move an app follow the finger
+//!
+//! Which is the difference between this and a screen that waits to be told: a drag in from the left
+//! edge takes the app with it, frame by frame, and a drag up from the foot of the panel puts it aside
+//! the same way. Halfway through a drag nothing has been decided — the app is still the screen, still
+//! running, and drawn exactly where the finger has taken it — and what settles it is the finger
+//! leaving: far enough ([`style::TRANSITION_COMMIT`]) or fast enough ([`style::TRANSITION_FLING`])
+//! sends the app away, and anything else brings it back. See [`Launcher::pull_app`] and
+//! [`Launcher::release_app`].
+//!
+//! The pinning that makes the edge layer possible at all is what makes this safe: only a drag that
+//! *began* in an edge band is ever reported to this app, so a list in the middle of a page goes on
+//! scrolling under the same finger. See [`Launcher::edge_gestures`].
 //!
 //! Where the app's state lives while it leaves is what makes this a transition rather than a cut
 //! with a picture of the old screen in it: the app never went anywhere. Its pages, its scroll and
@@ -70,9 +84,9 @@
 //! the same function that would draw the app if it were opened again. [`Launcher::app_screen`].
 //!
 //! And nothing else in the launcher changes while a screen moves, which is deliberate: the screen
-//! is the desktop from the frame the gesture is recognised on, so the status bar, the exit key, the
-//! switcher and a press that lands in the middle of a slide all get the answer a phone would give.
-//! What is in flight is a picture, and a picture is not a state machine.
+//! changes on the frame the gesture decides, not on the frame the app has finished moving, so the
+//! status bar, the exit key, the switcher and a press that lands in the middle of a slide all get the
+//! answer a phone would give. What is in flight is a picture, and a picture is not a state machine.
 //!
 //! # The task switcher is a layer, and the top edge is where it comes from
 //!
@@ -101,7 +115,7 @@ use std::sync::Arc;
 use iced::theme::Palette;
 use iced::widget::{button, column, container, stack, text, Column, Row, Space};
 use iced::{
-    Alignment, Border, Color, Element, Length, Shadow, Size, Subscription, Task, Theme,
+    Alignment, Border, Color, Element, Length, Shadow, Size, Subscription, Task, Theme, Vector,
 };
 
 use calculator::Calculator;
@@ -199,6 +213,20 @@ pub enum Message {
     /// (`pomelo_widgets::ScreenTransition` publishes it on the frame the app stops moving), and it
     /// is what ends the transition — until it arrives, the app is still drawn over the desktop.
     TransitionSettled,
+    /// A finger the edge layer claimed, reported once a frame: how far it has taken the app from
+    /// where the app was.
+    ///
+    /// A *drag* and not a swipe, because the app is what moves: what the finger has done so far is
+    /// where the app is drawn, and what it does next is where the app goes next. The message carries
+    /// the distance from where the finger came down, which is the same number every frame and grows —
+    /// see [`Launcher::pull_app`].
+    Pulled(Vector),
+    /// The finger left the panel, at the end of a drag: how fast it was moving when it left.
+    ///
+    /// Speed is half of what decides where an app ends up — a short flick is a decision as much as a
+    /// long pull — and this is the velocity of the whole drag rather than of its last frame, which is
+    /// what a flick is. See [`Launcher::release_app`].
+    Released(Vector),
     /// The status bar's readings, driven by the [`Subscription`].
     ///
     /// Produced periodically by [`status_stream`] and whenever underlying
@@ -224,19 +252,29 @@ pub enum Message {
 /// An app on its way over the desktop, and which way it is going.
 ///
 /// The *screen* is not part of this, and that is the point: an app that is arriving is already
-/// [`Screen::App`], and one that is leaving has already given way to the desktop. The screen
-/// changes when the gesture decides — a swipe home is home from the frame it is recognised on — and
-/// what is left to do for the next few hundred milliseconds is *show* it: the app is drawn over the
-/// desktop for as long as it takes to slide off it, by [`pomelo_widgets::transition`].
+/// [`Screen::App`], and one that is leaving has already given way to the desktop — the screen changes
+/// on the frame the *gesture* decides, not on the frame the app has finished moving. What is left to
+/// do after that is *show* it: the app is drawn over the desktop for as long as it takes to slide off
+/// it, by [`pomelo_widgets::transition`].
 ///
-/// Which is why the app is remembered here by index rather than by element: its state never left
-/// this launcher — the same reason a backgrounded app comes back on the page it was on — and the
-/// view builds the app it draws from that state. See [`Launcher::view`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// While a finger is still on the app, nothing has been decided at all: the app is the screen, it is
+/// drawn where the finger has put it, and the desktop behind it is only what the drag is uncovering.
+///
+/// Which is why the app is remembered here by index rather than by element: its state never left this
+/// launcher — the same reason a backgrounded app comes back on the page it was on — and the view
+/// builds the app it draws from that state. See [`Launcher::view`].
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct Transition {
     motion: pomelo_widgets::Motion,
     /// The app the transition is about.
     app: usize,
+    /// Where the app is, in the launcher's own copy of it: where a finger has pulled it to while one
+    /// is on it, or the place it was sent to when the finger left.
+    ///
+    /// Kept here rather than asked back out of the widget, because the widget decides nothing and is
+    /// only ever told where to draw. One answer to "where is the app" is worth more than a widget
+    /// that can be asked, and it is what makes the finger and the animation unable to disagree.
+    progress: pomelo_widgets::Progress,
 }
 
 /// The launcher.
@@ -910,9 +948,12 @@ impl Launcher {
                 self.hand_over_size();
 
                 if from_the_desktop {
+                    // An app opened from the desktop is *sent* to its place: no finger is on it, so
+                    // the transition takes itself there. See [`pomelo_widgets::Progress`].
                     self.transition = Some(Transition {
                         motion: pomelo_widgets::Motion::Open,
                         app: index,
+                        progress: pomelo_widgets::Progress::To(1.0),
                     });
                 }
             }
@@ -923,10 +964,12 @@ impl Launcher {
             Message::Home => self.go_home(),
             Message::TransitionSettled => {
                 // The app has stopped moving, so there is nothing left to draw over the desktop and
-                // nothing left to remember about how it got there: the screen is already the one
-                // that owns the panel now, and the next frame is the ordinary one.
+                // nothing left to remember about how it got there. The screen is not touched here: it
+                // changed when the gesture decided, which was several frames ago.
                 self.transition = None;
             }
+            Message::Pulled(delta) => self.pull_app(delta),
+            Message::Released(velocity) => self.release_app(velocity),
             Message::Exit => match self.screen {
                 Screen::App(index) => {
                     self.kill_app(index);
@@ -1066,9 +1109,13 @@ impl Launcher {
                 // the exit key, a press that arrives in the middle of the slide — gets the answer a
                 // phone would give. What is left to do is draw the app sliding off the panel, which
                 // is [`Launcher::view`]'s and [`Message::TransitionSettled`]'s business.
+                //
+                // Sent rather than pulled: a back *key* has no finger on the panel, so the transition
+                // takes itself off the edge. The drag from the same edge is `Launcher::release_app`'s.
                 self.transition = Some(Transition {
                     motion: pomelo_widgets::Motion::Back,
                     app,
+                    progress: pomelo_widgets::Progress::To(1.0),
                 });
             }
 
@@ -1091,16 +1138,136 @@ impl Launcher {
     /// The app leaves the panel the way the finger went — upwards, which is the direction that says
     /// "put this aside" rather than "go back". Which is the only difference between this and a back:
     /// the screen, the effect on `running_apps` and the app's own page are the same either way.
+    ///
+    /// Sent rather than pulled, like a back key: this is what a *gesture* that has already ended
+    /// arrives as. The drag that ends in the same place goes through `Launcher::release_app`.
     fn go_home(&mut self) {
         if let Screen::App(app) = self.screen {
             self.transition = Some(Transition {
                 motion: pomelo_widgets::Motion::Home,
                 app,
+                progress: pomelo_widgets::Progress::To(1.0),
             });
         }
 
         self.screen = Screen::Grid;
         self.recents = false;
+    }
+
+    /// Takes the app to where a finger has pulled it, and puts nothing away.
+    ///
+    /// What the edge layer sends once a frame while a finger is down. The app follows the finger: the
+    /// screen does not change here, `running_apps` is not touched and nothing is decided — a drag is a
+    /// question, and this is the answer being written down as the finger asks it. What the finger
+    /// meant is settled in [`Launcher::release_app`].
+    ///
+    /// Which of the two motions a drag is, and which way it has to be going, come off the drag itself:
+    /// a finger going right is taking the app off to the right (a back), and one going up is doing what
+    /// the swipe from the foot of the panel does (a leaving). A finger coming *down* the panel, or
+    /// going left, is on its way to something else — the switcher, mostly — and nothing moves for it.
+    fn pull_app(&mut self, delta: Vector) {
+        use pomelo_widgets::Motion;
+
+        let Screen::App(app) = self.screen else {
+            return;
+        };
+
+        // The switcher is a layer over whatever is up, so while it is down it is what a finger is
+        // talking to — and a sheet that comes away under the finger is its own piece of work rather
+        // than a second meaning for this drag. See [`Message::Recents`].
+        if self.recents {
+            return;
+        }
+
+        let motion = match self.transition {
+            // A finger already on the app settles which way it goes, once, on the frame the drag became
+            // a drag. An app that changed the edge it was leaving by would be one that jumped.
+            Some(transition)
+                if matches!(transition.progress, pomelo_widgets::Progress::At(_)) =>
+            {
+                transition.motion
+            }
+            // And an app that is already on its way out is nobody's but the gesture that sent it: a
+            // second answer arriving mid-animation would be a second animation.
+            Some(_) => return,
+            None => {
+                if delta.x > 0.0 && delta.x.abs() >= delta.y.abs() {
+                    Motion::Back
+                } else if delta.y < 0.0 && delta.y.abs() > delta.x.abs() {
+                    Motion::Home
+                } else {
+                    return;
+                }
+            }
+        };
+
+        // The slop is what a drag spends before it is a drag at all — the finger moved and the panel
+        // had not decided yet — so a pull measures from where the drag was recognised rather than from
+        // where the finger came down. Without this the app jumps the slop's worth of pixels on the
+        // first frame of motion, which is the one frame it may not jump on.
+        let (travelled, span) = match motion {
+            Motion::Back => ((delta.x - style::SLOP).max(0.0), self.size.width),
+            Motion::Home => ((-delta.y - style::SLOP).max(0.0), self.size.height),
+            Motion::Open => return,
+        };
+
+        let pulled = if span > 0.0 {
+            (travelled / span).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
+        self.transition = Some(Transition {
+            motion,
+            app,
+            progress: pomelo_widgets::Progress::At(pulled),
+        });
+    }
+
+    /// Lets go of an app a finger was holding: it goes where the gesture decided.
+    ///
+    /// Two ways for a drag to mean "away", and a phone reads both of them: pulled far enough, or
+    /// moving fast enough when the finger left. Everything else is the app coming back — to where it
+    /// was, on the page it was on.
+    ///
+    /// The decision changes the *screen* here, on this frame, because the gesture has decided: what is
+    /// left is drawing the app sliding off a panel that has already left it behind.
+    fn release_app(&mut self, velocity: Vector) {
+        use pomelo_widgets::{Motion, Progress};
+
+        let Some(transition) = self.transition else {
+            // A drag no app followed — the finger was over the desktop, or over the switcher. One of
+            // those still means something: with the sheet down, a flick upwards is the "put this
+            // aside" it has always been, and what is put aside is the sheet, because the sheet is what
+            // is in front. Decided on release, because a finger that changes its mind halfway up and
+            // comes back has not asked for anything.
+            if self.recents && velocity.y <= -style::TRANSITION_FLING {
+                self.recents = false;
+            }
+
+            return;
+        };
+
+        // Only a held app can be let go of. One that is already on its way is on its way.
+        let Progress::At(pulled) = transition.progress else {
+            return;
+        };
+
+        let leaving = pulled >= style::TRANSITION_COMMIT
+            || match transition.motion {
+                Motion::Back => velocity.x >= style::TRANSITION_FLING,
+                Motion::Home => -velocity.y >= style::TRANSITION_FLING,
+                Motion::Open => false,
+            };
+
+        self.transition = Some(Transition {
+            progress: Progress::To(if leaving { 1.0 } else { 0.0 }),
+            ..transition
+        });
+
+        if leaving && transition.motion.leaves() {
+            self.screen = Screen::Grid;
+        }
     }
 
     /// Stops every app that is running: what the switcher's "clear all" asks for.
@@ -1143,6 +1310,9 @@ impl Launcher {
                 self.app_screen(transition.app),
             )
             .motion(transition.motion)
+            // Who is taking the app where it is going: a finger, one frame at a time, or the
+            // transition itself once the gesture has decided. See [`Transition::progress`].
+            .progress(transition.progress)
             .duration(style::TRANSITION)
             .curve(style::TRANSITION_CURVE)
             .on_settled(Message::TransitionSettled)
@@ -1194,20 +1364,29 @@ impl Launcher {
 
     /// The screen, with the panel's edge gestures around it.
     ///
-    /// Three gestures, and all three are ones a phone has: a swipe up from the foot of the panel goes
+    /// Three gestures, and all three are ones a phone has: a drag up from the foot of the panel goes
     /// back to the desktop, a swipe down from its head brings the task switcher over whatever is up,
-    /// and a swipe in from either side goes back a page.
+    /// and a drag in from the **left** side goes back a page.
     ///
-    /// Every one of them is pinned to the edge it *starts* at, and that pin is the whole of what
-    /// makes this layer possible: an unpinned swipe would take every drag there is, and a page that
-    /// scrolls is a page of drags. The origin is asked the moment a drag passes [`style::SLOP`], so
-    /// a scroll in the middle of a page is never interrupted in the first place — see
-    /// `GestureDetector::swipe_origin`.
+    /// Two of the three are *drags* and one is a swipe, which is the difference between an app that
+    /// moves under the finger and a sheet that appears once the finger has left. Going back and going
+    /// home both move the app, so what this layer reports for them is the finger's path
+    /// ([`Message::Pulled`], once a frame) and its last velocity ([`Message::Released`]): the app is
+    /// drawn where the finger has taken it, and whether it stays gone is decided when the finger
+    /// leaves. The switcher has no screen to move, so it keeps the older shape — a direction, reported
+    /// once, when the swipe is over.
+    ///
+    /// Every one of them is pinned to the edge it *starts* at, and that pin is the whole of what makes
+    /// this layer possible: an unpinned gesture would take every drag there is, and a page that scrolls
+    /// is a page of drags. The origin is asked the moment a drag passes [`style::SLOP`], so a scroll in
+    /// the middle of a page is never interrupted in the first place — see
+    /// `GestureDetector::swipe_origin`. The pans need the pins as much as the swipes do, and for one
+    /// more reason: a pan callback with no pin claims nothing at all.
     ///
     /// The downward pin is not a formality, it is the reason the mechanism exists. Of the four
-    /// directions it is the one a *page* is most likely to want for itself — every list on this
-    /// board scrolls downwards — so the head of the panel is the only place it is claimed from, and
-    /// a drag that begins in the middle of an app stays that app's scroll.
+    /// directions it is the one a *page* is most likely to want for itself — every list on this board
+    /// scrolls downwards — so the head of the panel is the only place it is claimed from, and a drag
+    /// that begins in the middle of an app stays that app's scroll.
     ///
     /// The two horizontal pins are opposite sides of the same idea: a phone's back gesture is a
     /// rightward drag that began at the **left** edge, and a leftward one that began at the right.
@@ -1220,10 +1399,21 @@ impl Launcher {
         gesture_detector(screen)
             .touch_slop(style::SLOP)
             .swipe_threshold(style::EDGE_SWIPE)
-            .on_swipe_up(Message::Home)
+            // The finger's path, and then its last velocity: an app taken off the panel and an app
+            // put aside are one gesture with two edges, and both are decided when the finger leaves.
+            // See [`Launcher::pull_app`] and [`Launcher::release_app`].
+            .on_pan_update(|details| Message::Pulled(details.total_delta))
+            .on_pan_end(|details| Message::Released(details.velocity))
+            // The switcher is still a swipe: all it needs to know is that the finger meant *down*,
+            // from the head of the panel. See [`Message::Recents`].
             .on_swipe_down(Message::Recents)
+            // And the back gesture that comes in from the *right* is still a swipe, with the behaviour
+            // it had before an app could follow a finger. An app drawn sliding left as it leaves is a
+            // motion this interface does not have, and inventing one for the mirrored half of a gesture
+            // would make two back gestures out of one. So this half is claimed (see the pins) and
+            // reported as a swipe on release: it goes back — it just goes back the way a button does
+            // rather than the way a finger does.
             .on_swipe_left(Message::Back)
-            .on_swipe_right(Message::Back)
             .swipe_origin(SwipeDirection::Up, Edge::Bottom, style::EDGE_ZONE)
             .swipe_origin(SwipeDirection::Down, Edge::Top, style::EDGE_ZONE)
             .swipe_origin(SwipeDirection::Left, Edge::Right, style::EDGE_ZONE)
@@ -1801,6 +1991,7 @@ mod tests {
             Some(Transition {
                 motion: pomelo_widgets::Motion::Open,
                 app: SETTINGS,
+                progress: pomelo_widgets::Progress::To(1.0),
             }),
             "an app opened from the desktop arrives over it"
         );
@@ -1829,6 +2020,7 @@ mod tests {
             Some(Transition {
                 motion: pomelo_widgets::Motion::Home,
                 app: MUSIC,
+                progress: pomelo_widgets::Progress::To(1.0),
             }),
         );
         assert!(
@@ -1854,6 +2046,120 @@ mod tests {
             "a killed app is not on its way anywhere"
         );
         assert!(!launcher.is_app_running(MUSIC));
+    }
+
+    /// A finger takes the app with it, and what happens when it lets go depends on how far and how
+    /// fast — the two halves of a phone's dismissal gesture, and the difference between an app that
+    /// followed the hand and one that waited for it.
+    #[test]
+    fn a_dragged_app_follows_the_finger_and_is_let_go_of() {
+        use pomelo_widgets::{Motion, Progress};
+
+        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
+        launcher.update(Message::Open(SETTINGS));
+        launcher.update(Message::TransitionSettled);
+        assert_eq!(launcher.screen, Screen::App(SETTINGS));
+
+        // A finger down on the left edge and 118 px to the right of where the drag was recognised:
+        // the app follows it, and nothing at all has been decided yet — it is still the screen, it is
+        // still running, and it is where the finger has put it.
+        launcher.update(Message::Pulled(Vector::new(style::SLOP + 118.0, 4.0)));
+
+        assert_eq!(
+            launcher.transition,
+            Some(Transition {
+                motion: Motion::Back,
+                app: SETTINGS,
+                progress: Progress::At(118.0 / SCREEN as f32),
+            }),
+            "drawn where the finger has taken it, and not where an animation would"
+        );
+        assert_eq!(
+            launcher.screen,
+            Screen::App(SETTINGS),
+            "a dragged app is still the app: nothing is decided until the finger leaves"
+        );
+        assert!(launcher.is_app_running(SETTINGS));
+
+        // The finger goes back to where it came down, and the app comes back with it.
+        launcher.update(Message::Pulled(Vector::new(style::SLOP, 0.0)));
+        assert_eq!(
+            launcher.transition,
+            Some(Transition {
+                motion: Motion::Back,
+                app: SETTINGS,
+                progress: Progress::At(0.0),
+            }),
+        );
+
+        // Letting go there sends it back to nothing: the app does not move, which is drawn as a
+        // transition that ends where it already is.
+        launcher.update(Message::Released(Vector::new(0.0, 0.0)));
+
+        assert_eq!(
+            launcher.transition,
+            Some(Transition {
+                motion: Motion::Back,
+                app: SETTINGS,
+                progress: Progress::To(0.0),
+            }),
+            "coming back rather than going away"
+        );
+        assert_eq!(launcher.screen, Screen::App(SETTINGS));
+        assert!(launcher.is_app_running(SETTINGS));
+
+        // And now a flick: a short pull and a fast one. The app goes, and the desktop is the screen
+        // from this frame — what is left is drawing the app sliding off a panel that has left it.
+        launcher.update(Message::TransitionSettled);
+        launcher.update(Message::Pulled(Vector::new(style::SLOP + 20.0, 0.0)));
+        launcher.update(Message::Released(Vector::new(
+            style::TRANSITION_FLING + 100.0,
+            0.0,
+        )));
+
+        assert_eq!(
+            launcher.transition,
+            Some(Transition {
+                motion: Motion::Back,
+                app: SETTINGS,
+                progress: Progress::To(1.0),
+            }),
+        );
+        assert_eq!(launcher.screen, Screen::Grid, "the gesture has decided");
+        assert!(
+            launcher.is_app_running(SETTINGS),
+            "and the app was put aside rather than closed"
+        );
+
+        // A finger coming *down* the panel is on its way to the switcher, and the app does not move
+        // for it — not even to move back, which is what following the finger blindly would do.
+        launcher.update(Message::TransitionSettled);
+        launcher.update(Message::Open(MUSIC));
+        launcher.update(Message::TransitionSettled);
+
+        assert_eq!(launcher.screen, Screen::App(MUSIC));
+
+        launcher.update(Message::Pulled(Vector::new(0.0, 200.0)));
+
+        assert_eq!(
+            launcher.transition, None,
+            "a drag towards the head of the panel takes no app with it"
+        );
+
+        // And the switcher, which is a layer over everything: a drag while it is down moves no app,
+        // and a flick upwards still means what it has always meant — "put this aside", about the
+        // sheet, because the sheet is what is in front.
+        launcher.update(Message::Recents);
+        launcher.update(Message::Pulled(Vector::new(0.0, -200.0)));
+
+        assert_eq!(
+            launcher.transition, None,
+            "no app is pulled out from under the switcher"
+        );
+
+        launcher.update(Message::Released(Vector::new(0.0, -600.0)));
+
+        assert!(!launcher.recents, "an upward flick puts the sheet away");
     }
 
     /// Every edge gesture is pinned to the edge it starts at.

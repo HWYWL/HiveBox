@@ -193,7 +193,16 @@ impl<'a, Message, Theme, Renderer> GestureDetector<'a, Message, Theme, Renderer>
         self
     }
 
-    /// Whether this detector has anything to say about a swipe in `direction`.
+    /// Whether this detector has anything to say about a drag in `direction`.
+    ///
+    /// Two ways to have something to say, and they are the two things a caller can ask this widget
+    /// for: a swipe *message* for that direction, or the continuous pan callbacks — for which the
+    /// direction is only what the pin is asked about, because a pan is a drag with a place it started
+    /// and not a direction.
+    ///
+    /// A pan callback with no pin is nobody's answer, and that is deliberate: "tell me about every
+    /// drag on the panel" is a layer that eats scrolls, and a caller who wants a drag from anywhere
+    /// can pin one direction to an edge of the whole panel rather than leave the pin off.
     fn handles(&self, direction: SwipeDirection) -> bool {
         let specific = match direction {
             SwipeDirection::Left => self.on_swipe_left.is_some(),
@@ -202,7 +211,13 @@ impl<'a, Message, Theme, Renderer> GestureDetector<'a, Message, Theme, Renderer>
             SwipeDirection::Down => self.on_swipe_down.is_some(),
         };
 
-        specific || self.on_swipe.is_some()
+        let pans = self.on_pan_start.is_some()
+            || self.on_pan_update.is_some()
+            || self.on_pan_end.is_some();
+
+        specific
+            || self.on_swipe.is_some()
+            || (pans && self.swipe_origins[direction.index()].is_some())
     }
 
     /// Where a swipe in `direction` has to begin, as it was configured — `None` for anywhere.
@@ -308,7 +323,14 @@ impl<'a, Message, Theme, Renderer> GestureDetector<'a, Message, Theme, Renderer>
         self
     }
 
-    /// Sets the callback for pan start.
+    /// Sets the callback for pan start: the frame the drag passed the slop and became this
+    /// detector's.
+    ///
+    /// The four pan callbacks are the detector's own drags and nothing else. What makes a drag this
+    /// detector's is [`GestureDetector::swipe_origin`], and a pan callback with *no* pin claims
+    /// nothing at all — so a caller who wants pans has to say where they begin. That is the whole
+    /// difference between a gesture layer and a layer that eats scrolls: a page under it keeps
+    /// scrolling wherever the pin does not reach.
     pub fn on_pan_start(
         mut self,
         on_pan_start: impl Fn(PanStartDetails) -> Message + 'a,
@@ -317,7 +339,8 @@ impl<'a, Message, Theme, Renderer> GestureDetector<'a, Message, Theme, Renderer>
         self
     }
 
-    /// Sets the callback for continuous pan updates.
+    /// Sets the callback for continuous pan updates: one per frame the finger moves, with the
+    /// distance since the last frame and the distance since the drag began.
     pub fn on_pan_update(
         mut self,
         on_pan_update: impl Fn(PanUpdateDetails) -> Message + 'a,
@@ -326,7 +349,10 @@ impl<'a, Message, Theme, Renderer> GestureDetector<'a, Message, Theme, Renderer>
         self
     }
 
-    /// Sets the callback for pan release/end.
+    /// Sets the callback for pan release/end: where the drag stopped, and how fast.
+    ///
+    /// The velocity is the whole drag's — its displacement over its duration — which is what a flick
+    /// is, and what a caller deciding between "this far" and "this fast" needs.
     pub fn on_pan_end(
         mut self,
         on_pan_end: impl Fn(PanEndDetails) -> Message + 'a,
@@ -335,7 +361,8 @@ impl<'a, Message, Theme, Renderer> GestureDetector<'a, Message, Theme, Renderer>
         self
     }
 
-    /// Sets the message emitted when a pan is cancelled.
+    /// Sets the message emitted when a pan is cancelled: the finger lost to the panel, or taken away
+    /// from the drag.
     pub fn on_pan_cancel(mut self, message: Message) -> Self {
         self.on_pan_cancel = Some(message);
         self
@@ -524,14 +551,20 @@ where
                             state.start_pos,
                             bounds,
                         );
-                        if let Some(on_pan_start) = &self.on_pan_start {
-                            shell.publish(on_pan_start(PanStartDetails {
-                                point: state.start_pos,
-                            }));
+                        // The pan callbacks are the detector's own drags and nothing else, for the
+                        // same reason the swipe messages are: a pan this detector did not claim is a
+                        // scroll of whatever is underneath, and a caller drawing a screen from it
+                        // would be drawing one for a finger that is reading a list.
+                        if state.owns {
+                            if let Some(on_pan_start) = &self.on_pan_start {
+                                shell.publish(on_pan_start(PanStartDetails {
+                                    point: state.start_pos,
+                                }));
+                            }
                         }
                     }
 
-                    if state.is_dragging {
+                    if state.is_dragging && state.owns {
                         if let Some(on_pan_update) = &self.on_pan_update {
                             shell.publish(on_pan_update(PanUpdateDetails {
                                 point: pos,
@@ -570,14 +603,20 @@ where
                             state.start_pos,
                             bounds,
                         );
-                        if let Some(on_pan_start) = &self.on_pan_start {
-                            shell.publish(on_pan_start(PanStartDetails {
-                                point: state.start_pos,
-                            }));
+                        // The pan callbacks are the detector's own drags and nothing else, for the
+                        // same reason the swipe messages are: a pan this detector did not claim is a
+                        // scroll of whatever is underneath, and a caller drawing a screen from it
+                        // would be drawing one for a finger that is reading a list.
+                        if state.owns {
+                            if let Some(on_pan_start) = &self.on_pan_start {
+                                shell.publish(on_pan_start(PanStartDetails {
+                                    point: state.start_pos,
+                                }));
+                            }
                         }
                     }
 
-                    if state.is_dragging {
+                    if state.is_dragging && state.owns {
                         if let Some(on_pan_update) = &self.on_pan_update {
                             shell.publish(on_pan_update(PanUpdateDetails {
                                 point: pos,
@@ -609,11 +648,16 @@ where
 
                     if state.is_dragging {
                         state.is_dragging = false;
-                        if let Some(on_pan_end) = &self.on_pan_end {
-                            shell.publish(on_pan_end(PanEndDetails {
-                                velocity,
-                                total_delta,
-                            }));
+                        // Asked with the answer from the moment the drag began and not with this
+                        // moment's direction: a pan is one gesture from one place, and the release is
+                        // its last frame rather than a new question about it.
+                        if state.owns {
+                            if let Some(on_pan_end) = &self.on_pan_end {
+                                shell.publish(on_pan_end(PanEndDetails {
+                                    velocity,
+                                    total_delta,
+                                }));
+                            }
                         }
 
                         // The swipe, if this is one and if it is the detector's to report.
@@ -689,8 +733,13 @@ where
                     state.has_dragged = false;
                     if state.is_dragging {
                         state.is_dragging = false;
-                        if let Some(on_pan_cancel) = &self.on_pan_cancel {
-                            shell.publish(on_pan_cancel.clone());
+                        // Only a drag that was the detector's can be *cancelled* as one: one it never
+                        // claimed was never announced, and a caller told that a gesture it never heard
+                        // about has ended would be a caller told about somebody else's finger.
+                        if state.owns {
+                            if let Some(on_pan_cancel) = &self.on_pan_cancel {
+                                shell.publish(on_pan_cancel.clone());
+                            }
                         }
                     }
                 }

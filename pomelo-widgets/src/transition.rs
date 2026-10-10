@@ -98,11 +98,28 @@ impl Motion {
     }
 }
 
+/// Where the screen in front is, who is in charge of getting it there, and whether it is moving.
+///
+/// Two ways to hold a transition, and they are the two things a screen can be doing: following a
+/// finger, or going somewhere on its own.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Progress {
+    /// Held exactly here: no animation, because the clock is the finger. This *is* the position, as
+    /// often as the caller wants to say it — a drag says it once a frame, and a still finger says the
+    /// same number again.
+    At(f32),
+    /// On its way to here, under its own frames. Setting the same target again is not a new journey:
+    /// a caller redrawing its view every frame hands this the same `To` every frame, and a transition
+    /// that restarted on each of them would be one that never left.
+    To(f32),
+}
+
 /// Two screens, one behind the other, with the one in front on its way somewhere.
 pub struct ScreenTransition<'a, Message, Theme = iced::Theme, Renderer = iced::Renderer> {
     background: Element<'a, Message, Theme, Renderer>,
     foreground: Element<'a, Message, Theme, Renderer>,
     motion: Motion,
+    progress: Progress,
     width: Length,
     height: Length,
     duration: Duration,
@@ -113,8 +130,9 @@ pub struct ScreenTransition<'a, Message, Theme = iced::Theme, Renderer = iced::R
 impl<'a, Message, Theme, Renderer> ScreenTransition<'a, Message, Theme, Renderer> {
     /// A transition between `background` (behind) and `foreground` (in front).
     ///
-    /// A quarter of a second of `EaseOutCubic` by default — the shape a page turn has, because it is
-    /// the same gesture family and the same panel. See [`ScreenTransition::duration`].
+    /// A quarter of a second of `EaseOutCubic` by default, running to the end of the motion: the
+    /// shape a page turn has, because it is the same gesture family and the same panel. See
+    /// [`ScreenTransition::duration`] and [`ScreenTransition::progress`].
     pub fn new(
         background: Element<'a, Message, Theme, Renderer>,
         foreground: Element<'a, Message, Theme, Renderer>,
@@ -123,6 +141,7 @@ impl<'a, Message, Theme, Renderer> ScreenTransition<'a, Message, Theme, Renderer
             background,
             foreground,
             motion: Motion::Back,
+            progress: Progress::To(1.0),
             width: Length::Fill,
             height: Length::Fill,
             duration: Duration::from_millis(240),
@@ -134,6 +153,17 @@ impl<'a, Message, Theme, Renderer> ScreenTransition<'a, Message, Theme, Renderer
     /// Sets which way the screen in front is going.
     pub fn motion(mut self, motion: Motion) -> Self {
         self.motion = motion;
+        self
+    }
+
+    /// Sets where the screen in front is, and who is taking it there.
+    ///
+    /// A transition that is driven — [`Progress::At`] — is one a gesture owns: the caller says where
+    /// the screen is, as often as it has something new to say, and nothing here moves on its own. It
+    /// is how a finger takes an app off the panel and puts it back, and it is the only way the finger
+    /// and the animation cannot disagree about where the app is.
+    pub fn progress(mut self, progress: Progress) -> Self {
+        self.progress = progress;
         self
     }
 
@@ -189,18 +219,26 @@ pub fn screen_transition<'a, Message, Theme, Renderer>(
 /// Internal state of a [`ScreenTransition`].
 #[derive(Debug, Default)]
 struct State {
-    progress: AnimationController,
-    started: bool,
+    /// Where the screen in front is, in `0.0..=1.0`.
+    position: AnimationController,
+    /// The place it is on its way to, if it is on its way anywhere: the last [`Progress::To`] this
+    /// widget was handed. Kept so that being handed the same one again is not taken for a new
+    /// journey — a caller redraws every frame, and would hand over the same target every frame.
+    /// `None` while a finger holds it.
+    aim: Option<f32>,
+    /// Whether `on_settled` has been published for the journey in hand, so that it happens once.
     settled: bool,
 }
 
-/// One frame of a transition: start it, move it, and report the frame it arrives on.
+/// One frame of a transition: hold it where it has been told to be or move it towards where it has
+/// been sent, and report the frame it stops moving.
 ///
 /// A free function rather than a method, because this is the part a test can drive by hand: the
 /// instants it is handed *are* the animation, and a test that cannot choose them is testing the
-/// machine's clock rather than the transition. Everything the motion needs is passed in — nothing
-/// here reads a widget, an element or a screen.
+/// machine's clock rather than the transition. Everything the step needs is passed in — nothing here
+/// reads a widget, an element or a screen.
 fn advance<Message: Clone>(
+    progress: Progress,
     duration: Duration,
     curve: Curve,
     on_settled: Option<&Message>,
@@ -208,20 +246,39 @@ fn advance<Message: Clone>(
     now: Instant,
     shell: &mut Shell<'_, Message>,
 ) {
-    if !state.started {
-        state.started = true;
-        state.progress.animate_to(0.0, 1.0, duration, curve, now);
+    match progress {
+        // A finger is holding it: the clock is the finger, and this is where it has put the screen.
+        // Anything that was on its way stops *where it is*, because the hand that caught it decides
+        // where it goes next and not the target it was sent to.
+        Progress::At(position) => {
+            if state.aim.take().is_some() {
+                state.position.stop();
+            }
+
+            state.settled = false;
+            state.position.set_value(position.clamp(0.0, 1.0));
+        }
+        // Or it is on its way, and only a *new* destination is a new journey.
+        Progress::To(target) => {
+            if state.aim != Some(target) {
+                state.aim = Some(target);
+                state.settled = false;
+                state
+                    .position
+                    .animate_to(state.position.value(), target, duration, curve, now);
+            }
+
+            if state.position.is_animating() && state.position.update(now) {
+                shell.request_redraw();
+            }
+        }
     }
 
-    let running = state.progress.is_animating() && state.progress.update(now);
-
-    if running {
-        shell.request_redraw();
-    } else if !state.settled {
-        // The last step, and the only message this widget ever publishes. Not before the end: a
-        // transition that is not over is one whose screens have not been swapped yet, and the frame
-        // after this one draws the same pair in the same place — which is what makes the swap
-        // invisible.
+    // The end of a journey, and the only message this widget ever publishes. Not while a finger holds
+    // it — a held transition has not gone anywhere, it is being held — and not before it arrives, so
+    // that the frame the screens are swapped on is one where the screen in front is already exactly
+    // where the next one will be drawn.
+    if matches!(progress, Progress::To(_)) && !state.position.is_animating() && !state.settled {
         state.settled = true;
 
         if let Some(message) = on_settled {
@@ -320,8 +377,13 @@ where
         let settled = {
             let state = tree.state.downcast_mut::<State>();
 
+            // Everything about where the screen is happens on the frame, not on the messages that say
+            // where it should be: a finger's next position and a gesture's decision both arrive as
+            // messages, and iced runs the frame that follows them through this arm. One clock, and it
+            // is the panel's.
             if is_frame {
                 advance(
+                    self.progress,
                     self.duration,
                     self.curve,
                     self.on_settled.as_ref(),
@@ -389,7 +451,7 @@ where
             return;
         };
 
-        let offset = self.motion.offset(state.progress.value(), bounds.size());
+        let offset = self.motion.offset(state.position.value(), bounds.size());
         let mut children = layout.children();
 
         // The screen behind, where it belongs: it is not moving, and it is not asked to.
@@ -546,21 +608,22 @@ mod tests {
         let mut state = State::default();
         let start = Instant::now();
         let (duration, curve) = (Duration::from_millis(100), Curve::Linear);
+        let run = Progress::To(1.0);
         let settled: &str = "settled";
+        let mut messages = Vec::new();
 
         // The first frame starts it, and it is not over.
-        let mut messages = Vec::new();
         let mut shell = Shell::new(&mut messages);
-        advance(duration, curve, Some(&settled), &mut state, start, &mut shell);
+        advance(run, duration, curve, Some(&settled), &mut state, start, &mut shell);
 
-        assert!(state.started);
         assert!(!state.settled);
         assert!(messages.is_empty(), "nothing to report on the first frame");
-        assert!(state.progress.is_animating());
+        assert!(state.position.is_animating());
 
         // Halfway through: still nothing, and still running.
         let mut shell = Shell::new(&mut messages);
         advance(
+            run,
             duration,
             curve,
             Some(&settled),
@@ -570,9 +633,9 @@ mod tests {
         );
 
         assert!(messages.is_empty());
-        assert!(state.progress.is_animating());
+        assert!(state.position.is_animating());
         assert_eq!(
-            state.progress.value(),
+            state.position.value(),
             0.5,
             "halfway is halfway on a linear curve"
         );
@@ -580,6 +643,7 @@ mod tests {
         // And the end: one message, and it is the last one there will ever be.
         let mut shell = Shell::new(&mut messages);
         advance(
+            run,
             duration,
             curve,
             Some(&settled),
@@ -589,11 +653,12 @@ mod tests {
         );
 
         assert_eq!(messages, vec!["settled"]);
-        assert_eq!(state.progress.value(), 1.0);
-        assert!(!state.progress.is_animating());
+        assert_eq!(state.position.value(), 1.0);
+        assert!(!state.position.is_animating());
 
         let mut shell = Shell::new(&mut messages);
         advance(
+            run,
             duration,
             curve,
             Some(&settled),
@@ -605,15 +670,175 @@ mod tests {
         assert_eq!(messages, vec!["settled"], "published once, not once a frame");
     }
 
-    /// A transition with no duration left in it is over on its first frame, and says so.
+    /// While a finger holds it the transition is the finger's: the position is the number the caller
+    /// hands over, no frames are asked for, and nothing is ever reported over.
     #[test]
-    fn a_transition_with_no_duration_settles_on_its_first_frame() {
+    fn a_held_transition_goes_where_the_finger_puts_it() {
+        let mut state = State::default();
+        let held: &str = "settled";
+        let mut messages = Vec::new();
+
+        // A drag, frame by frame: 0.1, 0.25, 0.25 again — a finger that has stopped is still a finger
+        // — and 0.4.
+        for (at, expected) in [(0.1, 0.1), (0.25, 0.25), (0.25, 0.25), (0.4, 0.4)] {
+            let mut shell = Shell::new(&mut messages);
+            advance(
+                Progress::At(at),
+                Duration::from_millis(100),
+                Curve::Linear,
+                Some(&held),
+                &mut state,
+                Instant::now(),
+                &mut shell,
+            );
+
+            assert_eq!(state.position.value(), expected);
+            assert!(!state.position.is_animating(), "the finger is the clock");
+        }
+
+        assert!(
+            messages.is_empty(),
+            "a transition being held has not gone anywhere, so there is nothing to report"
+        );
+    }
+
+    /// A finger that catches a transition on its way takes it back: the animation stops where it was,
+    /// the finger decides from there, and what happens next is the finger's business rather than the
+    /// target nobody is heading for any more.
+    #[test]
+    fn a_finger_catches_a_transition_on_its_way() {
+        let mut state = State::default();
+        let start = Instant::now();
+        let (duration, curve) = (Duration::from_millis(100), Curve::Linear);
+        let mut messages = Vec::new();
+
+        // On its way to the end, and a third of the way there.
+        let mut shell = Shell::new(&mut messages);
+        advance(
+            Progress::To(1.0),
+            duration,
+            curve,
+            None::<&()>,
+            &mut state,
+            start,
+            &mut shell,
+        );
+
+        let mut shell = Shell::new(&mut messages);
+        advance(
+            Progress::To(1.0),
+            duration,
+            curve,
+            None::<&()>,
+            &mut state,
+            start + Duration::from_millis(33),
+            &mut shell,
+        );
+
+        assert!(state.position.is_animating());
+        assert!((state.position.value() - 0.33).abs() < 0.01);
+
+        // Caught, and put where the finger is.
+        let mut shell = Shell::new(&mut messages);
+        advance(
+            Progress::At(0.15),
+            duration,
+            curve,
+            None::<&()>,
+            &mut state,
+            start + Duration::from_millis(40),
+            &mut shell,
+        );
+
+        assert_eq!(state.position.value(), 0.15);
+        assert!(!state.position.is_animating());
+
+        // And let go of from there: it goes back to nothing.
+        let mut shell = Shell::new(&mut messages);
+        advance(
+            Progress::To(0.0),
+            duration,
+            curve,
+            None::<&()>,
+            &mut state,
+            start + Duration::from_millis(50),
+            &mut shell,
+        );
+
+        assert!(state.position.is_animating());
+
+        let mut shell = Shell::new(&mut messages);
+        advance(
+            Progress::To(0.0),
+            duration,
+            curve,
+            None::<&()>,
+            &mut state,
+            start + Duration::from_millis(150),
+            &mut shell,
+        );
+
+        assert_eq!(state.position.value(), 0.0);
+        assert!(!state.position.is_animating());
+    }
+
+    /// The same target handed over again is the same journey and not a new one: a caller that redraws
+    /// its view every frame says `To(1.0)` every frame, and a transition that restarted on each of
+    /// them would stand still for a quarter of a second and then jump.
+    #[test]
+    fn the_same_target_every_frame_is_one_journey() {
+        let mut state = State::default();
+        let start = Instant::now();
+        let (duration, curve) = (Duration::from_millis(100), Curve::Linear);
+        let mut messages = Vec::new();
+
+        for at in [0, 20, 50] {
+            let mut shell = Shell::new(&mut messages);
+            advance(
+                Progress::To(1.0),
+                duration,
+                curve,
+                None::<&()>,
+                &mut state,
+                start + Duration::from_millis(at),
+                &mut shell,
+            );
+        }
+
+        assert_eq!(
+            state.position.value(),
+            0.5,
+            "measured from the first frame, not from the last one that said the same thing"
+        );
+
+        let mut shell = Shell::new(&mut messages);
+        advance(
+            Progress::To(1.0),
+            duration,
+            curve,
+            None::<&()>,
+            &mut state,
+            start + Duration::from_millis(100),
+            &mut shell,
+        );
+
+        assert_eq!(state.position.value(), 1.0);
+    }
+
+    /// A transition with no time to take, or with nowhere to go, is over on its first frame and says
+    /// so — and "nowhere to go" is a real case: a gesture that never moved the screen hands over a
+    /// target the screen is already at.
+    #[test]
+    fn a_transition_with_nowhere_to_go_settles_on_its_first_frame() {
+        let settled: &str = "settled";
+
+        // No time to take.
         let mut state = State::default();
         let mut messages = Vec::new();
-        let settled: &str = "settled";
         let mut shell = Shell::new(&mut messages);
 
         advance(
+            Progress::To(1.0),
             Duration::ZERO,
             Curve::EaseOutCubic,
             Some(&settled),
@@ -623,27 +848,47 @@ mod tests {
         );
 
         assert_eq!(messages, vec!["settled"]);
-        assert_eq!(state.progress.value(), 1.0);
+        assert_eq!(state.position.value(), 1.0);
+
+        // And no distance to cover: sent back to where it already is.
+        let mut state = State::default();
+        let mut messages = Vec::new();
+        let mut shell = Shell::new(&mut messages);
+
+        advance(
+            Progress::To(0.0),
+            Duration::from_millis(240),
+            Curve::EaseOutCubic,
+            Some(&settled),
+            &mut state,
+            Instant::now(),
+            &mut shell,
+        );
+
+        assert_eq!(messages, vec!["settled"]);
+        assert_eq!(state.position.value(), 0.0);
     }
 
-    /// A transition nobody is watching for still moves: with no `on_settled` there is no message,
-    /// but the frames are asked for exactly the same.
+    /// A transition nobody is watching for still moves: with no `on_settled` there is no message, but
+    /// the frames are asked for exactly the same.
     #[test]
     fn a_transition_with_nothing_to_report_still_animates() {
         let mut state = State::default();
         let start = Instant::now();
         let mut messages = Vec::new();
 
+        let mut shell = Shell::new(&mut messages);
         advance(
+            Progress::To(1.0),
             Duration::from_millis(100),
             Curve::Linear,
             None::<&()>,
             &mut state,
             start,
-            &mut Shell::new(&mut messages),
+            &mut shell,
         );
 
-        assert!(state.progress.is_animating());
+        assert!(state.position.is_animating());
         assert!(messages.is_empty());
     }
 }
