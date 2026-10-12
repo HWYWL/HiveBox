@@ -2824,66 +2824,12 @@ static esp_err_t handle_write(httpd_req_t *req)
  * Moving a file, including between the two volumes
  * ------------------------------------------------------------------------- */
 
-/* `rename` covers the same filesystem and nothing else. Between LittleFS on the flash and FATFS on
- * the card it fails — they are different drivers, and there is no inode to move.
- *
- * The move a person means there is a copy and a delete: the copy goes under the destination's name
- * and the original goes only once the copy is closed and whole. A card that fills up leaves the
- * original where it was, and the half-written copy is removed. */
-static esp_err_t move_file(const char *from, const char *to)
-{
-    if (rename(from, to) == 0) {
-        return ESP_OK;
-    }
+/* The move itself is `hal_storage_rename`, in `board_storage.c`.
 
-    FILE *source = fopen(from, "rb");
-    if (source == NULL) {
-        return ESP_FAIL;
-    }
-
-    FILE *destination = fopen(to, "wb");
-    if (destination == NULL) {
-        fclose(source);
-        return ESP_FAIL;
-    }
-
-    char     *buffer = malloc(WEB_CHUNK);
-    size_t    read;
-    esp_err_t ret = ESP_OK;
-
-    if (buffer == NULL) {
-        ret = ESP_ERR_NO_MEM;
-    } else {
-        while ((read = fread(buffer, 1, WEB_CHUNK, source)) > 0) {
-            if (fwrite(buffer, 1, read, destination) != read) {
-                ret = ESP_FAIL;
-                break;
-            }
-        }
-
-        free(buffer);
-    }
-
-    fclose(source);
-
-    if (fclose(destination) != 0) {
-        ret = ESP_FAIL;
-    }
-
-    if (ret != ESP_OK) {
-        remove(to);
-        return ret;
-    }
-
-    if (remove(from) != 0) {
-        /* Both copies are whole, which is a state a person can see and fix. Deleting the original
-         * without a copy that took is the one that cannot. */
-        ESP_LOGW(TAG, "copied %s to %s but could not remove the original", from, to);
-        return ESP_FAIL;
-    }
-
-    return ESP_OK;
-}
+ * It was this function, and it moved there when the panel grew a file manager of its own: that one
+ * reaches the board through the HAL, and a second copy of the copy-a-kilobyte-at-a-time loop would be
+ * a second place for the half-written-file case to be got wrong. The page keeps the route and the
+ * answer; the storage layer keeps the operation. */
 
 static esp_err_t handle_move(httpd_req_t *req)
 {
@@ -2957,7 +2903,7 @@ static esp_err_t handle_move(httpd_req_t *req)
             return send_error(req, "400 Bad Request", "cross_volume",
                               "a directory cannot be moved between volumes");
         }
-    } else if (move_file(from, clean_target) != ESP_OK) {
+    } else if (hal_storage_rename(from, clean_target) != ESP_OK) {
         return send_error(req, "500 Internal Server Error", "move_failed", strerror(errno));
     }
 

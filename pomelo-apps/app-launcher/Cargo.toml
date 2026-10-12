@@ -32,8 +32,12 @@ pomelo-hal = { git = "https://github.com/pomelos-on-sale/pomelo-hal.git", rev = 
 # project's or the firmware's choice and never a child's: their `desktop` default would otherwise
 # decide it from inside a dependency.
 calculator = { path = "../calculator", default-features = false }
+clock = { path = "../clock", default-features = false }
+files = { path = "../files", default-features = false }
 music-player = { path = "../music-player", default-features = false }
+power-log = { path = "../power-log", default-features = false }
 nas-monitor = { path = "../nas-monitor", default-features = false }
+overview = { path = "../overview", default-features = false }
 settings = { path = "../settings", default-features = false }
 task-viewer = { path = "../task-viewer", default-features = false }
 terminal = { path = "../terminal", default-features = false }

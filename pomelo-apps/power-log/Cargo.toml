@@ -1,0 +1,33 @@
+[package]
+name = "power-log"
+version = "0.1.0"
+edition = "2021"
+description = "The battery over time: its discharge curve, what is left of it, and the hour's own record on disk"
+license = "GPL-3.0-only"
+
+# A member of the workspace at the root of this directory (`Cargo.toml`).
+
+[dependencies]
+# The facade, and nothing but its widgets: the curve is a row of columns and a column is a `container`
+# with a height, so this page needs no pixels of its own and no `canvas` to draw them on.
+iced = { version = "0.14", default-features = false, features = ["thread-pool", "x11", "wayland"] }
+
+# The board, and three of its seven backends: power for the gauge and the PMIC's temperature, system for
+# the clock the log is stamped with, and storage for the one file this page writes.
+pomelo-hal = { git = "https://github.com/pomelos-on-sale/pomelo-hal.git", rev = "20eaa910f0a05cd68684d6aa868fd78457c51be9" }
+
+# The shared preferences, and the font tier every measurement in `style` is derived from.
+pomelo-widgets = { git = "https://github.com/pomelos-on-sale/pomelo-widgets.git", rev = "f499da5cc17ef16ced6e6b1e62286bb020837a0b" }
+
+# One glyph a card.
+pomelo-material-symbols = { git = "https://github.com/pomelos-on-sale/pomelo-material-symbols.git", rev = "7dc390fb1924dc69b375e5ae77806857f798cc58" }
+
+[features]
+# On by default, because a project of its own is a desktop program: iced needs *a* renderer, and this is
+# the one that needs no GPU. `app-launcher` is the one crate that depends on this one, and it does so
+# with `default-features = false`.
+desktop = ["iced/tiny-skia"]
+default = ["desktop"]
+
+[dev-dependencies]
+iced_test = "0.14"

@@ -24,6 +24,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -364,6 +365,87 @@ esp_err_t hal_storage_remove_file(const char *path)
 
     ESP_LOGE(TAG, "cannot remove %s: errno %d", path, errno);
     return ESP_FAIL;
+}
+
+/* How much of a file is held in RAM while it is copied between two volumes.
+
+ * A rename that `rename` refuses is the one that crosses mounts, and a card and the built-in
+ * partition are two filesystems with no inode between them: the move is a copy and a delete, and the
+ * copy goes a kilobyte at a time rather than whole, because the file may be a video and this board
+ * has PSRAM but not that much of it to spare for a button press. */
+#define HAL_STORAGE_COPY_CHUNK 1024
+
+esp_err_t hal_storage_rename(const char *from, const char *to)
+{
+    if (from == NULL || to == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* The same filesystem: the filesystem does it, without the bytes passing through here at all. */
+    if (rename(from, to) == 0) {
+        return ESP_OK;
+    }
+
+    /* Different filesystems. The destination's directories are made first, so that the copy below
+     * fails on the copy rather than on a missing directory that nothing would have created. */
+    esp_err_t made = make_dirs(to);
+    if (made != ESP_OK) {
+        return made;
+    }
+
+    FILE *source = fopen(from, "rb");
+    if (source == NULL) {
+        ESP_LOGE(TAG, "cannot open %s: errno %d", from, errno);
+        return (errno == ENOENT) ? ESP_ERR_NOT_FOUND : ESP_FAIL;
+    }
+
+    FILE *destination = fopen(to, "wb");
+    if (destination == NULL) {
+        ESP_LOGE(TAG, "cannot open %s for writing: errno %d", to, errno);
+        fclose(source);
+        return ESP_FAIL;
+    }
+
+    char     *buffer = malloc(HAL_STORAGE_COPY_CHUNK);
+    size_t    read;
+    esp_err_t ret = ESP_OK;
+
+    if (buffer == NULL) {
+        ret = ESP_ERR_NO_MEM;
+    } else {
+        while ((read = fread(buffer, 1, HAL_STORAGE_COPY_CHUNK, source)) > 0) {
+            if (fwrite(buffer, 1, read, destination) != read) {
+                ESP_LOGE(TAG, "%s: the card or the partition filled up mid-copy", to);
+                ret = ESP_FAIL;
+                break;
+            }
+        }
+
+        free(buffer);
+    }
+
+    fclose(source);
+
+    if (fclose(destination) != 0) {
+        ret = ESP_FAIL;
+    }
+
+    if (ret != ESP_OK) {
+        /* A half-written copy is removed rather than left where the destination's name is: the
+         * original is still whole, and a file that is half of another one is the state a person
+         * cannot see and would later trust. */
+        remove(to);
+        return ret;
+    }
+
+    if (remove(from) != 0) {
+        /* Both copies are whole, which is a state a person can see and fix. Deleting the original
+         * without a copy that took is the one that cannot. */
+        ESP_LOGW(TAG, "copied %s to %s but could not remove the original", from, to);
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
 }
 
 /* ---------------------------------------------------------------------------

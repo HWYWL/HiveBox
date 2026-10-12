@@ -15,6 +15,11 @@ __pycache__/
 target/
 build/
 
+# What an app writes beside itself when it is run on a desktop instead of the board: the same
+# `AppData/…` tree the board keeps under `/internal`, keyed off the current directory. Runtime state,
+# not source — the board's own lives on the flash and never enters the repository either.
+.pomelo/
+
 
 # VSCode
 .vscode/

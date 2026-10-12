@@ -21,14 +21,19 @@ pub use pomelo_widgets::{AppIcon, AppMeta as Entry};
 
 include!(concat!(env!("OUT_DIR"), "/baked_icons.rs"));
 
-/// Seven apps, in the order the grid shows them: the first [`crate::PER_PAGE`] fill the first page,
-/// and the rest fall on the second.
+/// Eleven apps, in the order the grid shows them: each [`crate::PER_PAGE`] fill a page, and the rest
+/// fall on the one after.
 ///
 /// The order is the interface's and not the alphabet's. The four on the first page are the four
 /// things this box is *for* — what it plays, what it serves, what it can be told to do, and how it
-/// is set up — and the second page holds the three that are about the box itself and what is beside
+/// is set up — and the pages after that hold the ones that are about the box itself and what is beside
 /// it rather than the jobs it is for: the calculator, which has nothing to do with it at all, the task
-/// viewer, which is about nothing else, and the NAS monitor, which is about the machine next to it.
+/// viewer, which is about nothing else, the NAS monitor, which is about the machine next to it, the
+/// clock, which is about nothing but the time this box thinks it is, the overview, which is about
+/// the box itself and is the one tile that is about more than one thing, the file manager, which is
+/// about the two filesystems this box can mount and is the way to move anything in either, and the
+/// power log, which is about the battery and is the only tile on the grid that is about *time* — the
+/// overview shows what the battery is, and this one shows what it has been doing.
 pub const CATALOGUE: &[Entry] = &[
     // Page 1
     Entry {
@@ -78,5 +83,50 @@ pub const CATALOGUE: &[Entry] = &[
         // business rather than this tile's.
         icon: AppIcon::glyph(Icon::DNS),
         accent: (112, 92, 240),
+    },
+    Entry {
+        name: "Clock",
+        name_zh: "时钟",
+        // The face rather than a bell: this tile is the dial, the pomodoro and the alarms in one app,
+        // and the dial is the page it opens on. A clock glyph is what the *whole* of it is, and the
+        // time is what it is about.
+        icon: AppIcon::glyph(Icon::SCHEDULE),
+        // The plum end of the spread: the two hues either side of it are the music app's rose and the
+        // server's violet, and this is the one place left between them that is not a grey.
+        accent: (214, 51, 132),
+    },
+    // Page 3
+    Entry {
+        name: "Overview",
+        name_zh: "概览",
+        // The box's own dashboard rather than any one of its readings: this is the page that draws the
+        // battery, the radio, the disks, the memory and the server at once, so its glyph is the
+        // dashboard and not the battery or the disk that a single-reading tile would use.
+        icon: AppIcon::glyph(Icon::SPACE_DASHBOARD),
+        // The hue left in the middle: the widest gap in the spread is between the calculator's orange
+        // and the terminal's green, and a lime is the one colour that is close to neither.
+        accent: (104, 159, 56),
+    },
+    Entry {
+        name: "Files",
+        name_zh: "文件管理",
+        // An open folder rather than a shut one: browsing is what the app is for, and the page it opens
+        // on is a listing, so the picture is the thing that has been gone into rather than the thing
+        // sitting there. The rows inside it draw the shut glyph, so the two are told apart by shape.
+        icon: AppIcon::glyph(Icon::FOLDER_OPEN),
+        // A warm brown, the stretch between the music app's red and the calculator's orange: paper and
+        // cardboard, which is what a file manager is about, and the one warm hue the spread had left.
+        accent: (166, 111, 74),
+    },
+    Entry {
+        name: "Power Log",
+        name_zh: "电量日志",
+        // A trend line rather than a battery: the overview's tile is already the battery, and what this
+        // one adds is the shape of it over time. Two battery tiles side by side would be two tiles a
+        // person has to read to tell apart, and this one is meant to be found by its colour alone.
+        icon: AppIcon::glyph(Icon::INSIGHTS),
+        // A violet, in the widest hue gap left: between the server's blue-violet and the clock's plum
+        // there is a stretch of purple that nothing else on the grid is using.
+        accent: (170, 96, 214),
     },
 ];

@@ -400,6 +400,22 @@ esp_err_t hal_storage_append_file(const char *path, const char *data, size_t len
  */
 esp_err_t hal_storage_remove_file(const char *path);
 
+/**
+ * @brief Move `from` to `to`, replacing `to` when there is something there.
+ *
+ * Within one filesystem this is `rename`, and the bytes are not read. Between the built-in partition
+ * and the card it is a copy and a delete — two drivers with no inode between them — and the copy is
+ * removed if it did not finish, so the destination's name never holds half a file.
+ *
+ * @return
+ *      - ESP_OK on success, with the file at `to` and nothing at `from`
+ *      - ESP_ERR_INVALID_ARG if either path is NULL
+ *      - ESP_ERR_NOT_FOUND when there is nothing at `from`
+ *      - ESP_ERR_NO_MEM when the copy between volumes could not be buffered
+ *      - ESP_FAIL on a failed copy, a failed close, or an original that could not be removed
+ */
+esp_err_t hal_storage_rename(const char *from, const char *to);
+
 /* The flash chip itself: how much of it there is, and what every region of it is for.
  *
  * hal_storage_get_internal() answers "how full is the filesystem the box can write" — on this board

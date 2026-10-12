@@ -51,4 +51,51 @@ pub trait StorageBackend: Send + Sync {
     /// Unlike the two above this does not change while the box runs — a partition table is written
     /// once, by whoever flashed the board — so a page may read it once and keep it.
     fn flash(&self) -> Result<FlashLayout, HalError>;
+
+    // -------------------------------------------------------------------------------------------
+    // The write side of a filesystem, which on this board `std::fs` does not have.
+    // -------------------------------------------------------------------------------------------
+
+    /// Write `data` to `path`, replacing whatever was there, making the directories above it.
+    ///
+    /// # Why the backend answers this at all
+    ///
+    /// Everything *inside* a mounted filesystem is `std::fs`'s business, as the note above says — with
+    /// one exception, and this is it. On this board `std::fs` reads a file, stats it, lists a
+    /// directory and **makes** one, and cannot create a *file*: `File::create`, every `OpenOptions`
+    /// spelling, all come back `ENOENT`. The measurement is written out above `read_credentials` in
+    /// the ESP32 backend, which is where the Wi-Fi credentials used to be lost to it.
+    ///
+    /// So a write goes through the backend, whose C side writes with the same `fopen` `main.c` has
+    /// always written the partition with. An app that saves something of its own — a log, a chime it
+    /// synthesised, a picture off the panel — calls this and not `std::fs`. Reading it back is
+    /// `std::fs`'s again, because reading was never the broken half.
+    ///
+    /// `data` is bytes and not text: a WAV or a PNG has no business being a `String`. The
+    /// directories above `path` are made on the way, so the first write to `AppData/CLOCK/` needs no
+    /// second call.
+    fn write_file(&self, path: &str, data: &[u8]) -> Result<(), HalError>;
+
+    /// Append `data` to `path`, creating the file — and the directories above it — when it is absent.
+    ///
+    /// The same write as [`StorageBackend::write_file`], except that what the file already holds stays
+    /// where it is. This exists for a log and for nothing else: a line an hour added to the end of a
+    /// file would otherwise be a read of every line before it, a parse, and a write of all of them
+    /// back, which is a cost that grows with the file's age.
+    fn append_file(&self, path: &str, data: &[u8]) -> Result<(), HalError>;
+
+    /// Remove `path`.
+    ///
+    /// Removing something that is not there is `Ok`. The caller asked for the file to be gone and it
+    /// is gone; "make sure this is not here" and "delete this" want the same thing from this call,
+    /// and neither of them is served by an error that means *already true*.
+    fn remove_file(&self, path: &str) -> Result<(), HalError>;
+
+    /// Move `from` to `to`, replacing `to` when there is something there.
+    ///
+    /// Not a copy and a delete spelled out by the caller: a filesystem can do this without moving the
+    /// bytes, and a file manager that renamed a 2 GB video through its own buffers would be a page
+    /// that froze on a button press. The C side tries `rename` first and falls back to copying only
+    /// for the pairs of mounts where the first cannot work.
+    fn rename(&self, from: &str, to: &str) -> Result<(), HalError>;
 }

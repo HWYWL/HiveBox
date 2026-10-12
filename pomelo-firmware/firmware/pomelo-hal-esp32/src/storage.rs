@@ -8,7 +8,7 @@
 //! with no card is the ordinary case on a board that may never have had one, and the trait says so
 //! by leaving the volume out of the list rather than by failing to answer at all.
 
-use std::ffi::c_char;
+use std::ffi::{c_char, CString};
 
 use pomelo_hal::{FlashLayout, FlashRegion, FlashRegionKind, HalError, StorageBackend, VolumeInfo, VolumeKind};
 
@@ -66,6 +66,17 @@ mod ffi {
         pub fn hal_storage_get_internal(out: *mut HalStorageVolume) -> i32;
         pub fn hal_storage_get_card(out: *mut HalStorageVolume) -> i32;
         pub fn hal_storage_get_flash(out: *mut HalFlashLayout) -> i32;
+
+        /// The file calls, which are `fopen`/`fwrite` on the C side because `std::fs` cannot create a
+        /// file on this board — the note above them in `board_storage.c` is the measurement.
+        ///
+        /// `data` is `*const c_char` on the other side of the wall rather than `*const u8`, which is
+        /// the C header's spelling of "some bytes" and not a claim about their contents: the WAV a
+        /// clock wrote and the TOML a page wrote go through the same pair.
+        pub fn hal_storage_write_file(path: *const c_char, data: *const c_char, len: usize) -> i32;
+        pub fn hal_storage_append_file(path: *const c_char, data: *const c_char, len: usize) -> i32;
+        pub fn hal_storage_remove_file(path: *const c_char) -> i32;
+        pub fn hal_storage_rename(from: *const c_char, to: *const c_char) -> i32;
     }
 }
 
@@ -81,6 +92,14 @@ fn c_buf_to_string(buf: &[c_char]) -> String {
     let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, len) };
     String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// A path as a C string, for the file calls below.
+///
+/// A NUL inside a path is impossible on this board and would be a bad argument if it were, so the
+/// failure is reported as the argument error it is rather than as a filesystem one.
+fn c_path(path: &str) -> Result<CString, HalError> {
+    CString::new(path).map_err(|_| HalError::InvalidArg)
 }
 
 /// Read one volume, or nothing when nothing is mounted there.
@@ -226,5 +245,47 @@ impl StorageBackend for EspStorage {
             total_bytes: raw.total_bytes,
             regions,
         })
+    }
+
+    /// `fopen(path, "wb")` on the C side, for the reason the file's own note gives: `std::fs` cannot
+    /// create a file on this board, and a write that went through it would be logged and then lost.
+    ///
+    /// The directories above `path` are made by the C side, so an app's first write into a directory
+    /// of its own needs one call rather than two.
+    fn write_file(&self, path: &str, data: &[u8]) -> Result<(), HalError> {
+        let path = c_path(path)?;
+
+        // `as_ptr` on an empty slice is a dangling pointer and never a null one, which is what the C
+        // side checks for: a zero-length write is a file created empty, and a legitimate one.
+        let code = unsafe {
+            ffi::hal_storage_write_file(path.as_ptr(), data.as_ptr() as *const c_char, data.len())
+        };
+
+        HalError::from_code(code)
+    }
+
+    fn append_file(&self, path: &str, data: &[u8]) -> Result<(), HalError> {
+        let path = c_path(path)?;
+
+        let code = unsafe {
+            ffi::hal_storage_append_file(path.as_ptr(), data.as_ptr() as *const c_char, data.len())
+        };
+
+        HalError::from_code(code)
+    }
+
+    /// Removing a file that is not there is `Ok`, as the trait says, and the C side already answers
+    /// that way: what a caller means by this call is that the path should not exist afterwards.
+    fn remove_file(&self, path: &str) -> Result<(), HalError> {
+        let path = c_path(path)?;
+
+        HalError::from_code(unsafe { ffi::hal_storage_remove_file(path.as_ptr()) })
+    }
+
+    fn rename(&self, from: &str, to: &str) -> Result<(), HalError> {
+        let from = c_path(from)?;
+        let to = c_path(to)?;
+
+        HalError::from_code(unsafe { ffi::hal_storage_rename(from.as_ptr(), to.as_ptr()) })
     }
 }

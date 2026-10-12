@@ -50,13 +50,17 @@ name = "app-launcher"
 version = "0.1.0"
 dependencies = [
  "calculator",
+ "clock",
+ "files",
  "iced",
  "image",
  "music-player",
  "nas-monitor",
+ "overview",
  "pomelo-hal",
  "pomelo-material-symbols",
  "pomelo-widgets",
+ "power-log",
  "settings",
  "task-viewer",
  "terminal",
@@ -260,6 +264,16 @@ dependencies = [
  "crypto-common 0.2.2",
  "inout 0.2.2",
  "zeroize",
+]
+
+[[package]]
+name = "clock"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "pomelo-hal",
+ "pomelo-material-symbols",
+ "pomelo-widgets",
 ]
 
 [[package]]
@@ -671,6 +685,16 @@ name = "fiat-crypto"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
+
+[[package]]
+name = "files"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "pomelo-hal",
+ "pomelo-material-symbols",
+ "pomelo-widgets",
+]
 
 [[package]]
 name = "find-msvc-tools"
@@ -1614,6 +1638,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "overview"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "pomelo-hal",
+ "pomelo-material-symbols",
+ "pomelo-widgets",
+]
+
+[[package]]
 name = "p256"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1765,6 +1799,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10ab3eb7f3becc3a1cbc4f2c6f20267996cfc1a6467a873763411b136a122715"
 dependencies = [
  "portable-atomic",
+]
+
+[[package]]
+name = "power-log"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "pomelo-hal",
+ "pomelo-material-symbols",
+ "pomelo-widgets",
 ]
 
 [[package]]

@@ -38,8 +38,8 @@
 //!
 //! # The grid is paged, and the page slides under the finger
 //!
-//! A page is [`PER_PAGE`] apps, one to a quadrant, so the five the catalogue has are two pages: four
-//! and one.
+//! A page is [`PER_PAGE`] apps, one to a quadrant, so the eleven the catalogue has are three pages:
+//! four, four and three.
 //! A finger turning one is a **drag**: down on the grid, across, up. iced has no widget for that — a
 //! `button` captures the press it is given, and `Scrollable` scrolls for a wheel, a touch or its own
 //! scrollbar and for nothing else — so the gesture is read by `pomelo-widgets`' pager.
@@ -127,9 +127,13 @@ use iced::{
 };
 
 use calculator::Calculator;
+use clock::Clock;
+use files::Files;
 use music_player::Player;
 use nas_monitor::NasMonitor;
+use overview::Overview;
 use pomelo_hal::Board;
+use power_log::PowerLog;
 use settings::Settings;
 use task_viewer::TaskViewer;
 use terminal::Terminal;
@@ -179,7 +183,7 @@ enum Screen {
 ///
 /// Indices, because that is what the grid hands over when a tile is tapped. The tests assert that
 /// each of these still names the app it says it does, and every entry has one: the catalogue and
-/// the list of apps are the same seven things, in the same order.
+/// the list of apps are the same eleven things, in the same order.
 pub const MUSIC: usize = 0;
 pub const WEB_MANAGER: usize = 1;
 pub const TERMINAL: usize = 2;
@@ -187,6 +191,10 @@ pub const SETTINGS: usize = 3;
 pub const CALCULATOR: usize = 4;
 pub const TASK_VIEWER: usize = 5;
 pub const NAS_MONITOR: usize = 6;
+pub const CLOCK: usize = 7;
+pub const OVERVIEW: usize = 8;
+pub const FILES: usize = 9;
+pub const POWER_LOG: usize = 10;
 
 /// What the launcher reacts to.
 ///
@@ -251,10 +259,11 @@ pub enum Message {
     /// A second has passed on the board ([`pomelo_hal::SystemEvent::Tick`]).
     ///
     /// The launcher has no clock of its own to advance: the status bar's minute arrives with the
-    /// battery push. This exists for the two hosted apps that show something *moving* — the settings
-    /// list's readout and the task viewer's list — which are told to look at the board again rather
-    /// than being handed values to draw. Neither is read while it is not being looked at, and an app
-    /// that was never opened makes this one match arm.
+    /// battery push. This exists for the hosted apps that show something *moving* — the settings
+    /// list's readout, the task viewer's list, the clock's hands and the overview's dashboard — which
+    /// are told to look at the board again rather than being handed values to draw. None of them is
+    /// read while it is not being looked at, and an app that was never opened makes this one match
+    /// arm.
     Tick,
     /// The screen changed size: a window on a desktop, the panel on the board.
     Resized(Size),
@@ -266,6 +275,13 @@ pub enum Message {
     WebManager(web_manager::Message),
     TaskViewer(task_viewer::Message),
     NasMonitor(nas_monitor::Message),
+    Clock(clock::Message),
+    /// The overview's own: a tick to look again, or a finger on its one button.
+    Overview(overview::Message),
+    /// The file manager's own: a volume, a row, one of its four actions, or a name typed into a prompt.
+    Files(files::Message),
+    /// The power log's own: the beat that looks at the gauge, or a finger asking for a sample now.
+    PowerLog(power_log::Message),
 }
 
 /// The layer over the desktop that is moving, and which way it is going.
@@ -338,6 +354,18 @@ pub struct Launcher {
     web_manager: Option<WebManager>,
     task_viewer: Option<TaskViewer>,
     nas_monitor: Option<NasMonitor>,
+    /// The clock. Named `clock_app` because `clock` is the *status bar's* reading, and the two are
+    /// different things: the bar's is a string the platform pushes, and this is the app's own state.
+    clock_app: Option<Clock>,
+    /// The overview. Plain `overview` and not `overview_app`, because there is no status bar reading
+    /// called that to be told apart from — the bar has a clock and a battery, and no dashboard.
+    overview: Option<Overview>,
+    /// The file manager. Plain `files` and not `files_app`, for the overview's reason: there is no
+    /// status bar reading of that name for a suffix to be told apart from.
+    files: Option<Files>,
+    /// The power log. Plain `power_log` and not `power_log_app`, for the same reason as the two above:
+    /// nothing else in the launcher is called that.
+    power_log: Option<PowerLog>,
     /// Apps currently running in memory (foreground or background).
     running_apps: Vec<usize>,
     board: Arc<Board>,
@@ -397,6 +425,10 @@ impl Launcher {
             transition: None,
             task_viewer: None,
             nas_monitor: None,
+            clock_app: None,
+            overview: None,
+            files: None,
+            power_log: None,
             clock,
             battery,
             charging,
@@ -448,6 +480,18 @@ impl Launcher {
             app.set_preferences(prefs);
         }
         if let Some(app) = &mut self.nas_monitor {
+            app.set_preferences(prefs);
+        }
+        if let Some(app) = &mut self.clock_app {
+            app.set_preferences(prefs);
+        }
+        if let Some(app) = &mut self.overview {
+            app.set_preferences(prefs);
+        }
+        if let Some(app) = &mut self.files {
+            app.set_preferences(prefs);
+        }
+        if let Some(app) = &mut self.power_log {
             app.set_preferences(prefs);
         }
     }
@@ -546,6 +590,66 @@ impl Launcher {
         self.nas_monitor.as_mut().unwrap()
     }
 
+    /// The clock, which is handed the board like the task viewer and the NAS monitor and reads a
+    /// *third* thing through it: the wall clock and the uptime, both of which are the board's and
+    /// neither of which is the platform's to push into the status bar on this app's behalf — the bar's
+    /// reading is a string somebody formatted, and this app needs the number.
+    ///
+    /// The one piece of state that is not the board's is the alarm list, and `Clock::new` reads that
+    /// from the board's filesystem itself.
+    pub fn get_or_create_clock(&mut self) -> &mut Clock {
+        if self.clock_app.is_none() {
+            let mut app = Clock::new(Arc::clone(&self.board));
+            app.set_preferences(self.preferences);
+            self.clock_app = Some(app);
+        }
+        self.clock_app.as_mut().unwrap()
+    }
+
+    /// The overview, which is handed the board like the three apps before it and is the only one that
+    /// reads *all* of it: the gauge, the radio, the two filesystems, the two pools and the machine
+    /// next door are five different backends, and the page is the one place they are asked together.
+    ///
+    /// [`Overview::new`] reads once and then asks the two slow backends — the card in the slot and the
+    /// server — to look again, so opening this page is not a two-second wait for its first frame.
+    pub fn get_or_create_overview(&mut self) -> &mut Overview {
+        if self.overview.is_none() {
+            let mut app = Overview::new(Arc::clone(&self.board));
+            app.set_preferences(self.preferences);
+            self.overview = Some(app);
+        }
+        self.overview.as_mut().unwrap()
+    }
+
+    /// The file manager, which is handed the board like the apps before it and is the one that writes
+    /// to it: the volumes come from the same storage backend the terminal reads, and the four actions
+    /// go back through its `fopen` rather than through `std::fs`.
+    ///
+    /// [`Files::new`] looks for a card and lists the built-in volume before the first frame, so opening
+    /// the page shows a directory rather than an empty listing waiting for a probe.
+    pub fn get_or_create_files(&mut self) -> &mut Files {
+        if self.files.is_none() {
+            let mut app = Files::new(Arc::clone(&self.board));
+            app.set_preferences(self.preferences);
+            self.files = Some(app);
+        }
+        self.files.as_mut().unwrap()
+    }
+
+    /// The power log, which is handed the board and nothing else: it reads the gauge and the PMIC's
+    /// temperature out of the power backend, the clock out of the system one, and writes its hour's
+    /// record through the storage backend's `append_file` — and it is the only app in this launcher
+    /// whose state is *time* rather than a thing, so the beat it is handed is the whole of what makes it
+    /// move on a board with no window frames of its own.
+    pub fn get_or_create_power_log(&mut self) -> &mut PowerLog {
+        if self.power_log.is_none() {
+            let mut app = PowerLog::new(Arc::clone(&self.board));
+            app.set_preferences(self.preferences);
+            self.power_log = Some(app);
+        }
+        self.power_log.as_mut().unwrap()
+    }
+
     /// The hosted apps, for the host and the tests.
     pub fn calculator(&mut self) -> &Calculator {
         self.get_or_create_calculator()
@@ -573,6 +677,26 @@ impl Launcher {
 
     pub fn nas_monitor(&mut self) -> &NasMonitor {
         self.get_or_create_nas_monitor()
+    }
+
+    /// The clock app. Not `clock()`: that name is the status bar's reading.
+    pub fn clock_app(&mut self) -> &Clock {
+        self.get_or_create_clock()
+    }
+
+    /// The overview app.
+    pub fn overview(&mut self) -> &Overview {
+        self.get_or_create_overview()
+    }
+
+    /// The file manager app.
+    pub fn files(&mut self) -> &Files {
+        self.get_or_create_files()
+    }
+
+    /// The power log app.
+    pub fn power_log(&mut self) -> &PowerLog {
+        self.get_or_create_power_log()
     }
 
     /// Sets what the status bar shows.
@@ -622,6 +746,10 @@ impl Launcher {
             WEB_MANAGER => self.web_manager = None,
             TASK_VIEWER => self.task_viewer = None,
             NAS_MONITOR => self.nas_monitor = None,
+            CLOCK => self.clock_app = None,
+            OVERVIEW => self.overview = None,
+            FILES => self.files = None,
+            POWER_LOG => self.power_log = None,
             _ => {}
         }
 
@@ -791,6 +919,46 @@ impl Launcher {
     fn nas_monitor_screen(&self) -> Element<'_, Message> {
         if let Some(app) = &self.nas_monitor {
             app.view().map(Message::NasMonitor)
+        } else {
+            Space::new().into()
+        }
+    }
+
+    /// The clock. It brings its own three tabs and no back button, like the calculator: a tab is a
+    /// place inside one page, not a page the launcher has to know about.
+    fn clock_screen(&self) -> Element<'_, Message> {
+        if let Some(app) = &self.clock_app {
+            app.view().map(Message::Clock)
+        } else {
+            Space::new().into()
+        }
+    }
+
+    /// The overview. One page and no tabs, so the launcher's own back gesture is the way out, exactly
+    /// as it is for the NAS monitor.
+    fn overview_screen(&self) -> Element<'_, Message> {
+        if let Some(app) = &self.overview {
+            app.view().map(Message::Overview)
+        } else {
+            Space::new().into()
+        }
+    }
+
+    /// The file manager. One page and no tabs, so the launcher's own back gesture is the way out, as
+    /// it is for the NAS monitor and the overview.
+    fn files_screen(&self) -> Element<'_, Message> {
+        if let Some(app) = &self.files {
+            app.view().map(Message::Files)
+        } else {
+            Space::new().into()
+        }
+    }
+
+    /// The power log. One page and no tabs, so the launcher's own back gesture is the way out, as it is
+    /// for the three pages beside it.
+    fn power_log_screen(&self) -> Element<'_, Message> {
+        if let Some(app) = &self.power_log {
+            app.view().map(Message::PowerLog)
         } else {
             Space::new().into()
         }
@@ -1056,6 +1224,18 @@ impl Launcher {
                     NAS_MONITOR => {
                         self.get_or_create_nas_monitor();
                     }
+                    CLOCK => {
+                        self.get_or_create_clock();
+                    }
+                    OVERVIEW => {
+                        self.get_or_create_overview();
+                    }
+                    FILES => {
+                        self.get_or_create_files();
+                    }
+                    POWER_LOG => {
+                        self.get_or_create_power_log();
+                    }
                     _ => {}
                 }
 
@@ -1130,6 +1310,36 @@ impl Launcher {
                 {
                     monitor.update(nas_monitor::Message::Tick(Instant::now()));
                 }
+
+                // The clock is asked the third way, and its reason is neither cost nor a network:
+                // the page *is* the reading, and there is nothing to look at unless it is on screen.
+                // The app could not tell on its own — its own subscription is a window's frames, and
+                // on this board there are none — so the app is told, once a second, in the same beat
+                // the status bar is refreshed on. A pomodoro left running behind another app is not
+                // stalled by this: what the timer counts is the board's uptime and not these pulses.
+                if let (Screen::App(CLOCK), Some(app)) = (self.screen, &mut self.clock_app) {
+                    app.update(clock::Message::Tick);
+                }
+
+                // The overview is asked the fourth way, which is the clock's reason with one more
+                // turn on it: it is a dashboard, so the whole board is worth reading exactly while
+                // somebody is looking at the page and never otherwise. Its own subscription is a
+                // window's frames and this board has none, so the beat is handed to it from here —
+                // and the app throws away anything faster than its own sample, which is what keeps
+                // a window's sixty frames a second from being sixty reads of five backends.
+                if let (Screen::App(OVERVIEW), Some(app)) = (self.screen, &mut self.overview) {
+                    app.update(overview::Message::Tick(Instant::now()));
+                }
+
+                // The power log is asked the fifth way, which is the overview's reason with a longer
+                // horizon on it: it is a curve, so the gauge is worth reading while somebody is looking
+                // at it — and worth writing down once an hour for as long as they do. Its own
+                // subscription is a window's frames and this board has none, so the beat comes from
+                // here, and the app throws away everything faster than a minute for the curve and an
+                // hour for the log.
+                if let (Screen::App(POWER_LOG), Some(app)) = (self.screen, &mut self.power_log) {
+                    app.update(power_log::Message::Tick(Instant::now()));
+                }
             }
             Message::Resized(size) => {
                 self.size = size;
@@ -1145,6 +1355,10 @@ impl Launcher {
             Message::WebManager(message) => self.get_or_create_web_manager().update(message),
             Message::TaskViewer(message) => self.get_or_create_task_viewer().update(message),
             Message::NasMonitor(message) => self.get_or_create_nas_monitor().update(message),
+            Message::Clock(message) => self.get_or_create_clock().update(message),
+            Message::Overview(message) => self.get_or_create_overview().update(message),
+            Message::Files(message) => self.get_or_create_files().update(message),
+            Message::PowerLog(message) => self.get_or_create_power_log().update(message),
             Message::Settings(settings::Message::Back) => return self.go_back(),
             Message::Settings(message) => {
                 let (task, new_prefs) = {
@@ -1604,6 +1818,10 @@ impl Launcher {
             WEB_MANAGER => self.web_manager_screen(),
             TASK_VIEWER => self.task_viewer_screen(),
             NAS_MONITOR => self.nas_monitor_screen(),
+            CLOCK => self.clock_screen(),
+            OVERVIEW => self.overview_screen(),
+            FILES => self.files_screen(),
+            POWER_LOG => self.power_log_screen(),
             _ => self.launcher(),
         }
     }
@@ -2029,16 +2247,25 @@ mod tests {
             "服务器监控"
         );
         assert_eq!(CATALOGUE[NAS_MONITOR].name, "Server");
+        assert_eq!(CATALOGUE[CLOCK].localized_name(Language::Chinese), "时钟");
+        assert_eq!(CATALOGUE[CLOCK].name, "Clock");
+        assert_eq!(CATALOGUE[OVERVIEW].localized_name(Language::Chinese), "概览");
+        assert_eq!(CATALOGUE[OVERVIEW].name, "Overview");
+        assert_eq!(CATALOGUE[FILES].localized_name(Language::Chinese), "文件管理");
+        assert_eq!(CATALOGUE[FILES].name, "Files");
+        assert_eq!(CATALOGUE[POWER_LOG].localized_name(Language::Chinese), "电量日志");
+        assert_eq!(CATALOGUE[POWER_LOG].name, "Power Log");
     }
 
-    /// The grid's two pages, in the order they are drawn: the four the box is for, then the three that
-    /// are about the box itself and what is beside it.
+    /// The grid's three pages, in the order they are drawn: the four the box is for, then the four that
+    /// are about the box itself and what is beside it, and then the last page, where the file manager
+    /// sits beside the overview and the power log.
     ///
     /// Written out rather than derived, because the order *is* the interface: a page and a position
     /// are what a finger learns, and a reshuffle that left this test green would be the one kind of
     /// change nobody would notice until they were holding the box.
     #[test]
-    fn the_catalogue_is_two_pages_in_the_order_the_grid_shows_them() {
+    fn the_catalogue_is_three_pages_in_the_order_the_grid_shows_them() {
         let names: Vec<&str> = CATALOGUE.iter().map(|entry| entry.name).collect();
 
         assert_eq!(
@@ -2050,14 +2277,18 @@ mod tests {
                 "Settings",
                 "Calculator",
                 "Tasks",
-                "Server"
+                "Server",
+                "Clock",
+                "Overview",
+                "Files",
+                "Power Log"
             ]
         );
-        assert_eq!(CATALOGUE.len(), 7, "and the seven are all the tiles there are");
+        assert_eq!(CATALOGUE.len(), 11, "and the eleven are all the tiles there are");
         assert_eq!(
             Launcher::new(Arc::new(Board::simulated())).pages(),
-            2,
-            "four on the first page leaves three on the second"
+            3,
+            "four, four and three"
         );
     }
 
@@ -2892,6 +3123,10 @@ mod tests {
         assert!(launcher.music.is_none());
         assert!(launcher.terminal.is_none());
         assert!(launcher.web_manager.is_none());
+        assert!(launcher.clock_app.is_none());
+        assert!(launcher.overview.is_none());
+        assert!(launcher.files.is_none());
+        assert!(launcher.power_log.is_none());
 
         // Opening Calculator instantiates only Calculator
         launcher.update(Message::Open(CALCULATOR));
@@ -2900,6 +3135,10 @@ mod tests {
         assert!(launcher.music.is_none());
         assert!(launcher.terminal.is_none());
         assert!(launcher.web_manager.is_none());
+        assert!(launcher.clock_app.is_none());
+        assert!(launcher.overview.is_none());
+        assert!(launcher.files.is_none());
+        assert!(launcher.power_log.is_none());
 
         // Backgrounding Calculator (Back) preserves instance
         launcher.update(Message::Back);
@@ -2909,6 +3148,147 @@ mod tests {
         // Exiting / killing Calculator frees its heap memory (reverts to None)
         launcher.update(Message::Exit);
         assert!(launcher.calculator.is_none());
+    }
+
+    /// The clock is the app that reads the board twice a tick, so it is the one whose instance is
+    /// worth watching: opened once, kept while backgrounded, and freed on exit like the rest.
+    #[test]
+    fn the_clock_is_loaded_on_demand_and_freed_on_kill() {
+        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
+
+        assert!(launcher.clock_app.is_none());
+
+        launcher.update(Message::Open(CLOCK));
+        assert!(launcher.clock_app.is_some());
+        assert_eq!(launcher.screen, Screen::App(CLOCK));
+
+        // The pump reaches the app only while it is the app that is up.
+        launcher.update(Message::Back);
+        assert_eq!(launcher.screen, Screen::Grid);
+        assert!(launcher.clock_app.is_some(), "backgrounding keeps it");
+
+        launcher.update(Message::Exit);
+        assert!(launcher.clock_app.is_none(), "killing frees it");
+    }
+
+    /// The overview is the app that reads *all* of the board, and it is the one whose first frame is
+    /// worth watching: opened on demand, kept while backgrounded, freed on exit — and the same five
+    /// readings the page shows are the ones the launcher's pump keeps fresh while it is up.
+    #[test]
+    fn the_overview_is_loaded_on_demand_and_freed_on_kill() {
+        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
+
+        assert!(launcher.overview.is_none());
+
+        launcher.update(Message::Open(OVERVIEW));
+        assert!(launcher.overview.is_some());
+        assert_eq!(launcher.screen, Screen::App(OVERVIEW));
+        assert!(
+            launcher.overview().readings().battery.is_some(),
+            "opening it reads the board rather than waiting for the first tick"
+        );
+
+        // The pump reaches the app only while it is the app that is up.
+        launcher.update(Message::Back);
+        assert_eq!(launcher.screen, Screen::Grid);
+        assert!(launcher.overview.is_some(), "backgrounding keeps it");
+
+        launcher.update(Message::Exit);
+        assert!(launcher.overview.is_none(), "killing frees it");
+    }
+
+    /// The overview's own message goes to the overview, and only to it: the launcher is a router for
+    /// eleven apps and the wrong one of them reacting is the one bug a router can have.
+    #[test]
+    fn the_overviews_messages_reach_the_overview() {
+        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
+
+        launcher.update(Message::Overview(overview::Message::CheckAgain));
+
+        assert!(launcher.overview.is_some(), "which creates it if it was not up");
+        assert!(
+            launcher.overview().looking(),
+            "and the app is the one that handled it"
+        );
+    }
+
+    /// The file manager is loaded on demand like the rest, kept while it is only backgrounded, and
+    /// freed on exit — the same life the overview has, and the one that matters here because a
+    /// browsing session is a working directory the person expects to come back to.
+    #[test]
+    fn the_files_app_is_loaded_on_demand_and_freed_on_kill() {
+        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
+
+        assert!(launcher.files.is_none());
+
+        launcher.update(Message::Open(FILES));
+        assert!(launcher.files.is_some());
+        assert_eq!(launcher.screen, Screen::App(FILES));
+
+        launcher.update(Message::Back);
+        assert_eq!(launcher.screen, Screen::Grid);
+        assert!(launcher.files.is_some(), "backgrounding keeps it");
+
+        launcher.update(Message::Exit);
+        assert!(launcher.files.is_none(), "killing frees it");
+    }
+
+    /// The file manager's own message goes to the file manager and only to it, and reaches it even
+    /// when it was not up — the router is where a message would otherwise be dropped.
+    #[test]
+    fn the_files_messages_reach_the_files_app() {
+        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
+
+        launcher.update(Message::Files(files::Message::Refresh));
+
+        assert!(launcher.files.is_some(), "which creates it if it was not up");
+    }
+
+    /// The power log's life is the same four steps, and the step that matters most here is the last
+    /// one: a page whose whole state is a curve must not be *rebuilt* by a backgrounded minute, or it
+    /// would come back from the grid having forgotten the hour it just spent watching.
+    #[test]
+    fn the_power_log_is_loaded_on_demand_and_freed_on_kill() {
+        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
+
+        assert!(launcher.power_log.is_none());
+
+        launcher.update(Message::Open(POWER_LOG));
+        assert!(launcher.power_log.is_some());
+        assert_eq!(launcher.screen, Screen::App(POWER_LOG));
+
+        launcher.update(Message::Back);
+        assert_eq!(launcher.screen, Screen::Grid);
+        assert!(launcher.power_log.is_some(), "backgrounding keeps it");
+
+        launcher.update(Message::Exit);
+        assert!(launcher.power_log.is_none(), "killing frees it");
+    }
+
+    /// The power log's own message goes to the power log and only to it — and the beat the pump hands
+    /// it is the only thing that moves the curve on a board with no window frames to draw it from.
+    #[test]
+    fn the_power_log_is_asked_the_time_by_the_pump_and_not_by_the_grid() {
+        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
+
+        // A beat on the grid goes nowhere near it: the app is not even built.
+        launcher.update(Message::Tick);
+        assert!(
+            launcher.power_log.is_none(),
+            "a page nobody is looking at is not read"
+        );
+
+        // On the page, the pump's own beat is what moves it on.
+        launcher.update(Message::Open(POWER_LOG));
+        let before = launcher.power_log().samples().len();
+
+        launcher.update(Message::Tick);
+
+        assert_eq!(
+            launcher.power_log().samples().len(),
+            before + 1,
+            "the pump's beat is the page's clock"
+        );
     }
 }
 

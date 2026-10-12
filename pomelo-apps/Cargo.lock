@@ -91,13 +91,17 @@ name = "app-launcher"
 version = "0.1.0"
 dependencies = [
  "calculator",
+ "clock",
+ "files",
  "iced",
  "image",
  "music-player",
  "nas-monitor",
+ "overview",
  "pomelo-hal",
  "pomelo-material-symbols",
  "pomelo-widgets",
+ "power-log",
  "settings",
  "task-viewer",
  "terminal",
@@ -428,6 +432,17 @@ checksum = "bd63e33452ffdafd39924c4f05a5dd1e94db646c779c6bd59148a3d95fff5ad4"
 dependencies = [
  "thiserror 2.0.21",
  "x11rb",
+]
+
+[[package]]
+name = "clock"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "iced_test",
+ "pomelo-hal",
+ "pomelo-material-symbols",
+ "pomelo-widgets",
 ]
 
 [[package]]
@@ -809,6 +824,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
 dependencies = [
  "simd-adler32",
+]
+
+[[package]]
+name = "files"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "iced_test",
+ "pomelo-hal",
+ "pomelo-material-symbols",
+ "pomelo-widgets",
 ]
 
 [[package]]
@@ -2213,6 +2239,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "overview"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "iced_test",
+ "pomelo-hal",
+ "pomelo-material-symbols",
+ "pomelo-widgets",
+]
+
+[[package]]
 name = "owned_ttf_parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2370,6 +2407,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10ab3eb7f3becc3a1cbc4f2c6f20267996cfc1a6467a873763411b136a122715"
 dependencies = [
  "portable-atomic",
+]
+
+[[package]]
+name = "power-log"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "iced_test",
+ "pomelo-hal",
+ "pomelo-material-symbols",
+ "pomelo-widgets",
 ]
 
 [[package]]

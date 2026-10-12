@@ -1,5 +1,9 @@
 //! Simulated storage: the built-in partition, and a card in the slot.
 
+use std::fs;
+use std::io::{ErrorKind, Write};
+use std::path::Path;
+
 use crate::error::HalError;
 use crate::traits::StorageBackend;
 use crate::types::{FlashLayout, FlashRegion, FlashRegionKind, VolumeInfo, VolumeKind};
@@ -128,6 +132,27 @@ fn flash_regions() -> Vec<FlashRegion> {
     ]
 }
 
+/// A filesystem error as the HAL's own.
+///
+/// `HalError::Io` carries the message rather than a code, because the message is the whole of what a
+/// filesystem says: `NotFound`, `PermissionDenied` and `StorageFull` are three different screens, and
+/// a code that meant "something went wrong" would draw all three the same.
+fn io_error(error: std::io::Error) -> HalError {
+    HalError::Io(error.to_string())
+}
+
+/// Make the directories above `path`, so that a first write needs no second call.
+///
+/// A path with no parent — a bare file name — has nothing to make, and `parent()` saying so is not an
+/// error. The call is unconditional otherwise: `create_dir_all` on a directory that exists is `Ok`,
+/// which is what makes it safe to run on every write.
+fn make_parent(path: &str) -> Result<(), HalError> {
+    match Path::new(path).parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => fs::create_dir_all(parent).map_err(io_error),
+        _ => Ok(()),
+    }
+}
+
 impl StorageBackend for SimStorage {
     /// Nothing to bring up: the simulator's filesystems are values, not drivers.
     fn init(&mut self) -> Result<(), HalError> {
@@ -157,6 +182,43 @@ impl StorageBackend for SimStorage {
             total_bytes: FLASH_TOTAL,
             regions: flash_regions(),
         })
+    }
+
+    /// A plain `std::fs` write, which is exactly what the *device* cannot do.
+    ///
+    /// This is the one place the simulator is more capable than the board, and it is worth saying out
+    /// loud rather than leaving as a difference someone discovers on hardware: what the device lacks is
+    /// not the ability but the syscall — see the note above `read_credentials` in the ESP32 backend.
+    /// A desktop app under this backend therefore exercises the same call and the same path, against a
+    /// filesystem that answers it for real.
+    fn write_file(&self, path: &str, data: &[u8]) -> Result<(), HalError> {
+        make_parent(path)?;
+        fs::write(path, data).map_err(io_error)
+    }
+
+    fn append_file(&self, path: &str, data: &[u8]) -> Result<(), HalError> {
+        make_parent(path)?;
+
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(io_error)?;
+
+        file.write_all(data).map_err(io_error)
+    }
+
+    fn remove_file(&self, path: &str) -> Result<(), HalError> {
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(io_error(error)),
+        }
+    }
+
+    fn rename(&self, from: &str, to: &str) -> Result<(), HalError> {
+        make_parent(to)?;
+        fs::rename(from, to).map_err(io_error)
     }
 }
 
@@ -197,5 +259,109 @@ mod tests {
 
         assert_eq!(region.label, "internal");
         assert_eq!(region.size as u64, internal.total_bytes);
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // The write side.
+    // -------------------------------------------------------------------------------------------
+
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// A directory of this test's own, under the system's temp directory.
+    ///
+    /// Named after the process and a counter so that two tests running at once cannot pick the same
+    /// one, and removed and remade so that a run after a crash starts from nothing.
+    fn scratch(name: &str) -> String {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+
+        let dir = std::env::temp_dir().join(format!(
+            "pomelo-sim-storage-{}-{}-{}",
+            name,
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("a scratch directory");
+
+        dir.to_str().expect("a utf-8 scratch path").to_string()
+    }
+
+    /// The four calls are one story: what was written is what is read, on both halves of the pair
+    /// that matters — this backend's writer, and the `std::fs` reader every app uses on the device.
+    #[test]
+    fn what_the_backend_writes_is_what_std_fs_reads() {
+        let storage = SimStorage::new();
+        let root = scratch("roundtrip");
+        let path = format!("{root}/AppData/CLOCK/chime.wav");
+
+        storage
+            .write_file(&path, b"RIFF....WAVE")
+            .expect("a write into a directory that does not exist yet");
+
+        assert_eq!(
+            fs::read(&path).expect("the file the write made"),
+            b"RIFF....WAVE",
+            "and the directories above it were made on the way"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The whole reason `append_file` exists: a log's newest line must not cost a rewrite of every
+    /// line before it.
+    #[test]
+    fn an_append_adds_to_the_end_rather_than_replacing() {
+        let storage = SimStorage::new();
+        let root = scratch("append");
+        let path = format!("{root}/AppData/BATTERY/log.csv");
+
+        storage.append_file(&path, b"a\n").expect("the first line");
+        storage.append_file(&path, b"b\n").expect("the second");
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "a\nb\n");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Removing a file that is not there is the caller's request already granted, and an app that
+    /// means "make sure this is gone" is not served by being told it never existed.
+    #[test]
+    fn removing_something_that_is_not_there_is_not_a_failure() {
+        let storage = SimStorage::new();
+        let root = scratch("remove");
+
+        assert!(
+            storage
+                .remove_file(&format!("{root}/AppData/NOTHING/none.conf"))
+                .is_ok(),
+            "a path with no file at the end of it"
+        );
+
+        let path = format!("{root}/AppData/CLOCK/old.conf");
+        storage.write_file(&path, b"x").unwrap();
+        storage.remove_file(&path).expect("and a file that is");
+
+        assert!(!Path::new(&path).exists(), "which is gone afterwards");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A rename carries the bytes across and leaves nothing behind — the pair of facts a file manager
+    /// draws as one line moving up a list.
+    #[test]
+    fn a_rename_moves_the_file_and_leaves_no_second_copy() {
+        let storage = SimStorage::new();
+        let root = scratch("rename");
+        let from = format!("{root}/AppData/CLOCK/chime.wav");
+        let to = format!("{root}/AppData/CLOCK/renamed.wav");
+
+        storage.write_file(&from, b"RIFF").unwrap();
+        storage.rename(&from, &to).expect("the move");
+
+        assert!(!Path::new(&from).exists(), "the old name is free again");
+        assert_eq!(fs::read(&to).unwrap(), b"RIFF");
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

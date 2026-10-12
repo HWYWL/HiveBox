@@ -1,0 +1,37 @@
+[package]
+name = "files"
+version = "0.1.0"
+edition = "2021"
+description = "A file manager: the built-in volume and the card in the slot"
+license = "GPL-3.0-only"
+
+# A member of the workspace at the root of this directory (`Cargo.toml`): that is what lets
+# `cargo test --workspace` run every app against one lock while each stays its own crate.
+
+[dependencies]
+# The facade. `advanced` is here for the button and container styles the list is drawn with — the
+# rows and the toolbar are built out of the widgets iced ships, with no canvas of this app's own.
+iced = { version = "0.14", default-features = false, features = ["advanced", "thread-pool", "x11", "wayland"] }
+
+# The board: the two volumes come from here, and so do the three writes a file manager makes that
+# `std::fs` cannot on this board — deleting, renaming and writing a copy. Reading and listing are
+# `std::fs`'s, which is the half that always worked.
+pomelo-hal = { git = "https://github.com/pomelos-on-sale/pomelo-hal.git", rev = "20eaa910f0a05cd68684d6aa868fd78457c51be9" }
+
+# The shared preferences: the theme and the language are the system's, and the font tier is what
+# every measurement in `style` is derived from.
+pomelo-widgets = { git = "https://github.com/pomelos-on-sale/pomelo-widgets.git", rev = "f499da5cc17ef16ced6e6b1e62286bb020837a0b" }
+
+# The icons: the folder and file glyphs in the list, and the four actions on the toolbar.
+pomelo-material-symbols = { git = "https://github.com/pomelos-on-sale/pomelo-material-symbols.git", rev = "7dc390fb1924dc69b375e5ae77806857f798cc58" }
+
+[features]
+# On by default, because a project of its own is a desktop program. The board is the other way round:
+# `app-launcher` depends on this crate with `default-features = false`, so on the panel the platform
+# layer is what paints.
+desktop = ["iced/tiny-skia"]
+default = ["desktop"]
+
+[dev-dependencies]
+# The widget-tree tester: the real widget tree, no host, no window, no pixels.
+iced_test = "0.14"
