@@ -24,21 +24,21 @@
 
 ## 📷 界面预览
 
-下面都是**真机屏幕**（480×480 AMOLED）的实拍，不是设计稿：
+下面都是**真机屏幕**（480×480 AMOLED）的实拍，不是设计稿。每张都按 160×160 显示 —— 图都写死了宽度，不然表格会按每格说明文字的长短把列宽分得不一样，图片也就跟着一大一小；原图是 480×480，点开可以看细节：
 
 | 桌面 | 设置 · 读数面板 | 设置 · 主列表 | 设置 · 系统信息 |
 | :---: | :---: | :---: | :---: |
-| ![桌面](docs/images/desktop.png) | ![读数面板](docs/images/settings-summary.png) | ![设置列表](docs/images/settings-list.png) | ![系统信息](docs/images/settings-about.png) |
+| <img src="docs/images/desktop.png" width="160" alt="桌面"> | <img src="docs/images/settings-summary.png" width="160" alt="读数面板"> | <img src="docs/images/settings-list.png" width="160" alt="设置主列表"> | <img src="docs/images/settings-about.png" width="160" alt="系统信息"> |
 | 状态栏、四个应用与分页点（这张是两页七个应用那版的实拍，现在是三页十一个） | 三个环 + 芯片与固件卡，页脚是编译/系统时间与已启动 | 无线网络、内存、存储、电池、主题、日期与时间 | 规格与读数分开：操作系统一栏说明来源，固件版本是镜像自报 |
 
 | 音乐播放器 | 网页管理 | 终端 | 计算器 |
 | :---: | :---: | :---: | :---: |
-| ![音乐播放器](docs/images/music-player.png) | ![网页管理](docs/images/web-manager.png) | ![终端](docs/images/terminal.png) | ![计算器](docs/images/calculator.png) |
+| <img src="docs/images/music-player.png" width="160" alt="音乐播放器"> | <img src="docs/images/web-manager.png" width="160" alt="网页管理"> | <img src="docs/images/terminal.png" width="160" alt="终端"> | <img src="docs/images/calculator.png" width="160" alt="计算器"> |
 | 读 TF 卡里的音乐，列表点击播放，进度与音量可直接拖动 | 板子自己起 HTTP 服务，同一网络里用浏览器打开 | 触屏键盘输入，板内命令行 | 用 iced 自带控件写的计算器 |
 
 | 时钟 | 概览 | 电池（电量日志） | 文件管理 |
 | :---: | :---: | :---: | :---: |
-| ![时钟](docs/images/clock.png) | ![概览](docs/images/overview.png) | ![电池](docs/images/power-log.png) | ![文件管理](docs/images/files.png) |
+| <img src="docs/images/clock.png" width="160" alt="时钟"> | <img src="docs/images/overview.png" width="160" alt="概览"> | <img src="docs/images/power-log.png" width="160" alt="电池"> | <img src="docs/images/files.png" width="160" alt="文件管理"> |
 | 一枚表盘带秒针，下面是大号数字时间与日期；同一个磁贴里还有番茄钟与闹钟两页 | 五张卡一屏：电池、无线网络、存储（内部 + 存储卡），下面还有内存与服务器；右上角是「重新检测」 | 页头写着「电池」，磁贴上叫「电量日志」；顶部是过热警示条，下面电量卡 + 放电曲线，充电中不给剩余时间估算 | 内部 / 存储卡两个卷，路径与目录项，底部五个动作：新建文件夹、重命名、复制、粘贴、删除 |
 
 ---
