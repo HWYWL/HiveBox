@@ -95,9 +95,13 @@ pub fn muted(theme: ThemeMode) -> Color {
 }
 
 /// The page's own background.
+///
+/// The dark one is the box's own black ([`ThemeMode::background`]): the panel sits inside a black bezel,
+/// and a page that is only *nearly* black draws that bezel's edge on the screen. The cards are what tells
+/// the page apart from a card, so the page gives up nothing by being the same nothing as the glass.
 pub fn surface(theme: ThemeMode) -> Color {
     match theme {
-        ThemeMode::Dark => Color::from_rgb8(0x12, 0x13, 0x1A),
+        ThemeMode::Dark => ThemeMode::Dark.background(),
         ThemeMode::Light => Color::from_rgb8(0xF4, 0xF5, 0xF8),
     }
 }

@@ -137,11 +137,15 @@ pub fn background() -> Color {
 }
 
 /// The page background for the given theme mode.
+///
+/// The dark one is the box's own black ([`ThemeMode::background`]) rather than a near-black of this app's
+/// own: the panel sits inside a black bezel, and only an exact black leaves that bezel's edge undrawn. The
+/// light one stays white, because a white-on-white panel has no bezel to hide in.
 pub fn background_for(theme: ThemeMode) -> Color {
     if theme.is_light() {
         rgb((255, 255, 255))
     } else {
-        rgb((18, 18, 20))
+        theme.background()
     }
 }
 

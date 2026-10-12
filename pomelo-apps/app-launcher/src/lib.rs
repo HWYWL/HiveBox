@@ -2,10 +2,11 @@
 //!
 //! Deliberately free of raster images: iced's `image` feature pulls the `image` crate into the
 //! firmware, and the wallpaper and icons we already bake are RGB565 blits that `pomelo-gfx` does
-//! natively. So the wallpaper is a gradient and every picture on the screen is a glyph out of
-//! `pomelo_material_symbols` — the grid's on an accent square, the status bar's on its black band —
-//! one font of the whole Material Symbols catalogue, which costs nothing beyond the text this
-//! launcher draws anyway.
+//! natively. So the wallpaper is a colour — black, so that the bezel's edge is not drawn on the screen —
+//! and every picture on the screen is a glyph out of `pomelo_material_symbols`: the grid's in white on a
+//! saturated accent square (`apps.rs`), the status bar's on its black band. One font of the whole Material
+//! Symbols catalogue, which costs nothing beyond the text this launcher draws anyway. See
+//! [`style::WALLPAPER_DARK`].
 //!
 //! # Hosting an app is merging its subscription
 //!
@@ -139,7 +140,7 @@ pub use pomelo_material_symbols::Icon;
 pub use pomelo_widgets::{AppIcon, BitmapIcon, FontSizeTier, Language, SystemPreferences, ThemeMode};
 pub use style::{
     DOT_REST, DOT_UP, LABEL, PER_PAGE, SCREEN, STATUS_BG, STATUS_BG_DARK, STATUS_BG_LIGHT,
-    STATUS_HEIGHT, STATUS_INSET,
+    STATUS_HEIGHT, STATUS_INSET, WALLPAPER_DARK, WALLPAPER_LIGHT,
 };
 
 /// The launcher as an iced program, with `board` for its apps.
@@ -994,14 +995,16 @@ impl Launcher {
             ThemeMode::Dark => Theme::custom(
                 "PomeloDark",
                 Palette {
-                    background: Color::from_rgb8(20, 22, 38),
+                    // Black, so that the wallpaper and the bezel are the same nothing — see
+                    // [`style::WALLPAPER_DARK`], which is where that argument is.
+                    background: of(style::WALLPAPER_DARK),
                     ..Palette::DARK
                 },
             ),
             ThemeMode::Light => Theme::custom(
                 "PomeloLight",
                 Palette {
-                    background: Color::from_rgb8(242, 242, 247),
+                    background: of(style::WALLPAPER_LIGHT),
                     ..Palette::LIGHT
                 },
             ),
@@ -1698,6 +1701,24 @@ impl Launcher {
     }
 }
 
+/// One of [`style`]'s `(u8, u8, u8)` colours, as an iced one.
+///
+/// The metrics tables are plain `const`s of bytes so that they stay readable in a diff; this is the one
+/// place that turns them into the type the renderer wants.
+fn of((r, g, b): (u8, u8, u8)) -> Color {
+    Color::from_rgb8(r, g, b)
+}
+
+/// `colour` with `lift` of the way to white mixed into it: a highlight that cannot clip.
+fn lift(colour: Color, lift: f32) -> Color {
+    Color {
+        r: colour.r + (1.0 - colour.r) * lift,
+        g: colour.g + (1.0 - colour.g) * lift,
+        b: colour.b + (1.0 - colour.b) * lift,
+        a: colour.a,
+    }
+}
+
 /// An app icon button: accent color at rest, subtly lit when pressed.
 /// For bitmap icons, transparent at rest with a subtle translucent highlight when pressed.
 fn icon_style(entry: &'static Entry, status: button::Status) -> button::Style {
@@ -1720,14 +1741,10 @@ fn icon_style(entry: &'static Entry, status: button::Status) -> button::Style {
 
     let base_color = entry.color();
     let bg = match status {
-        button::Status::Pressed => {
-            let (r, g, b) = entry.accent;
-            Color::from_rgb(
-                ((r as f32 * 1.35).min(255.0)) / 255.0,
-                ((g as f32 * 1.35).min(255.0)) / 255.0,
-                ((b as f32 * 1.35).min(255.0)) / 255.0,
-            )
-        }
+        // A wash of white over the tile rather than a brighter copy of it: the accents are saturated
+        // already — see `apps.rs` — and multiplying one by anything clips the channels it is strongest in
+        // and flashes a colour nobody chose. See [`style::TILE_PRESS_LIFT`].
+        button::Status::Pressed => lift(base_color, style::TILE_PRESS_LIFT),
         _ => base_color,
     };
 
@@ -2042,6 +2059,36 @@ mod tests {
             2,
             "four on the first page leaves three on the second"
         );
+    }
+
+    /// A tile's accent *is* the picture, so the catalogue's are saturated — and a press lights one rather
+    /// than multiplying it, which on a saturated colour would clip every channel it is strongest in and
+    /// flash a colour nobody chose.
+    ///
+    /// Both halves are the reason the accents and the press were changed together: an accent dim enough to
+    /// survive a multiplication is an accent that has stopped being the thing a tile is recognised by.
+    #[test]
+    fn the_accents_are_vivid_and_a_press_never_clips_them() {
+        for entry in CATALOGUE {
+            let (r, g, b) = entry.accent;
+            let brightest = r.max(g).max(b);
+
+            // 130 sits between the two catalogues this file has had: the near-black shades it carried
+            // before topped out at 78, and the only tile under this line today is the settings app's grey
+            // — deliberately a grey, the way a phone draws its settings, and nowhere near a shadow.
+            assert!(
+                brightest >= 130,
+                "{entry:?}: a tile has to be a colour, not a shadow"
+            );
+
+            let base = entry.color();
+            let lit = lift(base, style::TILE_PRESS_LIFT);
+
+            for (was, is) in [(base.r, lit.r), (base.g, lit.g), (base.b, lit.b)] {
+                assert!(is > was, "{entry:?}: the press did not brighten it");
+                assert!(is <= 1.0, "{entry:?}: the press clipped it to grey");
+            }
+        }
     }
 
     #[test]

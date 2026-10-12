@@ -8,6 +8,21 @@
 /// The panel the launcher is designed for.
 pub const SCREEN: u32 = 480;
 
+/// The wallpaper behind the grid: **black** in the dark theme.
+///
+/// The panel is a 480×480 AMOLED inside a black bezel, and a wallpaper that is only *nearly* black draws
+/// that bezel's edge: the eye finds the seam between a lit pixel and an unlit one, and the display's round
+/// corners turn that seam into a curve the screen appears to end inside. Black is the one colour whose
+/// edge is nothing at all — the tiles and the status bar are then the whole of what the screen is made of,
+/// and the glass around them reads as more of the same nothing rather than as a frame.
+///
+/// Exported, like [`SCREEN`], because the panel tests find what is on screen by its colour.
+pub const WALLPAPER_DARK: (u8, u8, u8) = (0, 0, 0);
+
+/// And in the light theme, which is a different screen rather than a different box: a white-on-white
+/// panel has no bezel to hide in, so it keeps the near-white it has always had.
+pub const WALLPAPER_LIGHT: (u8, u8, u8) = (242, 242, 247);
+
 /// The app grid: two columns of two rows, so a page holds four apps, one to a quadrant.
 pub const COLUMNS: usize = 2;
 pub const ROWS: usize = 2;
@@ -204,7 +219,17 @@ pub const TRANSITION_FLING: f32 = 250.0;
 pub const DOT: f32 = 8.0;
 pub const DOT_GAP: f32 = 12.0;
 pub const DOT_UP: (u8, u8, u8) = (233, 236, 244);
-pub const DOT_REST: (u8, u8, u8) = (62, 68, 92);
+/// The unlit dot, on [`WALLPAPER_DARK`]: read against black rather than against the near-black blue the
+/// wallpaper used to be, so it is a grey of its own instead of a dimmer shade of the wallpaper.
+pub const DOT_REST: (u8, u8, u8) = (86, 90, 104);
+
+/// How much white a tile's accent is mixed with while a finger is on it.
+///
+/// A lift rather than the multiplication this used to be: the catalogue's accents are at full strength —
+/// see `apps.rs` — and multiplying one by 1.35 clips every channel it has and flashes back as flat grey.
+/// Mixing toward white brightens whatever the accent is, and never clips, whatever colour somebody puts
+/// in the catalogue next.
+pub const TILE_PRESS_LIFT: f32 = 0.16;
 
 /// The status bar. Taller than a bar of text: it is the top of a round display, and the row sits
 /// inside it rather than against its edge.

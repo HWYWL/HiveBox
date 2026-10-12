@@ -191,14 +191,15 @@ impl TaskViewer {
     /// The theme: the palette the platform paints the page on.
     ///
     /// The same two palettes the launcher and the settings app use, so that the colour this page is
-    /// drawn on does not change when the page does — and so the panel's background behind it is the
-    /// same dark every other screen is.
+    /// drawn on does not change when the page does. The dark one is the box's own black
+    /// ([`ThemeMode::background`]) and not a near-black of its own: the panel sits inside a black bezel,
+    /// and only an exact black leaves that bezel's edge undrawn.
     pub fn theme(&self) -> Theme {
         match self.preferences.theme {
             ThemeMode::Dark => Theme::custom(
                 "PomeloDark",
                 Palette {
-                    background: Color::from_rgb8(20, 22, 38),
+                    background: ThemeMode::Dark.background(),
                     ..Palette::DARK
                 },
             ),

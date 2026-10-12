@@ -86,7 +86,13 @@ pub(crate) fn theme_page<'a>(preferences: SystemPreferences) -> UI<'a> {
             language.text(Key::Style),
             preferences.theme.name(language).to_string(),
         ),
-        (language.text(Key::Wallpaper), "macOS Sierra".to_string()),
+        // Not a picture and not another system's picture at that: the desktop's background is a colour,
+        // and it is black so that the panel's bezel has no edge drawn on the screen. There is no wallpaper
+        // to name, and naming one would be this row telling the reader about a file the image never had.
+        (
+            language.text(Key::Wallpaper),
+            "pure black (no edge on the bezel)".to_string(),
+        ),
         (
             language.text(Key::Emissive),
             "AMOLED (no backlight bleed)".to_string(),

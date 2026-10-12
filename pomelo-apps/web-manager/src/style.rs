@@ -44,8 +44,6 @@ pub const FOOTNOTE_FONT: f32 = FONT_EXTRA_SMALL; // 18.0 px
 
 use pomelo_widgets::preferences::ThemeMode;
 
-/// The page background, from the AMOLED-deep dark the other apps use.
-pub const BACKGROUND: Color = Color::from_rgb8(11, 15, 25);
 pub const CARD: Color = Color::from_rgb8(17, 24, 39);
 pub const CARD_BORDER: Color = Color::from_rgb8(30, 41, 59);
 pub const TITLE: Color = Color::from_rgb8(167, 139, 250);
@@ -59,11 +57,14 @@ pub const STOP: Color = Color::from_rgb8(220, 38, 38);
 pub const STOP_PRESSED: Color = Color::from_rgb8(239, 68, 68);
 
 /// Page background for the given theme mode.
+///
+/// The dark one is the box's own black ([`ThemeMode::background`]) rather than a near-black of this app's
+/// own: the panel sits inside a black bezel, and only an exact black leaves that bezel's edge undrawn.
 pub fn background_for(theme: ThemeMode) -> Color {
     if theme.is_light() {
         Color::from_rgb8(243, 244, 246)
     } else {
-        BACKGROUND
+        theme.background()
     }
 }
 
