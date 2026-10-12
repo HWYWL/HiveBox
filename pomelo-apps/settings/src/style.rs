@@ -318,26 +318,49 @@ pub fn black() -> Color {
     rgb((0, 0, 0))
 }
 
+/// The page's background in the dark theme, which is that black.
+///
+/// This is the colour the *panel's edge* is: the display sits inside a black bezel, and anything lighter
+/// than black draws that bezel's edge on the screen — on the round corners, as a curve the display
+/// appears to end inside. The whole app is designed against black; this is the one place that says so.
 pub fn background_for(theme: ThemeMode) -> Color {
-    theme.background()
+    match theme {
+        ThemeMode::Dark => black(),
+        ThemeMode::Light => theme.background(),
+    }
 }
 
-/// The navigation bar, a shade above the black page.
+/// The navigation bar under a page.
+///
+/// Black, like the page it is on. It used to sit a shade above it, which is what a bar does when the page
+/// behind it is a colour — but here the page is *nothing*, and a fill a few steps off nothing is a grey
+/// strip across an AMOLED panel separating two things that are already separate: the buttons are on it.
 pub fn nav() -> Color {
     nav_for(ThemeMode::Dark)
 }
 
 pub fn nav_for(theme: ThemeMode) -> Color {
-    theme.nav_bar()
+    match theme {
+        ThemeMode::Dark => black(),
+        ThemeMode::Light => theme.nav_bar(),
+    }
 }
 
 /// A grouped card.
+///
+/// Black too — and what groups a card here is the *hairline* around it ([`card_border`]), not a fill. A
+/// card a few steps above a black page is a grey rectangle, and on a panel this size it is most of the
+/// screen: that is what a person opening this app sees, and it is the one surface in it that is pretending
+/// not to be black.
 pub fn card() -> Color {
     card_for(ThemeMode::Dark)
 }
 
 pub fn card_for(theme: ThemeMode) -> Color {
-    theme.card()
+    match theme {
+        ThemeMode::Dark => black(),
+        ThemeMode::Light => theme.card(),
+    }
 }
 
 /// The hairline around a card.
