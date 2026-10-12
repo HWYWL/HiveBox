@@ -30,6 +30,10 @@ pub struct SimNas {
     /// The one being looked at, or `None`. A copy rather than an index: the list can be edited under
     /// it, and what is being watched is a *machine* and not a row — see [`SimNas::watch`].
     watching: Option<NasCredentials>,
+    /// Whether the machines in the list are there. What a *check* asks, as against [`Answer`], which is
+    /// what a look does: a box that is switched off fails both, and a box whose password was changed
+    /// fails only the look. See [`SimNas::unreachable`].
+    reachable: bool,
     answer: Answer,
     /// How many looks have arrived, so that the numbers move. A window left open on a simulated NAS
     /// should show a machine doing something rather than a photograph.
@@ -58,9 +62,23 @@ impl SimNas {
         Self {
             devices: Vec::new(),
             watching: None,
+            reachable: true,
             answer: Answer::Data,
             looks: 0,
             reading: NasReading::default(),
+        }
+    }
+
+    /// A NAS that is not there at all: switched off, or unplugged from the network.
+    ///
+    /// Both of its answers are failures — the look cannot connect and the list's check cannot reach the
+    /// port — which is the pair a machine that is off produces. A machine that is up with a changed
+    /// password is the *other* combination, and is [`SimNas::failing`].
+    pub fn unreachable() -> Self {
+        Self {
+            reachable: false,
+            answer: Answer::Fail(NasFault::Unreachable),
+            ..Self::new()
         }
     }
 
@@ -90,9 +108,44 @@ impl SimNas {
         }
     }
 
-    /// The reading the simulator would answer with, over the files that describe it: a system SSD and
-    /// two data drives, the shape of the box this app was written for.
-    fn answering(&self) -> NasReading {
+    /// What a machine's *first* look comes back with: everything that is a fact about it — its uptime,
+    /// its memory, its disks and what they are for — and nothing that is a difference between two looks.
+    ///
+    /// Which is what the device's backend gets from `pomelo_hal::nas_sample::Sampler`, said here in the
+    /// simulator's own words: `/proc` reports totals since boot, so a rate is a subtraction and one look
+    /// cannot make one. Without this the desktop would draw a CPU and a network the board cannot have
+    /// yet, and the dashes the page has to be able to draw would be a state nobody had ever seen.
+    ///
+    /// The app asks again a second later for exactly this reason — see its `PRIME` — which is the same
+    /// second the device's worker waits before its second look.
+    fn first_look(&self) -> NasReading {
+        NasReading {
+            cpu: None,
+            network: None,
+            // The disks are already facts, and how busy each has been is not: it is the same
+            // subtraction, and a first look is the one that has nothing to subtract from.
+            disks: self
+                .fresh()
+                .disks
+                .into_iter()
+                .map(|disk| NasDisk {
+                    busy_percent: 0.0,
+                    read_per_sec: 0,
+                    write_per_sec: 0,
+                    ..disk
+                })
+                .collect(),
+            ..self.fresh()
+        }
+    }
+
+    /// A fresh reading, over the files that describe the simulated machine: a system SSD and two data
+    /// drives, the shape of the box this app was written for.
+    ///
+    /// `fresh` and not `answering`, which is what [`NasBackend::answering`] answers the *list's* checks
+    /// with: the two are one word apart and mean quite different things, and an inherent method of that
+    /// name would shadow the trait's.
+    fn fresh(&self) -> NasReading {
         // The wobble: a few values that move with each look, so a page watched for a minute is a page
         // that changes. Deliberately small and deliberately not random — a test that reads a number
         // twice gets the same one.
@@ -227,7 +280,13 @@ impl NasBackend for SimNas {
             // keeps drawing them and `age` keeps growing. That is what the device's backend has to do
             // too: a NAS that went to sleep did not become a NAS with no disks.
             Answer::Fail(fault) => self.reading.status = NasStatus::Offline(fault),
-            Answer::Data => self.reading = self.answering(),
+            Answer::Data => {
+                self.reading = if self.looks <= 1 {
+                    self.first_look()
+                } else {
+                    self.fresh()
+                };
+            }
         }
 
         Ok(())
@@ -235,6 +294,22 @@ impl NasBackend for SimNas {
 
     fn reading(&self) -> NasReading {
         self.reading.clone()
+    }
+
+    fn check(&mut self) -> Result<(), HalError> {
+        // Nothing to ask for: a simulated socket opens at once, so the answer is there before the
+        // question — see [`SimNas::answering`]. A backend with a real port to open is the device's, and
+        // what it does about it is in the trait's note.
+        Ok(())
+    }
+
+    fn answering(&self, host: &str) -> Option<bool> {
+        // A machine this simulator has been told about is one it has an answer about, and a machine it
+        // has never heard of is one it has nothing to say about — which is not the same as "not there".
+        self.devices
+            .iter()
+            .any(|device| device.host == host)
+            .then_some(self.reachable)
     }
 }
 
@@ -284,11 +359,49 @@ mod tests {
         assert!(nas.reading().age().is_some());
     }
 
+    /// A machine's first look carries the facts and none of the rates, and the second carries both.
+    ///
+    /// The shape the page's dashes hang on: without it a board's first reading would be drawn with a CPU
+    /// and a network in it that the board cannot have. See [`SimNas::first_look`].
+    #[test]
+    fn a_first_look_has_no_rates_in_it() {
+        let mut nas = watching();
+
+        nas.refresh().unwrap();
+
+        let first = nas.reading();
+
+        assert_eq!(first.status, NasStatus::Online);
+        assert!(first.cpu.is_none(), "one look cannot know how busy the CPU is");
+        assert!(first.network.is_none());
+        assert_eq!(
+            first.uptime.map(|up| up.as_secs()),
+            Some(17 * 86_400 + 4 * 3_600 + 21 * 60),
+            "and the uptime is a fact about the machine, not a difference"
+        );
+        assert!(first.memory.is_some());
+        assert_eq!(first.disks.len(), 3, "the disks are facts too");
+        assert_eq!(first.disks[0].purpose, "系统安装");
+        assert_eq!(first.disks[0].read_per_sec, 0, "with no speed yet");
+
+        nas.refresh().unwrap();
+
+        let second = nas.reading();
+
+        assert!(second.cpu.is_some(), "the second look is what makes a rate");
+        assert!(second.network.is_some());
+        assert!(second.disks[0].busy_percent > 0.0);
+    }
+
     /// An answer carries the whole machine: its uptime, its CPU and memory, its network, its disks,
     /// and the host key somebody has to decide about.
     #[test]
     fn an_answer_carries_the_machine() {
         let mut nas = watching();
+
+        // Twice, because a machine's first look has no rates in it — see [`SimNas::first_look`] — and
+        // this test is about what a reading carries once there is one.
+        nas.refresh().unwrap();
         nas.refresh().unwrap();
 
         let reading = nas.reading();
@@ -340,7 +453,8 @@ mod tests {
 
         // The same fault on a NAS that *had* answered keeps what it had.
         let mut half = watching();
-        half.refresh().unwrap();
+        half.refresh().unwrap(); // the first look: disks, and no rates yet
+        half.refresh().unwrap(); // the second: the rates with them
         half.answer = Answer::Fail(NasFault::Unreachable);
         half.refresh().unwrap();
 
@@ -348,6 +462,35 @@ mod tests {
         assert_eq!(reading.status, NasStatus::Offline(NasFault::Unreachable));
         assert_eq!(reading.disks.len(), 3, "the last good reading stays on it");
         assert!(reading.cpu.is_some());
+    }
+
+    /// A check says whether a machine is there, about the machines this board has been told about and
+    /// about no others — and a machine that is off fails it, which is what the list draws in red.
+    #[test]
+    fn a_check_says_whether_a_machine_is_there() {
+        let mut nas = watching();
+
+        assert_eq!(nas.answering("192.168.1.10"), Some(true));
+        assert_eq!(
+            nas.answering("10.0.0.1"),
+            None,
+            "a machine it has never been told about is not a machine that is down"
+        );
+        assert!(nas.check().is_ok(), "and asking for one is never an error");
+
+        // A machine that is switched off: the check fails *and* the look does, which is the pair the
+        // list has to be able to tell from a machine that is up with something wrong with its login.
+        let mut off = SimNas::unreachable();
+        off.remember(&credentials("hunter2")).unwrap();
+
+        assert_eq!(off.answering("192.168.1.10"), Some(false));
+
+        off.refresh().unwrap();
+
+        assert_eq!(
+            off.reading().status,
+            NasStatus::Offline(NasFault::Unreachable)
+        );
     }
 
     /// Dropping the machine being watched forgets it, and leaves nothing being watched.

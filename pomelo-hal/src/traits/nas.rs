@@ -97,4 +97,34 @@ pub trait NasBackend: Send + Sync {
     /// NAS answers [`NasStatus::Unconfigured`][crate::types::NasStatus::Unconfigured], which is not a
     /// failure and should not be drawn as one.
     fn reading(&self) -> NasReading;
+
+    /// Asks for every machine in the list to be checked, so that [`NasBackend::answering`] can say which
+    /// of them are there.
+    ///
+    /// A check is not a look. A look logs in, runs a command and reads what it printed — a session, and a
+    /// second of one machine's time. A check opens a socket to the machine's SSH port and closes it
+    /// again, and what it answers is whether the board can reach the machine at all. That is the question
+    /// a *list* of machines is asked before any other, and it is cheap enough to keep asking while the
+    /// list is on screen — where a look is not, which is why the two are separate calls rather than one
+    /// with a flag.
+    ///
+    /// Like [`NasBackend::refresh`], this only *asks*: the sockets are opened and closed on the backend's
+    /// own thread, and the answers are read with [`NasBackend::answering`]. A backend that cannot check
+    /// anything does nothing here, and has nothing to say there.
+    fn check(&mut self) -> Result<(), HalError> {
+        Ok(())
+    }
+
+    /// Whether `host` answered the last check: `Some(true)` if the board reached it, `Some(false)` if it
+    /// did not, and `None` if no check has been made — or if this backend does not make them.
+    ///
+    /// Cheap, like [`NasBackend::reading`], and safe to call for every row of a list on every frame.
+    ///
+    /// A machine whose *session* also fails is described better by [`NasBackend::reading`] — a port that
+    /// answers is not a login that works — so a page with both in hand says the reading's fault, and
+    /// falls back to this for the machines it has no reading for. Which is most of them: the backend
+    /// looks at one machine at a time and checks all of them.
+    fn answering(&self, _host: &str) -> Option<bool> {
+        None
+    }
 }

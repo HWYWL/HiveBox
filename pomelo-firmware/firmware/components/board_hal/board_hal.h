@@ -461,6 +461,10 @@ esp_err_t hal_storage_get_flash(hal_flash_layout_t *out);
 
 #define HAL_SYSTEM_CHIP_MODEL_MAX_LEN    16
 #define HAL_SYSTEM_FIRMWARE_NAME_MAX_LEN 24
+/* Exactly `esp_app_desc_t`'s own `version` field, so that what crosses the FFI is
+ * what the image has and not a second opinion about it. The same 32 bytes are why the
+ * spelling that goes *into* the image has to fit them: see the firmware's
+ * `CMakeLists.txt`, which sets `PROJECT_VER` to a spelling that does. */
 #define HAL_SYSTEM_VERSION_MAX_LEN       32
 /* Exactly `esp_app_desc_t`'s own two fields, so the build stamp crosses the FFI
  * in the spelling the compiler left it in rather than a copy this header made up. */

@@ -72,7 +72,7 @@ use std::time::{Duration, Instant};
 use pomelo_hal::app_data::BOARD_APP_DATA;
 use pomelo_hal::error::HalError;
 use pomelo_hal::nas_credentials::{self, NasCredentials};
-use pomelo_hal::nas_sample::{COMMAND, Sampler};
+use pomelo_hal::nas_sample::{round_uptime, split_pair, COMMAND, COMMAND_TWICE, Sampler};
 use pomelo_hal::traits::NasBackend;
 use pomelo_hal::types::{NasFault, NasReading, NasStatus};
 
@@ -212,6 +212,74 @@ const LOOK_DEADLINE: Duration = Duration::from_secs(30);
 /// [`NasBackend::refresh`] can be answered.
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
+/// How long after a machine's first look the second one is taken.
+///
+/// `/proc` reports totals since boot, so every rate on this page is a difference between two looks — and
+/// a machine's first look has none of them: its CPU and its network come back as nothing, and its disks
+/// at zero. The page draws that as a dash, which is honest and is not what somebody opened it to see, so
+/// the second look is taken a second after the first rather than an interval after it.
+///
+/// A second from both sides: the app asks again on the same beat (its own `PRIME`, where the other half
+/// of this is written down). The two do not have to agree exactly — an ask that arrives before the look
+/// is due is a flag the worker answers on its next pass.
+const PRIME: Duration = Duration::from_secs(1);
+
+/// How long a check waits for a machine's port to answer.
+///
+/// What this decides, in practice, is how long "not there" takes to say: a machine on the LAN answers in
+/// milliseconds and a machine that is switched off never does. A second and a half is long enough for a
+/// slow link to answer across and short enough that a row does not sit on 检测中… for a whole pass.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// How long between passes of checks.
+///
+/// A machine that comes back or goes away is a thing somebody looks at a list to see, and neither happens
+/// between two seconds: ten is fast enough to watch for it and slow enough that a list left open overnight
+/// is not a set of machines being knocked on every second.
+const CHECK_INTERVAL: Duration = Duration::from_secs(10);
+
+/// What the worker knows about the machine it is watching: which one it was, when it last looked, and
+/// whether that machine has had the two looks a rate needs.
+///
+/// One value rather than three locals because they are all about the *same* machine and go together: a
+/// machine the worker has just been pointed at is one it has no clock for at all, and a look at it is
+/// due at once — the interval is the spacing *between* looks, not a delay before the first one.
+#[derive(Default)]
+struct Watched {
+    /// The host of the last look.
+    host: Option<String>,
+    /// When that look finished. `None` until there has been one.
+    at: Option<Instant>,
+    /// That machine has had its pair of looks, so the interval takes over from [`PRIME`].
+    paired: bool,
+}
+
+impl Watched {
+    /// Whether a look at `config` is due.
+    fn due(&self, config: &NasCredentials, now: Instant) -> bool {
+        if self.host.as_deref() != Some(config.host.as_str()) {
+            return true;
+        }
+
+        let spacing = if self.paired {
+            config.interval()
+        } else {
+            PRIME
+        };
+
+        self.at.is_none_or(|at| now >= at + spacing)
+    }
+
+    /// Takes down a look at `config` that has just finished.
+    fn looked(&mut self, config: &NasCredentials, now: Instant) {
+        // The look that just finished is this machine's first unless the clock was already on it, which
+        // is what makes the look after a first one the second: see [`PRIME`].
+        self.paired = self.host.as_deref() == Some(config.host.as_str());
+        self.host = Some(config.host.clone());
+        self.at = Some(now);
+    }
+}
+
 /// The largest SSH packet allowed, from RFC 4253: what sunset's packet buffers have to hold. Sunset's
 /// own `config::SSH_MAX_PACKET` is `pub(crate)`, so the number lives here too.
 const SSH_MAX_PACKET: usize = 35000;
@@ -267,8 +335,13 @@ struct Inner {
     busy: bool,
     /// The last fault, as a `hal_nas_fault_t`, or [`FAULT_NONE`].
     fault: i32,
-    /// The text of the last completed look, waiting for [`NasBackend::refresh`] to take it.
-    pending: Option<Vec<u8>>,
+    /// What completed looks have produced and nobody has taken yet, each with the instant its sample
+    /// belongs to.
+    ///
+    /// A queue and not one text, because a machine's first look hands over *two* samples of one connection
+    /// — see `COMMAND_TWICE` — and the instant travels with the text because the right to say "per second"
+    /// comes from the gap between two samples and not from when somebody got round to reading them.
+    pending: Vec<(Instant, Vec<u8>)>,
     /// The `known_hosts` file's contents, mirrored here because the worker cannot reach the flash —
     /// its stack is in PSRAM. Read once by [`EspNas::new`], looked up and extended by
     /// [`check_hostkey`] as looks bring host keys, and written back by [`NasBackend::refresh`].
@@ -276,6 +349,24 @@ struct Inner {
     /// [`Inner::known_hosts`] holds a host key the file does not yet: the app thread writes it on the
     /// next [`NasBackend::refresh`], being a thread whose stack can reach the flash.
     known_hosts_dirty: bool,
+    /// A pass of checks has been asked for and not yet taken: the machines to check, and the port to knock
+    /// on. The list is handed over by the app thread rather than read here, because reading it is a flash
+    /// read and the worker's stack is in PSRAM — see the module notes, and [`NasBackend::check`], which is
+    /// where the handing over happens.
+    checking: Option<Vec<(String, u16)>>,
+    /// What the last pass found, per host: whether that machine's port answered. A host that is not in it
+    /// has not been checked — which on a page is 检测中… and is not 离线.
+    answering: Vec<(String, bool)>,
+    /// The app has forgotten the counters the last look was measured against, having just pointed this
+    /// board at a machine — or at one again.
+    ///
+    /// What the worker does with it is to forget its own clock too, and that is the whole of why the flag
+    /// exists: [`Watched`] decides when the *next* look is due, and a look whose counters are gone is a
+    /// first look — the one that gets the priming beat rather than the interval. Without this the board
+    /// would take a first look (because the counters went) and then wait a whole interval to take the
+    /// second (because the clock was still on the machine), which is the wait the priming exists to
+    /// remove. See [`EspNas::select`] and [`PRIME`].
+    forgotten: bool,
 }
 
 impl EspNas {
@@ -344,8 +435,16 @@ impl EspNas {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             inner.config = Some(credentials.clone());
             inner.requested = true;
-            inner.pending = None;
+            inner.pending.clear();
             inner.fault = FAULT_NONE;
+            // A pass of checks queued for the list is dropped here: the list is not what anybody is looking
+            // at now, and a socket per machine would be this thread's time before the session this page
+            // wants. What the checks had answered stays where it is — the page that asked for them is one
+            // tap away — and the list asks again when it comes back. See [`NasBackend::check`].
+            inner.checking = None;
+            // And the worker's clock goes with the counters this call is about to drop: see [`Inner`]'s
+            // `forgotten`, which is where the whole of that argument is.
+            inner.forgotten = true;
         }
         self.shared.wake.notify_all();
 
@@ -374,7 +473,7 @@ impl EspNas {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             inner.config = None;
             inner.requested = false;
-            inner.pending = None;
+            inner.pending.clear();
             inner.fault = FAULT_NONE;
         }
         self.shared.wake.notify_all();
@@ -408,9 +507,13 @@ fn run_worker(shared: Arc<Shared>) {
     let mut inbuf = vec![0u8; SSH_MAX_PACKET];
     let mut outbuf = vec![0u8; SSH_MAX_PACKET];
 
-    // When the last look finished, so that looks are spaced by the interval rather than by how often a
-    // caller asks. `None` until the first look, which is therefore immediate.
-    let mut last_look: Option<Instant> = None;
+    // The clock the worker keeps about the machine it is watching. See [`Watched`], which is where the
+    // whole spacing rule lives: a machine it has not looked at yet, then that machine's pair of looks,
+    // then the interval.
+    let mut watched = Watched::default();
+
+    // When the last pass of checks finished. See [`CHECK_INTERVAL`], which is what paces them.
+    let mut last_check: Option<Instant> = None;
 
     loop {
         // Wait for a request, or for one poll interval to pass.
@@ -427,37 +530,106 @@ fn run_worker(shared: Arc<Shared>) {
 
         let now = Instant::now();
 
-        // A look is due if something asked for one, there is a machine to watch, and the interval
-        // since the last look has passed.
-        let config = {
+        // The list's checks, if a page asked for them and the last pass is old enough. A pass is one socket
+        // per machine rather than a session, so it does not carry a look's cost — but it is this thread's
+        // time, and this is the thread a look needs, which is why a page asking on every tick gets a pass
+        // every [`CHECK_INTERVAL`] rather than one per tick.
+        {
+            let asked = {
+                let mut inner = shared
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+                if inner.checking.is_none() || last_check.is_some_and(|at| now < at + CHECK_INTERVAL) {
+                    None
+                } else {
+                    inner.checking.take()
+                }
+            };
+
+            if let Some(hosts) = asked {
+                let mut answers: Vec<(String, bool)> = Vec::new();
+                let mut left: Vec<(String, u16)> = Vec::new();
+
+                for (index, (host, port)) in hosts.iter().enumerate() {
+                    // A look outranks a check: this is the thread a session runs on, and something asking
+                    // for one is a page somebody is waiting on. The rest of the pass goes back for the next
+                    // time round, and what has been answered so far is kept.
+                    if wants_look(&shared) {
+                        left = hosts[index..].to_vec();
+                        break;
+                    }
+
+                    answers.push((host.clone(), probe(host, *port)));
+                }
+
+                let mut inner = shared
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+                // Merged rather than replaced, so that what a cut-short pass did not get to keeps the
+                // answer it had: a row that slipped back to 检测中… because a look went first would be a
+                // row telling a lie about how much is known.
+                for (host, answered) in answers {
+                    match inner.answering.iter_mut().find(|(checked, _)| *checked == host) {
+                        Some(entry) => entry.1 = answered,
+                        None => inner.answering.push((host, answered)),
+                    }
+                }
+
+                if !left.is_empty() {
+                    inner.checking = Some(left);
+                }
+
+                last_check = Some(Instant::now());
+            }
+        }
+
+        // A look is due if something asked for one, there is a machine to watch, and the clock since the
+        // last look at *that* machine has run out. `twice` is whether this look is a machine's *first* one,
+        // which is the one that asks the machine for two samples on one connection. See [`COMMAND_TWICE`].
+        let (config, twice) = {
             let mut inner = shared.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
             let Some(config) = inner.config.clone() else {
-                // Nothing watched: a look now would be a look at nothing. Forgetting clears the clock
-                // so that the next machine configured is looked at at once.
-                last_look = None;
+                // Nothing watched: a look now would be a look at nothing. The clock goes with it, so
+                // that the next machine configured is looked at at once.
+                watched = Watched::default();
                 continue;
             };
 
-            let due = last_look.is_none_or(|at| now >= at + config.interval());
-            if !inner.requested || !due {
+            // First, because the flag and the clock are both about to be cleared: a look with no counters
+            // behind it needs two samples, and so does one at a machine the clock has never been on.
+            let twice = inner.forgotten || watched.host.is_none();
+
+            if inner.forgotten {
+                // The counters went, and the clock that measured them goes with them: the next look is this
+                // machine's *first* one, and the one after that is due on the priming beat. See [`Inner`]'s
+                // `forgotten`.
+                inner.forgotten = false;
+                watched = Watched::default();
+            }
+
+            if !inner.requested || !watched.due(&config, now) {
                 continue;
             }
 
             inner.requested = false;
             inner.busy = true;
-            config
+            (config, twice)
         };
 
-        let outcome = look(&config, &mut inbuf, &mut outbuf, &shared);
-        last_look = Some(Instant::now());
+        let outcome = look(&config, &mut inbuf, &mut outbuf, &shared, twice);
+        watched.looked(&config, Instant::now());
 
         let mut inner = shared.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         inner.busy = false;
         match outcome {
-            Ok(text) => {
+            Ok(samples) => {
                 inner.fault = FAULT_NONE;
-                inner.pending = Some(text);
+                inner.pending.extend(samples);
             }
             // A failed look keeps no output: whatever the last good look said is still the least
             // wrong thing the panel can draw, and `reading` reports the fault beside it.
@@ -466,15 +638,50 @@ fn run_worker(shared: Arc<Shared>) {
     }
 }
 
+/// Whether something is waiting for a look: what a pass of checks asks between two sockets.
+///
+/// A socket is the cheap thing this thread does and a session is the expensive one, so a look is what a
+/// check gives way to. Asked of the flag rather than of the machine: the only question is whether anybody
+/// else wants the thread, and a check is the work it can put down. See [`NasBackend::check`].
+fn wants_look(shared: &Shared) -> bool {
+    shared
+        .inner
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .requested
+}
+
+/// One check: open the machine's SSH port and close it again.
+///
+/// Not a look — no handshake, no login, and nothing runs on the machine — which is the whole point of it.
+/// What a *list* of machines is asked is whether each is there, and an SSH session per row would be a login
+/// per row for a question a socket answers. It is also the question this board can act on: whether the port
+/// it would open a session through is open.
+///
+/// Any address the name resolves to will do. A name that resolves to nothing is a machine this board cannot
+/// reach, which is the answer and not an error — the caller is drawing a dot, not diagnosing a network.
+fn probe(host: &str, port: u16) -> bool {
+    let Ok(addresses) = (host, port).to_socket_addrs() else {
+        return false;
+    };
+
+    addresses
+        .into_iter()
+        .any(|address| TcpStream::connect_timeout(&address, PROBE_TIMEOUT).is_ok())
+}
+
 /// One look: connect, authenticate, run the command, read everything it printed.
 ///
-/// `Err` is a `hal_nas_fault_t` code — what went wrong, in the vocabulary the panel speaks.
+/// `Err` is a `hal_nas_fault_t` code — what went wrong, in the vocabulary the panel speaks. `Ok` is the
+/// samples this look is worth — one, or two when `twice` asked the command for a second round on the same
+/// connection — each with the instant it belongs to. See [`COMMAND_TWICE`] and [`uptime_of`].
 fn look(
     config: &NasCredentials,
     inbuf: &mut [u8],
     outbuf: &mut [u8],
     shared: &Shared,
-) -> Result<Vec<u8>, i32> {
+    twice: bool,
+) -> Result<Vec<(Instant, Vec<u8>)>, i32> {
     if !has_network() {
         return Err(FAULT_NO_NETWORK);
     }
@@ -600,7 +807,11 @@ fn look(
                     CliEvent::Banner(_) => {}
                     CliEvent::Authenticated => open_session = true,
                     CliEvent::SessionOpened(mut opener) => {
-                        opener.exec(COMMAND).map_err(|_| FAULT_PROTOCOL)?;
+                        // The command — or the command twice, for a machine's first look. One connection,
+                        // one session: the second round costs a `sleep` and a `cat`, not a login.
+                        let command = if twice { COMMAND_TWICE } else { COMMAND };
+
+                        opener.exec(command).map_err(|_| FAULT_PROTOCOL)?;
                     }
                     CliEvent::SessionExit(_) => {}
                     CliEvent::Defunct => return Err(FAULT_PROTOCOL),
@@ -644,7 +855,51 @@ fn look(
         let _ = runner.channel_done(handle);
     }
 
-    Ok(output)
+    // What the command printed, as samples: one round, or the two a first look asked for, split where the
+    // second begins. Bytes that are not text are a look that produced nothing this board can read — the next
+    // look may well be fine — which is why this is an empty answer rather than a fault.
+    let Ok(text) = String::from_utf8(output) else {
+        return Ok(Vec::new());
+    };
+
+    let now = Instant::now();
+
+    if twice {
+        if let Some((first, second)) = split_pair(&text) {
+            // The *gap* between the two samples is the machine's own, read out of the two rounds'
+            // `/proc/uptime`: on a LAN both rounds arrive in one burst, so when the bytes got here says
+            // nothing about when the counters were read, and a rate divided by no time is not a rate. See
+            // [`uptime_of`].
+            let between = match (uptime_of(first), uptime_of(second)) {
+                (Some(first), Some(second)) if second > first => {
+                    Duration::from_secs_f64(second - first)
+                }
+                // Something the machine did not answer with. The command was told to leave [`PRIME`], and a
+                // rate over a second is nearer the truth than one over no time at all.
+                _ => PRIME,
+            };
+
+            return Ok(vec![
+                (now - between, first.as_bytes().to_vec()),
+                (now, second.as_bytes().to_vec()),
+            ]);
+        }
+
+        // Not two rounds: a `cat` that is not there, a shell that would not run the command twice. One
+        // sample is still a look, and the page draws its rates on the next one.
+    }
+
+    Ok(vec![(now, text.into_bytes())])
+}
+
+/// The machine's own uptime, in seconds, as the first line of a round reports it: `/proc/uptime`'s first
+/// field.
+///
+/// What a rate is divided by. The board's own clock cannot answer that question for a doubled look — both
+/// rounds arrive in the same burst — and the machine's clock can, because that is the clock its counters are
+/// kept in. See [`round_uptime`], which is the parsing of it.
+fn uptime_of(round: &str) -> Option<f64> {
+    round_uptime(round).map(|uptime| uptime.as_secs_f64())
 }
 
 /// Whether this board has a network to reach a NAS through.
@@ -1004,34 +1259,36 @@ impl NasBackend for EspNas {
         }
         self.shared.wake.notify_all();
 
-        // Take whatever the last completed look produced.
-        let pending = {
-            self.shared
+        // Take everything the looks have produced, oldest first. A machine's *first* look hands over two
+        // samples of one connection — see `COMMAND_TWICE` — and each carries the instant it belongs to,
+        // because the right to say "per second" comes from the gap between two samples and not from when
+        // somebody got round to reading them. Nothing to take is a look still in flight, or one that
+        // failed: a failure is reported by [`NasBackend::reading`]'s status rather than by throwing the last
+        // good reading away.
+        let pending: Vec<(Instant, Vec<u8>)> = std::mem::take(
+            &mut self
+                .shared
                 .inner
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .pending
-                .take()
-        };
-        let Some(output) = pending else {
-            // Nothing new: a look still in flight, or one that failed — and a failure is reported by
-            // [`NasBackend::reading`]'s status rather than by throwing the last good reading away.
-            return Ok(());
-        };
+                .pending,
+        );
 
-        let Ok(text) = String::from_utf8(output) else {
-            // Not a reply this board can read. The status stays as it was, and the next look may well
-            // be fine — a session that dropped mid-line is the usual reason.
-            return Ok(());
-        };
+        for (at, output) in pending {
+            let Ok(text) = String::from_utf8(output) else {
+                // Not a reply this board can read. The status stays as it was, and the next look may well
+                // be fine — a session that dropped mid-line is the usual reason.
+                continue;
+            };
 
-        let reading = match self.sampler.lock() {
-            Ok(mut sampler) => sampler.reading(&text, Instant::now()),
-            Err(_) => return Ok(()),
-        };
+            let Ok(mut sampler) = self.sampler.lock() else {
+                continue;
+            };
+            let reading = sampler.reading(&text, at);
 
-        if let Ok(mut last) = self.last.lock() {
-            *last = reading;
+            if let Ok(mut last) = self.last.lock() {
+                *last = reading;
+            }
         }
 
         Ok(())
@@ -1059,5 +1316,54 @@ impl NasBackend for EspNas {
         };
 
         reading
+    }
+
+    fn check(&mut self) -> Result<(), HalError> {
+        // One pass at a time. The worker clears this when it takes it, and a caller on a timer that asked
+        // again while a pass was in flight would have the list — the flash — read once a second for a pass
+        // that is already coming.
+        if self
+            .shared
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .checking
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        // Read here and not by the worker, because this is a thread whose stack can reach the flash. See
+        // the module notes, and `read_devices` — the same file the page's list is drawn from.
+        let hosts: Vec<(String, u16)> = read_devices()
+            .into_iter()
+            .map(|device| (device.host, device.port))
+            .collect();
+
+        {
+            let mut inner = self
+                .shared
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            inner.checking = Some(hosts);
+        }
+        self.shared.wake.notify_all();
+
+        Ok(())
+    }
+
+    fn answering(&self, host: &str) -> Option<bool> {
+        let inner = self
+            .shared
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        inner
+            .answering
+            .iter()
+            .find(|(checked, _)| checked == host)
+            .map(|(_, answered)| *answered)
     }
 }

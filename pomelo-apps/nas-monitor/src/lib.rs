@@ -85,6 +85,17 @@ use pomelo_widgets::touch_keyboard::{self, KeyAction, KeyboardMode};
 /// answer is read from.
 pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(5);
 
+/// How long after a machine's *first* look the second one is asked for: see [`NasMonitor::tick`], which
+/// is where the asking happens, and the backend's note on why a first look has no rates in it — `/proc`
+/// reports totals since boot, so the CPU and the network are differences and one look cannot make one.
+///
+/// A second, from both sides: the backend takes its second look a second after the first
+/// (`pomelo-hal-esp32`'s `nas`, which is where the session is), and this is the app asking on the same
+/// beat. The two do not have to agree exactly — an ask the backend is not ready for is a flag it will
+/// answer on the next pass — but a page that asked on its interval instead would sit with two blank
+/// cards on it for five seconds, which is the wait this exists to remove.
+const PRIME: Duration = Duration::from_secs(1);
+
 /// Which of the app's three pages is up.
 ///
 /// Three and not one, because a board can be pointed at more than one machine and "which one am I
@@ -422,15 +433,36 @@ impl NasMonitor {
     /// an answer that arrived between two ticks is on screen at the next one, and the *ask* is on the
     /// interval — and only while the monitoring page is up. A look is a network round trip to another
     /// machine, and a page nobody is on has no business opening sessions to it.
+    ///
+    /// The one thing asked for off the interval is a reading with no CPU in it, which is what a machine's
+    /// first look comes back with and what [`PRIME`] is for: the card would otherwise be a dash until the
+    /// next look five seconds later, and the machine it is about is answering the whole time. See
+    /// [`PRIME`], and the backend's note on the second look it takes for the same reason.
     pub fn tick(&mut self, now: Instant) {
         self.pull();
+
+        // On the list the same tick has a second job: keeping the rows' statuses current. That is a check
+        // — a socket per machine, not a session — and it is asked for by the page that draws the answers,
+        // which is what stops it: leaving this screen stops the ticks, and the checks with them.
+        if self.screen == Screen::List {
+            let _ = self.board.nas().check();
+        }
 
         if self.screen != Screen::Monitor {
             return;
         }
 
+        // What this app has to show decides how soon to ask again: the interval once there is a reading
+        // with rates in it, the priming beat while there is not. Asking for a look the backend is not
+        // ready to take costs nothing — it is a flag and a wake, and the look happens when it is due.
+        let spacing = if self.reading.cpu.is_some() {
+            self.interval()
+        } else {
+            PRIME
+        };
+
         let due = match self.asked {
-            Some(asked) => now.duration_since(asked) >= self.interval(),
+            Some(asked) => now.duration_since(asked) >= spacing,
             None => true,
         };
 
@@ -707,33 +739,15 @@ impl NasMonitor {
         words: &Words,
     ) -> Element<'_, Message> {
         let inks = style::status_ink(theme);
-        let reading = self.seen(&device.host);
 
-        let dot = match reading.map(|reading| &reading.status) {
-            Some(NasStatus::Online) => inks.online(),
-            Some(NasStatus::Connecting) => inks.waiting(),
-            Some(NasStatus::Offline(_)) => inks.offline(),
-            _ => muted,
-        };
+        // What is known about it, from the two things that know anything: a *look* — which this session
+        // has made at the machines somebody has opened, and which says whether the session worked and why
+        // not — and a *check*, which every machine gets while this list is up and which says only whether
+        // the board can reach its port. Which of the two answers is [`device_status`]'s business.
+        let known = self.seen(&device.host).map(|reading| &reading.status);
+        let reached = self.board.nas().answering(&device.host);
 
-        let stale = reading
-            .and_then(NasReading::age)
-            .is_some_and(|age| age > device.interval() * 2);
-
-        // What is known about it — which, for a row nobody has opened, is *nothing*: a row that borrowed
-        // the last look's status would be a row claiming a machine this session never reached is fine.
-        let note = match reading {
-            Some(reading) => match &reading.status {
-                NasStatus::Online => reading
-                    .age()
-                    .map(|age| format::age(age, words.language))
-                    .unwrap_or_default(),
-                NasStatus::Connecting => String::from(words.connecting),
-                NasStatus::Offline(fault) => String::from(words.fault(*fault)),
-                NasStatus::Unconfigured => String::new(),
-            },
-            None => String::from(words.not_looked),
-        };
+        let (dot, note) = device_status(known, reached, inks, muted, words);
 
         button(
             Row::with_children(vec![
@@ -745,9 +759,11 @@ impl NasMonitor {
                 Space::new().width(Length::Fixed(style::CELL_PAD)).into(),
                 Column::with_children(vec![
                     text(device.host.clone()).size(sizes.text).color(ink).into(),
+                    // The word is drawn in the dot's ink: green for a machine that answered, red for one
+                    // that did not. One decision said twice, which is why the two are picked together.
                     text(format!("{} · {note}", device.user))
                         .size(sizes.small)
-                        .color(inks.age(stale))
+                        .color(dot)
                         .into(),
                 ])
                 .spacing(1.0)
@@ -1024,7 +1040,7 @@ impl NasMonitor {
         let cpu_card = card(
             words.cpu,
             cpu.map(|cpu| format!("{:.0}%", cpu.usage_percent))
-                .unwrap_or_else(|| String::from("—")),
+                .unwrap_or_else(|| format::NOTHING.to_string()),
             cpu.and_then(|cpu| cpu.temperature_c)
                 .map(|c| format!("{} {}", words.temperature, format::temperature(c)))
                 .unwrap_or_default(),
@@ -1040,7 +1056,7 @@ impl NasMonitor {
             words.memory,
             memory
                 .map(|memory| format!("{:.0}%", memory.used_percent()))
-                .unwrap_or_else(|| String::from("—")),
+                .unwrap_or_else(|| format::NOTHING.to_string()),
             memory
                 .map(|memory| {
                     format!(
@@ -1067,7 +1083,7 @@ impl NasMonitor {
             words.network,
             network
                 .map(|network| format::rate(network.received_per_sec))
-                .unwrap_or_else(|| String::from("—")),
+                .unwrap_or_else(|| format::NOTHING.to_string()),
             network
                 .map(|network| {
                     format!(
@@ -1119,7 +1135,7 @@ impl NasMonitor {
         let storage_card = card(
             words.storage,
             if disks.is_empty() {
-                String::from("—")
+                format::NOTHING.to_string()
             } else {
                 format::bytes(capacity)
             },
@@ -1144,7 +1160,7 @@ impl NasMonitor {
             words.disk_busy,
             busiest
                 .map(|disk| format!("{:.0}%", disk.busy_percent))
-                .unwrap_or_else(|| String::from("—")),
+                .unwrap_or_else(|| format::NOTHING.to_string()),
             busiest.map(|disk| disk.device.clone()).unwrap_or_default(),
             busiest.map(|disk| disk.busy_percent / 100.0),
             style::busy(),
@@ -1190,19 +1206,20 @@ impl NasMonitor {
                 .collect(),
         ));
 
+        // The room the identity column has, which both of its lines are cut to: see [`identity_room`]
+        // for the arithmetic and [`format::fit`] for the cutting. Read once for the whole table, the
+        // column being the same width on every row.
+        let room = identity_room(sizes);
+
         for disk in &self.reading.disks {
             // The identity cell is two lines: the NAS's own word for what the disk is for, and under it
             // the kernel's name and the model. The model is what makes this cell wide, and a column of
             // its own would take the width of every other column put together — so it goes *under* the
             // use rather than beside it, which is what the eye reads anyway.
             let identity: Element<'_, Message> = Column::with_children(vec![
-                cell(&disk.purpose, sizes.text, ink),
+                cell(&format::fit(&disk.purpose, room, sizes.text), sizes.text, ink),
                 cell(
-                    &format!(
-                        "{} · {}",
-                        disk.device,
-                        format::shorten(&disk.model, MODEL_CHARS)
-                    ),
+                    &identity_detail(&disk.device, &disk.model, room, sizes.small),
                     sizes.small,
                     muted,
                 ),
@@ -1215,7 +1232,7 @@ impl NasMonitor {
                         &disk
                             .size_bytes
                             .map(format::bytes)
-                            .unwrap_or_else(|| String::from("—")),
+                            .unwrap_or_else(|| format::NOTHING.to_string()),
                         sizes.text,
                         ink,
                     ),
@@ -1223,7 +1240,7 @@ impl NasMonitor {
                         &disk
                             .temperature_c
                             .map(format::temperature)
-                            .unwrap_or_else(|| String::from("—")),
+                            .unwrap_or_else(|| format::NOTHING.to_string()),
                         sizes.text,
                         ink,
                     ),
@@ -1337,6 +1354,43 @@ impl NasMonitor {
     }
 }
 
+/// What a row of the list says about a machine: the ink of its dot and the word beside it.
+///
+/// The two places an answer can come from, and which of them wins, decided in one place because they are
+/// one decision. A *check* says whether the machine is there *now* — a socket to its SSH port, opened by
+/// the backend while this page is up — and a *reading* says whether a session with it worked, which is
+/// older but knows more. So:
+///
+/// - a session that failed is what the row says, because a port that answers is not a login that works: a
+///   machine whose password was changed is up, and 在线 about it would hide the only thing to fix;
+/// - a reading that arrived is said as 在线, but a check that disagrees is newer and takes the row;
+/// - and a machine nobody has looked at is what the checks are for — which of these boxes is there,
+///   answerable without opening a session to each of them.
+///
+/// `None` from the check is "no answer yet", which is 检测中… and not 离线: a machine that has not been
+/// knocked on is not a machine that did not answer.
+fn device_status(
+    known: Option<&NasStatus>,
+    reached: Option<bool>,
+    inks: style::StatusInk,
+    muted: Color,
+    words: &Words,
+) -> (Color, String) {
+    match known {
+        Some(NasStatus::Offline(fault)) => (inks.offline(), String::from(words.fault(*fault))),
+        Some(NasStatus::Connecting) => (inks.waiting(), String::from(words.connecting)),
+        Some(_) => match reached {
+            Some(false) => (inks.offline(), String::from(words.offline)),
+            _ => (inks.online(), String::from(words.online)),
+        },
+        None => match reached {
+            Some(true) => (inks.online(), String::from(words.online)),
+            Some(false) => (inks.offline(), String::from(words.offline)),
+            None => (muted, String::from(words.checking)),
+        },
+    }
+}
+
 /// The disk table's columns, in multiples of the body text: `None` for the one that takes what is
 /// left, which is the disks' identity.
 ///
@@ -1352,9 +1406,43 @@ const DISK_WIDTHS: [Option<f32>; 6] = [
     Some(3.9),
 ];
 
-/// How much of a drive's model fits under its use, in characters. See [`format::shorten`], which is
-/// what makes this a width rather than a hope.
-const MODEL_CHARS: usize = 16;
+/// The room the disk table's identity column is left with, in pixels.
+///
+/// The five other columns are fixed multiples of the body text ([`DISK_WIDTHS`]) and the gaps between
+/// columns are fixed too, so what the identity gets is the panel less everything else. A function
+/// rather than arithmetic inside the view, because the width test has to compute the *same* number:
+/// a cell drawn to one width and checked against another is exactly how the model came to be cut to
+/// sixteen characters — which at the standard tier are 143 px wide against this column's 138 — and
+/// then arrive on the panel hanging off the edge of it.
+fn identity_room(sizes: style::Sizes) -> f32 {
+    let fixed: f32 = DISK_WIDTHS
+        .iter()
+        .flatten()
+        .map(|share| share * sizes.text)
+        .sum();
+    let gaps = style::CELL_PAD * (DISK_WIDTHS.len() - 1) as f32;
+
+    style::PANEL - style::MARGIN * 2.0 - style::SCROLLBAR - fixed - gaps
+}
+
+/// The second line of a disk's identity: the kernel's name for it, and the model when the column can
+/// hold any of one.
+///
+/// The name always goes in — it is what the row *is*, and it is short — and the model follows as far
+/// as the room goes. Cut as a pair rather than one after the other, so that a line too long for the
+/// column ends in one ellipsis instead of two.
+///
+/// A machine that reports no model at all says so by having nothing to append, which is the ordinary
+/// case for an eMMC — `mmcblk0boot0 · ` is a separator with nothing after it. See [`format::fit`].
+fn identity_detail(device: &str, model: &str, room: f32, size: f32) -> String {
+    let line = if model.is_empty() {
+        device.to_string()
+    } else {
+        format!("{device} · {model}")
+    };
+
+    format::fit(&line, room, size)
+}
 
 /// Which end each column's text sits on: the first column is the row's identity and reads from the
 /// left, and the other five are numbers, which line up on the right so that a column of them can be
@@ -1643,7 +1731,15 @@ struct Words {
     /// The form's heading when it is correcting one.
     edit_device: &'static str,
     no_devices: &'static str,
-    not_looked: &'static str,
+    /// What a row says about a machine: that it answered, that it did not, and what it says while the
+    /// answer has not come back.
+    ///
+    /// Words and not only the dot beside them. The dot is the same decision — green, red, or neither —
+    /// but a colour on its own asks the reader to remember which way round it goes, and this list is read
+    /// from across a room. See [`NasBackend::answering`], which is where the answer comes from.
+    online: &'static str,
+    offline: &'static str,
+    checking: &'static str,
     host: &'static str,
     account: &'static str,
     password: &'static str,
@@ -1689,7 +1785,9 @@ impl Words {
                 add: "添加设备",
                 edit_device: "编辑设备",
                 no_devices: "还没有添加服务器：点下面的按钮填上地址和账号",
-                not_looked: "还没有看过",
+                online: "在线",
+                offline: "离线",
+                checking: "检测中…",
                 host: "地址",
                 account: "账号",
                 password: "密码",
@@ -1729,7 +1827,9 @@ impl Words {
                 add: "Add a server",
                 edit_device: "Edit server",
                 no_devices: "No servers yet: use the button below to add an address and an account",
-                not_looked: "not looked at yet",
+                online: "online",
+                offline: "offline",
+                checking: "checking…",
                 host: "Address",
                 account: "Account",
                 password: "Password",
@@ -1790,6 +1890,8 @@ impl Words {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pomelo_hal::sim::SimNas;
+    use pomelo_hal::traits::NasBackend;
 
     /// One machine, as the form would have written it.
     fn credentials(host: &str) -> NasCredentials {
@@ -1807,6 +1909,36 @@ mod tests {
     fn monitor() -> NasMonitor {
         let board = Arc::new(Board::simulated());
         board.nas().remember(&credentials("192.168.1.10")).unwrap();
+
+        NasMonitor::new(board)
+    }
+
+    /// A board told about one machine that is *not* there: the simulator switched off, so that both of its
+    /// answers are failures — the look cannot connect and the list's check cannot reach the port.
+    ///
+    /// Written out at length because a board is a composition root's decision and a test is a composition
+    /// root: there is no `Board::simulated` with one backend chosen, and the one that has to be chosen here
+    /// is the NAS's. See [`pomelo_hal::sim::SimNas::unreachable`].
+    fn monitor_of_a_machine_that_is_off() -> NasMonitor {
+        use pomelo_hal::sim::{
+            SimAudio, SimImu, SimInput, SimMic, SimPower, SimStorage, SimSystem, SimWeb, SimWifi,
+        };
+
+        let mut nas = SimNas::unreachable();
+        nas.remember(&credentials("192.168.1.10")).unwrap();
+
+        let board = Arc::new(Board::from_backends(
+            Box::new(SimPower::new()),
+            Box::new(SimWifi::new()),
+            Box::new(SimAudio::new()),
+            Box::new(SimMic::new()),
+            Box::new(SimImu::new()),
+            Box::new(SimInput::new()),
+            Box::new(SimStorage::new()),
+            Box::new(SimWeb::new()),
+            Box::new(SimSystem::new()),
+            Box::new(nas),
+        ));
 
         NasMonitor::new(board)
     }
@@ -1857,38 +1989,163 @@ mod tests {
     }
 
     /// The page draws from a reading, and a reading arrives from the backend rather than from a frame:
-    /// the app pulls on every tick and asks only on the interval.
+    /// the app pulls on every tick, asks on the interval — and on the priming beat while the reading has
+    /// no rates in it, which is the one thing asked for off the interval. See [`PRIME`].
     #[test]
     fn a_tick_pulls_every_time_and_asks_on_the_interval() {
         let mut monitor = monitor();
         monitor.update(Message::Open(0));
 
-        // A tick inside the interval pulls and does not ask again: one look per interval, not one per
-        // frame, which is the whole of why the app has an `asked` at all.
+        // A machine's first look has no rates in it, so the app is on its priming beat: a tick inside
+        // *that* pulls and does not ask again, which is the whole of why the app has an `asked` at all.
+        assert!(monitor.reading().cpu.is_none(), "one look cannot know the CPU");
         let start = monitor.asked.unwrap();
-        monitor.tick(start + Duration::from_secs(1));
+        monitor.tick(start + Duration::from_millis(500));
 
-        assert_eq!(monitor.asked, Some(start), "no second look inside the interval");
+        assert_eq!(
+            monitor.asked,
+            Some(start),
+            "no second look inside the priming beat"
+        );
 
-        // And once the interval is up, it asks.
-        monitor.tick(start + Duration::from_secs(6));
+        // A second later it asks for the second look — the one with the rates in it. The pull is the
+        // *next* tick, because this tick's ask is answered after it.
+        monitor.tick(start + PRIME);
 
-        assert_ne!(monitor.asked, Some(start), "a look when the interval is up");
+        assert_ne!(monitor.asked, Some(start), "the second look is asked for");
+
+        let second = monitor.asked.unwrap();
+        monitor.tick(second + Duration::from_millis(100));
+
+        assert!(
+            monitor.reading().cpu.is_some(),
+            "and the second look is what brings the CPU back, off the priming beat"
+        );
+
+        // From there the interval takes over: a tick inside it pulls and does not ask.
+        monitor.tick(second + Duration::from_secs(1));
+
+        assert_eq!(monitor.asked, Some(second), "no second look inside the interval");
+
+        // And once the interval is up, it asks — and what it has on screen has an age, because a rate
+        // that arrived five seconds ago is five seconds old.
+        monitor.tick(second + Duration::from_secs(6));
+
+        assert_ne!(monitor.asked, Some(second), "a look when the interval is up");
         assert!(monitor.reading().age().is_some());
 
         let _ = monitor.view();
     }
 
-    /// A tick on the list asks for nothing: a look is a network round trip to another machine, and a
-    /// page nobody is on has no business opening sessions to it.
+    /// A tick on the list asks for the machines to be *checked* and never for a look: a look is a session
+    /// with one machine, the list is about all of them, and a page that opened a session per row would be
+    /// the reason nobody left it open. See [`NasBackend::check`].
     #[test]
-    fn the_list_does_not_ask_for_a_look() {
+    fn the_list_checks_the_machines_and_never_looks_at_one() {
         let mut monitor = monitor();
         let start = monitor.asked.unwrap();
 
+        // What the rows are drawn from: the checks. A machine the simulator has been told about answers
+        // them, and one it has never heard of has nothing to say — which is not the same as "down".
+        assert_eq!(monitor.board.nas().answering("192.168.1.10"), Some(true));
+        assert_eq!(monitor.board.nas().answering("10.0.0.1"), None);
+
         monitor.tick(start + Duration::from_secs(600));
 
-        assert_eq!(monitor.asked, Some(start), "the list's clock does not start");
+        assert_eq!(
+            monitor.asked,
+            Some(start),
+            "the list does not start the look's clock"
+        );
+        assert_eq!(
+            monitor.reading().status,
+            NasStatus::Connecting,
+            "and nothing was looked at: the machine nobody has opened is still waiting for its first look"
+        );
+        let _ = monitor.view();
+
+        // A machine that is switched off answers neither question: the check finds no port, and a look at
+        // it fails to connect.
+        let mut off = monitor_of_a_machine_that_is_off();
+
+        assert_eq!(off.board.nas().answering("192.168.1.10"), Some(false));
+
+        off.update(Message::Open(0));
+
+        assert_eq!(
+            off.reading().status,
+            NasStatus::Offline(NasFault::Unreachable)
+        );
+
+        // And back on the list the row it goes to says so, in red: the reading is what is known about a
+        // machine this session has *opened*, and it outlives the page that opened it.
+        off.update(Message::Back);
+
+        assert_eq!(off.screen(), Screen::List);
+        assert!(off.seen("192.168.1.10").is_some());
+        let _ = off.view();
+    }
+
+    /// What a row says about a machine, in every case a list has to get right: one that is there, one that
+    /// is not, one whose *login* is what is wrong with it, and one nobody has knocked on yet.
+    ///
+    /// See [`device_status`], which is the decision this is the test of — the reading and the check say
+    /// different things and one of them has to win.
+    #[test]
+    fn a_row_says_whether_the_machine_is_there() {
+        let inks = style::status_ink(ThemeMode::Dark);
+        let muted = style::muted(ThemeMode::Dark);
+        let words = Words::of(Language::Chinese);
+
+        let status = |known: Option<&NasStatus>, reached: Option<bool>| {
+            device_status(known, reached, inks, muted, &words)
+        };
+
+        // Nobody has looked at it, so the check is all there is — and its two answers are the two words.
+        assert_eq!(
+            status(None, Some(true)),
+            (inks.online(), words.online.to_string())
+        );
+        assert_eq!(
+            status(None, Some(false)),
+            (inks.offline(), words.offline.to_string())
+        );
+
+        // Before the first check has come back it is 检测中…, which is not 离线: a machine nobody has
+        // knocked on is not a machine that did not answer.
+        assert_eq!(status(None, None), (muted, words.checking.to_string()));
+
+        // A reading that arrived says the machine answered *when it was taken* — and it stands as the
+        // answer until a check disagrees with it, a check being about now.
+        assert_eq!(status(Some(&NasStatus::Online), None).1, words.online);
+        assert_eq!(status(Some(&NasStatus::Online), Some(true)).1, words.online);
+        assert_eq!(status(Some(&NasStatus::Online), Some(false)).1, words.offline);
+
+        // A session that failed says more than a port that answered, whatever the port says: a machine
+        // whose password was changed is up, and the row has to be the thing somebody has to fix.
+        let wrong_password = NasStatus::Offline(NasFault::Authentication);
+
+        assert_eq!(
+            status(Some(&wrong_password), Some(true)),
+            (inks.offline(), words.authentication.to_string())
+        );
+        assert_eq!(status(Some(&wrong_password), Some(false)).1, words.authentication);
+
+        // And a session still coming up is its own state, in the ink that is neither answer.
+        assert_eq!(
+            status(Some(&NasStatus::Connecting), Some(true)),
+            (inks.waiting(), words.connecting.to_string())
+        );
+
+        // Every one of those words is in both languages and none of them is the same as another, which is
+        // what a list of one-word answers needs to be worth reading at all.
+        for language in [Language::Chinese, Language::English] {
+            let words = Words::of(language);
+
+            assert_ne!(words.online, words.offline, "{language:?}");
+            assert_ne!(words.online, words.checking, "{language:?}");
+            assert_ne!(words.offline, words.checking, "{language:?}");
+        }
     }
 
     /// Typing a machine into the form and saving puts it in the list, and the fields the form does not
@@ -2061,17 +2318,10 @@ mod tests {
     fn the_columns_fit_the_panel_and_their_heads_fit_in_them() {
         use pomelo_widgets::preferences::FontSizeTier;
 
-        /// How wide `text` is at `size`: one em per full-width character, under two thirds of one per
-        /// narrow one. An estimate, and deliberately pessimistic — see the task viewer's note.
-        ///
-        /// `°` counts as narrow, and it is the reason this clause exists: it is not ASCII and it is not
-        /// a full-width character either, and a `38°C` charged a whole em for its degree sign is a check
-        /// that fails on a temperature that fits.
-        fn width_of(text: &str, size: f32) -> f32 {
-            text.chars()
-                .map(|c| if c.is_ascii() || c == '°' { size * 0.62 } else { size })
-                .sum()
-        }
+        // The width estimate, taken from the code the cells are actually *cut* by rather than written
+        // out again here — see [`format::width_of`], which is where it lives and why. A test that
+        // measured by its own copy of the arithmetic is a test that can pass while the panel clips.
+        use crate::format::width_of;
 
         // The three tiers this table is laid out for, which is not all four of them: at the largest,
         // eight columns of Chinese-labelled numbers do not fit in 480 px whatever the widths are — the
@@ -2111,20 +2361,60 @@ mod tests {
                 }
             }
 
-            // What the fixed columns leave for the disks' identity, with the scrollbar's width taken
-            // off the top because it is taken off the panel: see [`style::SCROLLBAR`].
+            // What the fixed columns leave for the disks' identity, by the page's own arithmetic: the
+            // scrollbar's width is taken off the top because it is taken off the panel, and the gaps
+            // between columns are room the text never gets.
             //
             // The floor is what the column really has to hold: the NAS's own word for the disk — 存储空间 1,
-            // five full-width characters at the small size — and not the model under it, which is as long
-            // as the drive is and is cut to fit instead.
+            // five full-width characters — and not the model under it, which is as long as the drive is.
+            let room = identity_room(sizes);
             let held = width_of("存储空间 1", sizes.text);
-            let fixed: f32 = DISK_WIDTHS.iter().flatten().map(|share| share * sizes.text).sum();
-            let gaps = style::CELL_PAD * (DISK_WIDTHS.len() - 1) as f32;
-            let identity = style::PANEL - style::MARGIN * 2.0 - style::SCROLLBAR - fixed - gaps;
 
             assert!(
-                identity >= held,
-                "{tier:?}: the identity column is left {identity} px for a label that wants {held} px"
+                room >= held,
+                "{tier:?}: the identity column is left {room} px for a label that wants {held} px"
+            );
+
+            // And the two lines that really go in it — the disk's use above, its name and model below —
+            // are *cut* to that room, which is the thing this test exists for. The longest of each is a
+            // real machine's: `mmcblk0boot0` is a kernel name and `WDC WD40EFRX-68N32N0` a model. The
+            // check is on what [`format::fit`] returns, so it is the same cut the panel gets.
+            for (text, size) in [
+                ("系统安装", sizes.text),
+                ("存储空间 1", sizes.text),
+                ("/boot", sizes.text),
+                ("mmcblk0boot0", sizes.small),
+                ("sda · Samsung SSD 870 EVO 500GB", sizes.small),
+                ("mmcblk0boot0 · WDC WD40EFRX-68N32N0", sizes.small),
+            ] {
+                let line = format::fit(text, room, size);
+
+                assert!(
+                    width_of(&line, size) <= room,
+                    "{tier:?}: 「{line}」 needs {} px of a {room} px identity column",
+                    width_of(&line, size)
+                );
+            }
+
+            // The model is still *there* where the column has room for any of one: a column that cut
+            // everything to an ellipsis would pass the check above and tell nobody anything.
+            for (device, model) in [
+                ("sda", "Samsung SSD 870 EVO 500GB"),
+                ("nvme0n1", "WDC WD40EFRX-68N32N0"),
+            ] {
+                let line = identity_detail(device, model, room, sizes.small);
+
+                assert!(
+                    line.contains(" · "),
+                    "{tier:?}: 「{line}」 has the name and none of the model"
+                );
+            }
+
+            // A machine that reports no model — an eMMC, usually — is not left with a separator and
+            // nothing after it.
+            assert_eq!(
+                identity_detail("mmcblk0boot0", "", room, sizes.small),
+                format::fit("mmcblk0boot0", room, sizes.small)
             );
         }
     }

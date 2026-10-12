@@ -47,10 +47,61 @@ use crate::types::{MemoryInfo, NasCpu, NasDisk, NasNetwork, NasReading, NasStatu
 /// meant to whichever version of `util-linux` printed it, and `-P` for `KEY="value"` pairs — because a
 /// drive's model is `Samsung SSD 870 EVO 500GB`, and a parse that reads its columns by position works
 /// until the first drive with three words in its name. See [`lsblk`].
-pub const COMMAND: &str = "for f in uptime stat meminfo net/dev diskstats; do echo \"=== $f\"; cat /proc/$f; \
+///
+/// A macro rather than a constant because it is used twice: see [`COMMAND_TWICE`].
+macro_rules! command {
+    () => {
+        "for f in uptime stat meminfo net/dev diskstats; do echo \"=== $f\"; cat /proc/$f; \
 done; echo \"=== hwmon\"; for h in /sys/class/hwmon/hwmon*; do echo \"-- $(cat $h/name 2>/dev/null)\"; \
 cat $h/temp1_input 2>/dev/null; done; echo \"=== lsblk\"; \
-lsblk -b -P -o NAME,SIZE,TYPE,MODEL,MOUNTPOINT 2>/dev/null";
+lsblk -b -P -o NAME,SIZE,TYPE,MODEL,MOUNTPOINT 2>/dev/null"
+    };
+}
+
+pub const COMMAND: &str = command!();
+
+/// The same command twice on one connection, a second apart — what a machine's *first* look asks for.
+///
+/// A rate on this page is a difference of two looks, and a machine nobody has looked at yet has none: the
+/// CPU and the network would be blank and the disks at zero until a second look, which is a whole connect,
+/// key exchange and login away — seconds of nothing on the page somebody just opened. Running the command
+/// twice costs one `sleep` and one more `cat`, and the connection is already up.
+///
+/// The two rounds print the *same* markers, so both halves are in the shape [`Facts::parse`] already
+/// reads, and where one ends and the other begins is [`split_pair`]'s business.
+pub const COMMAND_TWICE: &str = concat!(command!(), "; sleep 1; ", command!());
+
+/// The uptime a *round* of a doubled look reports, from that round's text alone.
+///
+/// What a rate is divided by, in the one case the board's own clock cannot answer it: the two rounds of a
+/// doubled look arrive in the same burst, so when the bytes got here says nothing about when the counters
+/// were read — while the machine's own uptime is exactly how far apart its two readings were. `None` for
+/// text that does not begin with the uptime section, which is a round this board cannot date.
+///
+/// See [`COMMAND_TWICE`], and [`split_pair`], which is what makes a round a thing you can hold.
+pub fn round_uptime(round: &str) -> Option<Duration> {
+    let mut lines = round.lines();
+
+    let text = lines
+        .find(|line| line.starts_with("=== uptime"))
+        .and_then(|_| lines.next())?;
+
+    uptime(text)
+}
+
+/// The two rounds of a doubled look, or `None` if this is not one.
+///
+/// Split where the *second* round begins, which is the second `=== uptime` — the first thing the command
+/// prints, and so the first thing each round prints. Both halves come out with their sections in the
+/// order the parse wants them.
+pub fn split_pair(text: &str) -> Option<(&str, &str)> {
+    const FIRST_MARKER: &str = "=== uptime";
+
+    let first = text.find(FIRST_MARKER)?;
+    let second = first + FIRST_MARKER.len() + text[first + FIRST_MARKER.len()..].find(FIRST_MARKER)?;
+
+    Some((&text[first..second], &text[second..]))
+}
 
 /// The CPU's time counters, as `/proc/stat` keeps them since boot.
 ///
@@ -781,6 +832,69 @@ NAME=\"nvme0n1\" SIZE=\"2000398934016\" TYPE=\"disk\" MODEL=\"Samsung SSD 980 PR
         assert_eq!(purposes, ["系统安装", "存储空间 1", ""]);
     }
 
+    /// The same machine a while later, as the next look would find it: the counters have moved and the
+    /// machine is a second older, which is the clock a doubled look's two samples are measured against.
+    fn later() -> String {
+        SAMPLE
+            .replace("147212.66", "147213.66") // a second of uptime
+            .replace("8192000000", "8202472960") // +10 MiB received
+            .replace("1234567890", "1236667890") // +2 MiB sent
+            .replace(
+                "cpu  123456 789 45678 9876543",
+                "cpu  173456 789 45678 9881543",
+            )
+            .replace("12345678 98765", "13345678 98765")
+            .replace("0 34567 144444", "0 39567 144444")
+    }
+
+    /// A doubled look is two looks: the two rounds of the command split apart, and a sampler fed one after
+    /// the other has the rates. Which is what makes *one* connection enough for a machine's first reading,
+    /// where two connections are what a rate used to cost. See [`COMMAND_TWICE`] and [`split_pair`].
+    #[test]
+    fn a_doubled_look_is_two_looks() {
+        // One round is not a pair, and neither is nothing at all.
+        assert!(split_pair(SAMPLE).is_none());
+        assert!(split_pair("").is_none());
+
+        let doubled = format!("{SAMPLE}{}", later());
+        let (first, second) = split_pair(&doubled).expect("two rounds");
+
+        assert_eq!(first.matches("=== uptime").count(), 1, "one round in each half");
+        assert_eq!(second.matches("=== uptime").count(), 1);
+        assert!(
+            first.starts_with("=== uptime") && second.starts_with("=== uptime"),
+            "and each half starts at its own first marker"
+        );
+
+        // Each round can be dated by the machine's own clock, which is what the gap between the two samples
+        // is: the board's clock cannot tell them apart, because both arrive in one burst.
+        assert_eq!(
+            round_uptime(first),
+            Some(Duration::from_secs_f64(147212.66))
+        );
+        assert!(round_uptime(second).unwrap() > round_uptime(first).unwrap());
+        assert_eq!(round_uptime(""), None, "and a round with no uptime has no date");
+
+        // And each half parses on its own: the first is the facts, the second is the facts with the rates
+        // against them — the same pair the two-look test above gets from two separate commands.
+        let mut sampler = Sampler::new();
+        let at = Instant::now();
+
+        let facts = sampler.reading(first, at);
+
+        assert!(facts.cpu.is_none(), "one round cannot know how busy the CPU is");
+        assert_eq!(facts.disks.len(), 3);
+
+        let with_rates = sampler.reading(second, at + Duration::from_secs(1));
+
+        assert!(
+            with_rates.cpu.is_some(),
+            "and the second round is what brings the rates"
+        );
+        assert!(with_rates.network.is_some());
+        assert!(with_rates.disks[0].read_per_sec > 0);
+    }
+
     /// Two looks make the rates: the difference between the counters, over the time between the looks.
     #[test]
     fn two_looks_make_the_rates() {
@@ -799,15 +913,7 @@ NAME=\"nvme0n1\" SIZE=\"2000398934016\" TYPE=\"disk\" MODEL=\"Samsung SSD 980 PR
         assert_eq!(first.uptime, Some(Duration::from_secs_f64(147212.66)));
 
         // The second, ten seconds later: the same machine with more counters on it.
-        let later = SAMPLE
-            .replace("8192000000", "8202472960") // +10 MiB received
-            .replace("1234567890", "1236667890") // +2 MiB sent
-            .replace(
-                "cpu  123456 789 45678 9876543",
-                "cpu  173456 789 45678 9881543",
-            )
-            .replace("12345678 98765", "13345678 98765")
-            .replace("0 34567 144444", "0 39567 144444");
+        let later = later();
 
         let second = sampler.reading(&later, start + Duration::from_secs(10));
 
