@@ -1,4 +1,4 @@
-//! The NAS on the network beside this board.
+//! The machines on the network beside this board.
 
 use crate::error::HalError;
 use crate::nas_credentials::NasCredentials;
@@ -22,9 +22,9 @@ use crate::types::NasReading;
 /// use, and it matters more here than anywhere else: the day the NAS is asleep, the panel keeps
 /// drawing (an old reading, and a line saying how old) instead of stopping.
 ///
-/// # The association is kept like a Wi-Fi network's
+/// # The associations are kept like Wi-Fi networks'
 ///
-/// [`NasBackend::remember`] writes it down and [`NasBackend::watching`] reads it back, which is
+/// [`NasBackend::devices`] reads them back and [`NasBackend::remember`] writes one down, which is
 /// [`WifiBackend`][crate::traits::WifiBackend]'s pair of the same names doing the same job — "this box
 /// reaches that machine, and here is how". The file *shape* is shared too (see
 /// [`crate::nas_credentials`]), and what is deliberately not shared is who touches it: an app asks
@@ -40,25 +40,48 @@ use crate::types::NasReading;
 /// Both are answers to "ask that machine for its numbers", and an app written against either would
 /// have had to be rewritten for the other. An app written against `NasBackend` is not.
 pub trait NasBackend: Send + Sync {
-    /// The NAS this board is watching, or `None` if it is watching nothing.
+    /// Every machine this board has been told about, in the order it was told about them.
     ///
-    /// Read from where it was written down rather than cached, like the Wi-Fi credentials: a board
-    /// that has been told to watch a machine says so, and one that never has says that instead.
+    /// A list rather than one, because one board can watch more than one box: the app draws this and a
+    /// person picks from it. Read from where they were written down rather than cached, like the Wi-Fi
+    /// credentials — a board that has been told about a machine says so. A board that has never been
+    /// told about any answers an empty list, which is the same state as [`NasStatus::Unconfigured`]
+    /// and not a failure.
+    ///
+    /// [`NasStatus::Unconfigured`]: crate::types::NasStatus::Unconfigured
+    fn devices(&self) -> Vec<NasCredentials>;
+
+    /// The machine this board is *looking at*, or `None` if the list is empty.
+    ///
+    /// One of [`NasBackend::devices`], once one of them has been chosen — which is what
+    /// [`NasBackend::remember`] does, and what a person does by picking a row. Which one is *not*
+    /// written down: the choice is made again each time somebody opens the page, and a board that
+    /// watched nothing until then is what the start-and-poll note above describes anyway.
     fn watching(&self) -> Option<NasCredentials>;
 
-    /// Points this board at a NAS, and writes it down.
+    /// Adds a machine to the list, or updates the one already there, and watches it.
+    ///
+    /// "Updates the one already there" is by host: saving the same address twice is one device whose
+    /// details were corrected, not two devices one of which is a mistake.
     ///
     /// Returns whatever the platform said if it cannot watch anything at all — a board with no SSH
     /// client in its image being the honest case, and one the app has to be able to say out loud
     /// rather than showing a machine that never answers.
     ///
-    /// Pointing it at a different NAS drops whatever session the old one had and forgets the reading
+    /// Watching a *different* machine drops whatever session the old one had and forgets the reading
     /// with it, because a number from the old machine drawn under the new machine's name is worse than
     /// no number at all.
     fn remember(&mut self, credentials: &NasCredentials) -> Result<(), HalError>;
 
-    /// Forgets the NAS this board was watching. Already watching nothing is `Ok(())`.
-    fn forget(&mut self) -> Result<(), HalError>;
+    /// Drops `host` from the list. A host that is not in it is `Ok(())`.
+    ///
+    /// Dropping the machine being watched leaves the board watching nothing: the next
+    /// [`NasBackend::watching`] answers `None` and [`NasBackend::reading`] says
+    /// [`NasStatus::Unconfigured`] — a board whose list ran out, rather than one whose machine went
+    /// wrong.
+    ///
+    /// [`NasStatus::Unconfigured`]: crate::types::NasStatus::Unconfigured
+    fn forget(&mut self, host: &str) -> Result<(), HalError>;
 
     /// Asks for a fresh reading. Returns at once; the answer arrives when it arrives.
     ///

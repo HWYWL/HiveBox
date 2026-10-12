@@ -145,6 +145,35 @@ pub fn age(duration: Duration, language: Language) -> String {
     }
 }
 
+/// How many drives the machine has, as the words for them: `3 块磁盘`, `1 disk`, `4 disks`.
+///
+/// The one string on this page that changes *grammar* with the language rather than units: Chinese counts
+/// with a measure word and does not inflect, English pluralizes, and `1 disks` is the kind of thing a
+/// reader notices before anything else on the page. Here for the reason [`uptime`] is — see its note.
+pub fn disks(count: usize, language: Language) -> String {
+    match language {
+        Language::Chinese => format!("{count} 块磁盘"),
+        Language::English => match count {
+            1 => String::from("1 disk"),
+            _ => format!("{count} disks"),
+        },
+    }
+}
+
+/// How many machines the board has been told about: `3 台服务器`, `1 server`, `4 servers`.
+///
+/// The same shape as [`disks`] and for the same reason — see its note — with the noun this app is
+/// actually about.
+pub fn machines(count: usize, language: Language) -> String {
+    match language {
+        Language::Chinese => format!("{count} 台服务器"),
+        Language::English => match count {
+            1 => String::from("1 server"),
+            _ => format!("{count} servers"),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,6 +229,22 @@ mod tests {
             uptime(Duration::from_secs(17 * 86_400 + 4 * 3_600 + 21 * 60), en),
             "17d4h"
         );
+    }
+
+    /// A drive count is counted the language's way: a measure word in Chinese, singular and plural in
+    /// English. The singular is the case worth a test, because it is the one a count of one gets wrong.
+    #[test]
+    fn a_drive_count_counts_the_languages_way() {
+        assert_eq!(disks(1, Language::Chinese), "1 块磁盘");
+        assert_eq!(disks(4, Language::Chinese), "4 块磁盘");
+
+        assert_eq!(disks(1, Language::English), "1 disk");
+        assert_eq!(disks(4, Language::English), "4 disks");
+
+        assert_eq!(machines(1, Language::Chinese), "1 台服务器");
+        assert_eq!(machines(3, Language::Chinese), "3 台服务器");
+        assert_eq!(machines(1, Language::English), "1 server");
+        assert_eq!(machines(3, Language::English), "3 servers");
     }
 
     /// An age never rounds *up*, because rounding up would understate a fresh reading.

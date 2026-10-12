@@ -20,12 +20,29 @@ pub const PANEL: f32 = 480.0;
 /// The room between the page and the panel, and between the parts of the page.
 pub const MARGIN: f32 = 14.0;
 pub const GAP: f32 = 10.0;
+
+/// How far the header's content stays from the panel's left and right edges.
+///
+/// The panel is a square with rounded corners and the header is the page's topmost row, so its two
+/// ends land in the cut: the machine's name on the left, the uptime on the right, both within a few
+/// pixels of the glass. The launcher's status bar is that same row over those same corners and keeps
+/// `GUTTER + 7` clear — see `app-launcher`'s `STATUS_INSET`, where the number is reasoned out — and an
+/// uptime read against the bezel is worth the same room here. It is wider than [`MARGIN`], so the
+/// header is inset a little past the cards under it; the launcher's bar sits past its grid the same way.
+pub const HEADER_INSET: f32 = 27.0;
 /// The room inside a card and inside a table row, on each side of its text.
 pub const CELL_PAD: f32 = 6.0;
 /// What the disk list keeps clear on its right, for its scrollbar: iced paints the bar over the
 /// content's right edge, so the last column has to stop short of it. See the task viewer's table, which
 /// learnt this the hard way.
 pub const SCROLLBAR: f32 = 14.0;
+
+/// The column the form's field labels sit in: `地址`, `账号`, `密码` beside what has been typed.
+///
+/// Wide enough for the longest of the three at the largest tier this page is laid out for, and fixed
+/// so that the three values start at the same place — a label that sized itself would put the address
+/// and the password at different lefts on the same form.
+pub const FIELD_LABEL: f32 = 64.0;
 
 /// Everything the page measures with, for one font tier.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -117,6 +134,19 @@ pub fn network() -> Color {
 
 pub fn disk() -> Color {
     Color::from_rgb8(0xF5, 0xA5, 0x24)
+}
+
+/// The two figures about the disks *as a whole* rather than about one direction of them: how much room
+/// there is, and how hard they are being worked.
+///
+/// Colours of their own rather than [`disk`]'s, because the page has six cards and six colours is the
+/// point of them: a card is told from the one beside it by its colour before its label is read.
+pub fn storage() -> Color {
+    Color::from_rgb8(0x2D, 0xD4, 0xBF)
+}
+
+pub fn busy() -> Color {
+    Color::from_rgb8(0xE8, 0xC5, 0x4A)
 }
 
 /// Whether a machine is there: a green dot when the last look arrived, amber while one is in flight

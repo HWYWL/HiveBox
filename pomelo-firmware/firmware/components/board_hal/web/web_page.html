@@ -695,6 +695,74 @@ textarea.code.wrap { white-space: pre-wrap; word-break: break-word; }
       <button class="btn" id="sysRefresh"><svg class="ic sm"><use href="#i-refresh"/></svg>刷新</button>
       <button class="btn danger" id="rebootBtn"><svg class="ic sm"><use href="#i-power"/></svg>重启设备</button>
     </div>
+    <div class="group">
+      <div class="group-title">服务器监控</div>
+      <div class="card" style="padding:14px">
+        <label class="field">
+          <svg class="ic sm"><use href="#i-link"/></svg>
+          <input id="nasHost" placeholder="服务器的地址，例如 192.168.1.50" autocomplete="off" spellcheck="false">
+        </label>
+        <label class="field" style="margin-top:10px">
+          <svg class="ic sm"><use href="#i-check"/></svg>
+          <input id="nasUser" placeholder="登录账号" autocomplete="off" spellcheck="false">
+        </label>
+        <label class="field" style="margin-top:10px">
+          <svg class="ic sm"><use href="#i-check"/></svg>
+          <input id="nasPassword" type="password" placeholder="密码" autocomplete="off">
+        </label>
+        <div class="bar-actions" style="padding:12px 0 0;margin:0">
+          <button class="btn primary" id="nasSave">添加到监控列表</button>
+          <button class="btn" id="nasForget">清空监控列表</button>
+        </div>
+        <div class="pv-note" style="padding:10px 4px 0;text-align:left" id="nasOut">
+          设备用自带的 SSH 客户端登录服务器读状态，密码只写在设备里，端口默认 22。
+          这里填的每一台都会追加到设备的监控列表里（同一地址再存一次，以最后一次为准）；
+          列表在设备的「服务器监控」应用里看，也可以在那上面增删。要改端口，改这台设备里的
+          /internal/AppData/NAS/nas.conf。
+        </div>
+      </div>
+      <script>
+        // The two buttons are wired here, beside the fields they belong to, rather than in the page's
+        // own script: this is one self-contained block, and it leans on nothing but `api()`, which the
+        // rest of the page uses for every call it makes.
+        const nasOut = document.getElementById("nasOut");
+
+        async function nasSave() {
+          const host = document.getElementById("nasHost").value.trim();
+          const user = document.getElementById("nasUser").value.trim();
+          const password = document.getElementById("nasPassword").value;
+
+          if (!host || !user) {
+            nasOut.textContent = "地址和账号都要填。";
+            return;
+          }
+
+          nasOut.textContent = "正在保存…";
+
+          try {
+            await api("/api/nas/remember", { host: host, user: user, password: password }, "POST");
+            nasOut.textContent = "已加入监控列表。回到设备上的「服务器监控」应用，点这台服务器就开始连接。";
+            document.getElementById("nasPassword").value = "";
+          } catch (error) {
+            nasOut.textContent = "保存失败：" + (error && error.message ? error.message : error);
+          }
+        }
+
+        async function nasForget() {
+          nasOut.textContent = "正在清空…";
+
+          try {
+            await api("/api/nas/forget", {}, "POST");
+            nasOut.textContent = "监控列表已清空，设备上的凭据文件也删掉了。";
+          } catch (error) {
+            nasOut.textContent = "清空失败：" + (error && error.message ? error.message : error);
+          }
+        }
+
+        document.getElementById("nasSave").addEventListener("click", nasSave);
+        document.getElementById("nasForget").addEventListener("click", nasForget);
+      </script>
+    </div>
   </section>
 
   <section id="view-control" hidden>

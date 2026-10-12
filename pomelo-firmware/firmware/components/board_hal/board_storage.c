@@ -317,6 +317,39 @@ esp_err_t hal_storage_write_file(const char *path, const char *data, size_t len)
     return ESP_OK;
 }
 
+esp_err_t hal_storage_append_file(const char *path, const char *data, size_t len)
+{
+    if (path == NULL || data == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t made = make_dirs(path);
+    if (made != ESP_OK) {
+        return made;
+    }
+
+    FILE *file = fopen(path, "ab");
+
+    if (file == NULL) {
+        ESP_LOGE(TAG, "cannot open %s for appending: errno %d", path, errno);
+        return ESP_FAIL;
+    }
+
+    size_t written = fwrite(data, 1, len, file);
+    int    closed = fclose(file);
+
+    /* Both checked, like the write above and for the same reason: a short append is a disk that filled
+     * up and a failed close is data that never reached the flash, and either one leaves the file short
+     * of what the caller believes is in it. */
+    if (written != len || closed != 0) {
+        ESP_LOGE(TAG, "%s: appended %u of %u bytes, close returned %d",
+                 path, (unsigned)written, (unsigned)len, closed);
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
+
 esp_err_t hal_storage_remove_file(const char *path)
 {
     if (path == NULL) {

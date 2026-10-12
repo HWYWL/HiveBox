@@ -22,6 +22,16 @@ crate-type = ["rlib"]
 # those files and then refuse them at the moment of pressing play.
 pomelo-hal = { git = "https://github.com/pomelos-on-sale/pomelo-hal.git", rev = "80af97fdcbe15592b28f8fdbf2047308ad406551", features = ["decode"] }
 
+# SSH, in Rust. Replaces the libssh C library the NAS backend used to link: no C SSH code, no mbedTLS
+# underneath it, and nothing extra in the image beyond RustCrypto.
+#
+# The default feature is `mlkem` (a post-quantum key exchange) and `std` would pull it in again by
+# name, so both are off: this board talks to one NAS on a LAN, and a key exchange it will never
+# negotiate is flash spent on nothing. `ecdsa256` stays because a NAS that offers an ECDSA host key
+# and not an ed25519 one would otherwise be a machine this board cannot look at; ed25519, curve25519
+# and the ciphers/MACs are always compiled in.
+sunset = { version = "0.6", default-features = false, features = ["ecdsa256"] }
+
 [patch."https://github.com/pomelos-on-sale/pomelo-hal.git"]
 pomelo-hal = { path = "../../../pomelo-hal" }
 

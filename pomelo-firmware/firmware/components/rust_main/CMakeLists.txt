@@ -64,3 +64,10 @@ target_link_libraries(${COMPONENT_LIB} INTERFACE ${RUST_LIB})
 # exists, and a copy of it here — over a VFS with no symlinks — would be a second implementation to
 # keep in step.
 target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,--undefined=realpath")
+
+# `poll` is the second of these, and it arrived the same way. The NAS monitor's SSH client
+# (`std::net` in `pomelo-hal-esp32/src/nas.rs`) times out a connection by polling for writability
+# after a non-blocking connect, and the reference that used to drag `poll` into the image was libssh
+# — which the NAS monitor no longer links, now that `sunset` does the session in Rust. Same shape,
+# same answer.
+target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,--undefined=poll")

@@ -57,10 +57,12 @@ pub const CATALOGUE: &[Entry] = &[
         accent: (44, 56, 66),
     },
     Entry {
-        name: "NAS",
-        name_zh: "NAS 监控",
+        name: "Server",
+        name_zh: "服务器监控",
         // The machine beside this one rather than anything in it: a server-in-a-box is what it draws,
-        // and reaching it is what the app is for.
+        // and reaching it is what the app is for. Named for what it is and not for what it usually is:
+        // what it watches is anything that answers SSH, and whether that box is a NAS is the owner's
+        // business rather than this tile's.
         icon: AppIcon::glyph(Icon::DNS),
         accent: (34, 52, 60),
     },

@@ -2009,9 +2009,9 @@ mod tests {
         );
         assert_eq!(
             CATALOGUE[NAS_MONITOR].localized_name(Language::Chinese),
-            "NAS 监控"
+            "服务器监控"
         );
-        assert_eq!(CATALOGUE[NAS_MONITOR].name, "NAS");
+        assert_eq!(CATALOGUE[NAS_MONITOR].name, "Server");
     }
 
     /// The grid's two pages, in the order they are drawn: the four the box is for, then the three that
@@ -2033,7 +2033,7 @@ mod tests {
                 "Settings",
                 "Calculator",
                 "Tasks",
-                "NAS"
+                "Server"
             ]
         );
         assert_eq!(CATALOGUE.len(), 7, "and the seven are all the tiles there are");

@@ -27,6 +27,7 @@ idf_component_register(
         "board_storage.c"
         "board_system.c"
         "board_web.c"
+        "board_socket.c"
     INCLUDE_DIRS "."
     WHOLE_ARCHIVE
     # The management page, as bytes in the image: it has to be there before anything can ask for it,

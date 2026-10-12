@@ -378,6 +378,21 @@ esp_err_t hal_storage_read_file(const char *path, char *out, size_t capacity, si
 esp_err_t hal_storage_write_file(const char *path, const char *data, size_t len);
 
 /**
+ * @brief Append `len` bytes to `path`, creating it and the directories above it when they are not there.
+ *
+ * The same write as `hal_storage_write_file` except that whatever is already in the file stays where
+ * it is. Used by the page's NAS form, whose file is a *list* of machines and whose one entry belongs
+ * after the entries already in it.
+ *
+ * @return
+ *      - ESP_OK on success, with every byte appended and the file closed cleanly
+ *      - ESP_ERR_INVALID_ARG if `path` or `data` is NULL
+ *      - ESP_ERR_INVALID_SIZE if the path is longer than this layer will build
+ *      - ESP_FAIL on a short write, a failed close, or any filesystem error
+ */
+esp_err_t hal_storage_append_file(const char *path, const char *data, size_t len);
+
+/**
  * @brief Remove `path`.
  *
  * @return ESP_OK when it is gone, including when it never existed; ESP_ERR_INVALID_ARG if `path` is

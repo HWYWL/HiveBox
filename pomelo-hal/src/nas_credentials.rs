@@ -10,14 +10,29 @@
 //!
 //! ```text
 //! # /internal/AppData/NAS/nas.conf
-//! [nas]
+//! [[device]]
 //! host = "192.168.1.10"
 //! port = 22
 //! user = "nasstat"
 //! password = "hunter2"
 //! interval_secs = 5
 //! host_key = "ecdsa-sha2-nistp256 AAAAE2VjZHNh…"
+//!
+//! [[device]]
+//! host = "192.168.1.20"
+//! port = 22
+//! user = "nasstat"
+//! password = "hunter2"
+//! interval_secs = 5
 //! ```
+//!
+//! # A list, and the shape it had before it was one
+//!
+//! The file names a **list** of machines, because a board can be pointed at more than one and the app
+//! draws them as a list a person picks from. Before it did, it held a single `[nas]` table, and that
+//! shape is still *read* as a list of one — see [`NasCredentials::parse_devices`] — so that upgrading
+//! the firmware does not cost somebody the machine they had already set up. Everything written from
+//! here on is written in the list's shape.
 //!
 //! # In the clear, and more deliberately than the Wi-Fi password
 //!
@@ -126,32 +141,72 @@ impl NasCredentials {
         toml::from_str::<Document>(text).map(|document| document.nas)
     }
 
-    /// The file's text, ready to write.
+    /// The file's text, ready to write — in the single `[nas]` shape the file had before it held a
+    /// list. What [`NasCredentials::save`] writes is the list's; this is here so that the older shape
+    /// stays readable *and* written, and it is what [`NasCredentials::parse`] is tested against.
     pub fn to_file(&self) -> Result<String, toml::ser::Error> {
         toml::to_string(&Document { nas: self.clone() })
     }
 
-    /// Reads the file under `root`, if there is one.
+    /// Every device the text names, in the order it names them.
     ///
-    /// `Ok(None)` for a board that has never been pointed at a NAS, which is not a failure. A file that
-    /// is *there* and unreadable is one, and comes back as `InvalidData` carrying the reason.
-    pub fn load(root: impl AsRef<Path>) -> io::Result<Option<Self>> {
+    /// Both shapes are read: the `[[device]]` blocks the file holds now, and the single `[nas]` table it
+    /// held before, which is a list of one. Refusing the older shape would cost somebody the machine
+    /// they had already set up, which is the same rule the Wi-Fi file follows for its own downgrades.
+    ///
+    /// A host named twice is *one* device, the later entry winning: two blocks for one machine is what
+    /// the web page's form leaves behind when the same box is saved twice, and a board that watched the
+    /// same machine twice would be a board whose list grew every time somebody pressed save.
+    pub fn parse_devices(text: &str) -> Result<Vec<Self>, toml::de::Error> {
+        let file: File = toml::from_str(text)?;
+
+        let mut devices = file.device;
+        if let Some(one) = file.nas {
+            devices.push(one);
+        }
+
+        Ok(unique(devices))
+    }
+
+    /// The file's text for `devices`, ready to write: one `[[device]]` block each. See
+    /// [`NasCredentials::parse_devices`] for why that shape and what happens to the older one.
+    pub fn file_of_devices(devices: &[Self]) -> Result<String, toml::ser::Error> {
+        toml::to_string(&FileOf { device: devices })
+    }
+
+    /// Every device the file under `root` names, in the order it names them.
+    ///
+    /// An absent file is an empty list and not a failure — a board that has never been pointed at a
+    /// machine. A file that *is* there and unreadable is one, and comes back as `InvalidData` carrying
+    /// the reason.
+    pub fn load_all(root: impl AsRef<Path>) -> io::Result<Vec<Self>> {
         let text = match fs::read_to_string(path(root)) {
             Ok(text) => text,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error),
         };
 
-        Self::parse(&text)
-            .map(Some)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        Self::parse_devices(&text).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
 
-    /// Writes the file under `root`, making the directories on the way.
-    pub fn save(&self, root: impl AsRef<Path>) -> io::Result<()> {
+    /// The first device the file under `root` names, if it names any. [`NasCredentials::load_all`] is
+    /// the whole of it.
+    pub fn load(root: impl AsRef<Path>) -> io::Result<Option<Self>> {
+        Ok(Self::load_all(root)?.into_iter().next())
+    }
+
+    /// Writes `devices` to the file under `root`, making the directories on the way.
+    ///
+    /// Nothing to remember is nothing to write: an empty list removes the file rather than leaving one
+    /// that says nothing, which is the same thing [`NasCredentials::forget`] does and the state a board
+    /// with no devices is in.
+    pub fn save_all(root: impl AsRef<Path>, devices: &[Self]) -> io::Result<()> {
+        if devices.is_empty() {
+            return Self::forget(root);
+        }
+
         let path = path(root);
-        let text = self
-            .to_file()
+        let text = Self::file_of_devices(devices)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
 
         if let Some(parent) = path.parent() {
@@ -159,6 +214,11 @@ impl NasCredentials {
         }
 
         fs::write(path, text)
+    }
+
+    /// Writes this one device to the file under `root`, replacing every device that was there.
+    pub fn save(&self, root: impl AsRef<Path>) -> io::Result<()> {
+        Self::save_all(root, std::slice::from_ref(self))
     }
 
     /// Removes the file under `root`. Not an error if there was nothing to remove.
@@ -173,9 +233,46 @@ impl NasCredentials {
 
 /// The whole file: one table, so that a table this version does not know about is a field this struct
 /// does not have — and `serde` ignores those, which is the whole of what keeps a downgrade working.
+///
+/// This is the shape the file had while it held one machine. It is still read (see [`File`]) and still
+/// written by [`NasCredentials::to_file`], which is what [`NasCredentials::parse`] is a pair with.
 #[derive(Debug, Serialize, Deserialize)]
 struct Document {
     nas: NasCredentials,
+}
+
+/// The whole file as it is written now: one `[[device]]` block per machine.
+#[derive(Debug, Serialize)]
+struct FileOf<'a> {
+    device: &'a [NasCredentials],
+}
+
+/// The whole file as it is read: the list, and the one table the shape before it used.
+///
+/// Both fields optional, because either shape is a file this has to be able to read — and an empty one
+/// is a file that names nothing, which is not an error.
+#[derive(Debug, Deserialize)]
+struct File {
+    #[serde(default)]
+    device: Vec<NasCredentials>,
+    #[serde(default)]
+    nas: Option<NasCredentials>,
+}
+
+/// `devices` with each host kept once: in the order it was first named, holding what it was last given.
+///
+/// See [`NasCredentials::parse_devices`], which is the only caller.
+fn unique(devices: Vec<NasCredentials>) -> Vec<NasCredentials> {
+    let mut kept: Vec<NasCredentials> = Vec::new();
+
+    for device in devices {
+        match kept.iter_mut().find(|held| held.host == device.host) {
+            Some(held) => *held = device,
+            None => kept.push(device),
+        }
+    }
+
+    kept
 }
 
 /// The default port: the one SSH is on unless somebody moved it.
@@ -270,6 +367,85 @@ mod tests {
 
         assert_eq!(read.host, "nas.local");
         assert_eq!(read.user, "nasstat");
+    }
+
+    /// A list of machines is written and read back as one, in the order it was written.
+    #[test]
+    fn a_list_of_devices_survives_a_round_trip() {
+        let devices = vec![
+            credentials(),
+            NasCredentials {
+                host: String::from("192.168.1.20"),
+                ..credentials()
+            },
+        ];
+
+        let text = NasCredentials::file_of_devices(&devices).unwrap();
+
+        assert!(text.contains("[[device]]"), "{text}");
+        assert_eq!(NasCredentials::parse_devices(&text).unwrap(), devices);
+    }
+
+    /// The shape the file had before it held a list is a list of one, so that upgrading the firmware
+    /// does not cost somebody the machine they had already set up.
+    #[test]
+    fn the_one_table_shape_reads_as_a_list_of_one() {
+        let read = NasCredentials::parse_devices(
+            "[nas]\nhost = \"nas.local\"\nuser = \"nasstat\"\npassword = \"hunter2\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].host, "nas.local");
+        assert_eq!(read[0].port, 22, "with the defaults the older shape relied on");
+    }
+
+    /// One machine named twice is one device, and the later entry is the one that was meant: the web
+    /// page's form appends, so a box saved twice is two blocks and the second is the correction.
+    #[test]
+    fn a_host_named_twice_is_one_device_and_the_later_one_wins() {
+        let read = NasCredentials::parse_devices(
+            "[[device]]\nhost = \"nas.local\"\nuser = \"old\"\npassword = \"old\"\n\
+             [[device]]\nhost = \"other.local\"\nuser = \"nasstat\"\n\
+             [[device]]\nhost = \"nas.local\"\nuser = \"new\"\npassword = \"new\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(read.len(), 2, "{read:?}");
+        assert_eq!(read[0].host, "nas.local", "in the place it was first named");
+        assert_eq!(read[0].user, "new", "holding what it was last given");
+        assert_eq!(read[1].host, "other.local");
+    }
+
+    /// Through the filesystem — and nothing to remember is no file rather than an empty one.
+    #[test]
+    fn a_list_of_devices_is_saved_and_loaded() {
+        let root = std::env::temp_dir()
+            .join("pomelo-hal-nas-credentials")
+            .join("list-round-trip");
+        let _ = fs::remove_dir_all(&root);
+
+        let devices = vec![
+            credentials(),
+            NasCredentials {
+                host: String::from("192.168.1.20"),
+                ..credentials()
+            },
+        ];
+
+        NasCredentials::save_all(&root, &devices).unwrap();
+
+        assert_eq!(NasCredentials::load_all(&root).unwrap(), devices);
+        assert_eq!(
+            NasCredentials::load(&root).unwrap(),
+            Some(credentials()),
+            "and the one-device reader takes the first of them"
+        );
+
+        NasCredentials::save_all(&root, &[]).unwrap();
+
+        assert!(!path(&root).exists(), "nothing to remember is no file");
+        assert!(NasCredentials::load_all(&root).unwrap().is_empty());
     }
 
     /// Through the filesystem, not only through the parser — and it went where the constant says.

@@ -25,7 +25,11 @@ enum Answer {
 /// [`NasStatus::Connecting`] between the `watch` and the first answer, exactly as the device's does —
 /// and a first look that carries a host key for somebody to accept.
 pub struct SimNas {
-    credentials: Option<NasCredentials>,
+    /// Every machine this desktop board has been told about, in the order it was told about them.
+    devices: Vec<NasCredentials>,
+    /// The one being looked at, or `None`. A copy rather than an index: the list can be edited under
+    /// it, and what is being watched is a *machine* and not a row — see [`SimNas::watch`].
+    watching: Option<NasCredentials>,
     answer: Answer,
     /// How many looks have arrived, so that the numbers move. A window left open on a simulated NAS
     /// should show a machine doing something rather than a photograph.
@@ -52,11 +56,29 @@ impl SimNas {
     /// A NAS that answers.
     pub fn new() -> Self {
         Self {
-            credentials: None,
+            devices: Vec::new(),
+            watching: None,
             answer: Answer::Data,
             looks: 0,
             reading: NasReading::default(),
         }
+    }
+
+    /// Looks at `device`, or at nothing, dropping whatever the last one said.
+    ///
+    /// Whatever the old machine said is not the new machine's: a reading from somewhere else drawn
+    /// under this machine's name is worse than no reading. Watching nothing is not a failure either —
+    /// it is the board's own state instead, which is [`NasStatus::Unconfigured`].
+    fn watch(&mut self, device: Option<NasCredentials>) {
+        self.watching = device;
+        self.looks = 0;
+        self.reading = NasReading::default();
+
+        self.reading.status = if self.watching.is_some() {
+            NasStatus::Connecting
+        } else {
+            NasStatus::Unconfigured
+        };
     }
 
     /// A NAS that refuses, in the way `fault` says — a machine that is off, a password that is wrong,
@@ -133,7 +155,7 @@ impl SimNas {
             // the key that was agreed on, which is what a real server's would have to be for a reading
             // to arrive at all.
             host_key: Some(
-                self.credentials
+                self.watching
                     .as_ref()
                     .and_then(|credentials| credentials.host_key.clone())
                     .unwrap_or_else(|| String::from(HOST_KEY)),
@@ -149,35 +171,52 @@ impl Default for SimNas {
 }
 
 impl NasBackend for SimNas {
+    fn devices(&self) -> Vec<NasCredentials> {
+        self.devices.clone()
+    }
+
     fn watching(&self) -> Option<NasCredentials> {
-        self.credentials.clone()
+        self.watching.clone()
     }
 
     fn remember(&mut self, credentials: &NasCredentials) -> Result<(), HalError> {
         // Kept and not written anywhere: the desktop has no flash to be remembered in, and what the
         // device writes is its own backend's business — see the trait's note on who touches the file.
-        self.credentials = Some(credentials.clone());
-        self.looks = 0;
+        // By host, like the device's: saving an address twice corrects the device rather than adding a
+        // second one.
+        match self
+            .devices
+            .iter_mut()
+            .find(|held| held.host == credentials.host)
+        {
+            Some(held) => *held = credentials.clone(),
+            None => self.devices.push(credentials.clone()),
+        }
 
-        // Whatever the old machine said is not the new machine's: a reading from somewhere else drawn
-        // under this machine's name is worse than no reading.
-        self.reading = NasReading::default();
-        self.reading.status = NasStatus::Connecting;
+        self.watch(Some(credentials.clone()));
 
         Ok(())
     }
 
-    fn forget(&mut self) -> Result<(), HalError> {
-        self.credentials = None;
-        self.looks = 0;
-        self.reading = NasReading::default();
+    fn forget(&mut self, host: &str) -> Result<(), HalError> {
+        self.devices.retain(|device| device.host != host);
+
+        // Dropping the machine being watched leaves this watching nothing, and the next reading says
+        // so — rather than leaving a reading from a machine the list no longer has.
+        if self
+            .watching
+            .as_ref()
+            .is_some_and(|device| device.host == host)
+        {
+            self.watch(None);
+        }
 
         Ok(())
     }
 
     fn refresh(&mut self) -> Result<(), HalError> {
         // Nothing to look at is a setting, not a failure.
-        if self.credentials.is_none() {
+        if self.watching.is_none() {
             return Ok(());
         }
 
@@ -311,15 +350,16 @@ mod tests {
         assert!(reading.cpu.is_some());
     }
 
-    /// Being told to watch nothing forgets the machine that was there.
+    /// Dropping the machine being watched forgets it, and leaves nothing being watched.
     #[test]
     fn watching_nothing_forgets_the_machine() {
         let mut nas = watching();
         nas.refresh().unwrap();
 
-        nas.forget().unwrap();
+        nas.forget("192.168.1.10").unwrap();
 
         assert!(nas.watching().is_none());
+        assert!(nas.devices().is_empty());
         assert_eq!(nas.reading().status, NasStatus::Unconfigured);
         assert!(nas.reading().disks.is_empty());
 
@@ -348,5 +388,46 @@ mod tests {
             nas.reading().disks.is_empty(),
             "and the previous machine's disks went with it"
         );
+    }
+
+    /// The list holds one entry per host however many times it is saved, the one being watched is the
+    /// one last saved, and dropping it leaves the rest of the list alone.
+    #[test]
+    fn the_device_list_holds_one_entry_per_host() {
+        let mut nas = SimNas::new();
+
+        nas.remember(&credentials("hunter2")).unwrap();
+        nas.remember(&NasCredentials {
+            host: String::from("192.168.1.11"),
+            ..credentials("hunter2")
+        })
+        .unwrap();
+
+        assert_eq!(nas.devices().len(), 2);
+        assert_eq!(
+            nas.watching().unwrap().host,
+            "192.168.1.11",
+            "and the one last saved is the one being watched"
+        );
+
+        // Saving the first address again corrects it rather than adding a third entry.
+        nas.remember(&NasCredentials {
+            password: String::from("corrected"),
+            ..credentials("hunter2")
+        })
+        .unwrap();
+
+        assert_eq!(nas.devices().len(), 2);
+        assert_eq!(nas.devices()[0].password, "corrected");
+        assert_eq!(nas.devices()[0].host, "192.168.1.10", "in the place it was");
+        assert_eq!(nas.watching().unwrap().host, "192.168.1.10");
+
+        // Dropping the one being watched leaves the board watching nothing, with the other still on it.
+        nas.forget("192.168.1.10").unwrap();
+
+        assert_eq!(nas.devices().len(), 1);
+        assert_eq!(nas.devices()[0].host, "192.168.1.11");
+        assert!(nas.watching().is_none());
+        assert_eq!(nas.reading().status, NasStatus::Unconfigured);
     }
 }

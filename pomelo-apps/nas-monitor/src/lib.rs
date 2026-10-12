@@ -1,15 +1,23 @@
-//! The NAS monitor — another computer's numbers, on this panel — **a standard iced program**.
+//! The server monitor — another computer's numbers, on this panel — **a standard iced program**.
 //!
 //! Not a program that owns a loop: [`NasMonitor`] is a state with an `update` and a `view`, and
 //! `main.rs` — a handful of lines — is what runs it in a window. On the board the launcher hosts it like
 //! every other app, and the app cannot tell the difference.
 //!
-//! # What it is looking at
+//! # Three pages, because there is more than one machine
 //!
-//! A machine across the network: a NAS on the same LAN, watched over the board's Wi-Fi so that
+//! The list of machines this board has been told about, a form for adding one — the address, the
+//! account and the password, typed on the panel's own keyboard — and, for whichever row is picked, the
+//! monitoring page itself. A board can be pointed at several boxes, so "which one am I looking at" is a
+//! question the page has to be able to ask: a dashboard with no name on it is a dashboard for whichever
+//! machine happened to be first in a file.
+//!
+//! # What the monitoring page is looking at
+//!
+//! A machine across the network: a server on the same LAN, watched over the board's Wi-Fi so that
 //! "is the box all right" is answerable from the desk rather than from a browser on another machine.
-//! Which is why the page is laid out like the NAS's own dashboard and not like a form: cards for the
-//! things a person checks (the CPU, the memory, the network, the disks), and a table for the disks
+//! Which is why that page is laid out like the server's own dashboard and not like a form: cards for
+//! the things a person checks (the CPU, the memory, the network, the disks), and a table for the disks
 //! themselves.
 //!
 //! # Nothing here knows what SSH is
@@ -39,36 +47,59 @@
 //!
 //! # What is not here yet
 //!
-//! The rings. The NAS's own dashboard draws them and this page draws bars, which is a decision worth
+//! The rings. The server's own dashboard draws them and this page draws bars, which is a decision worth
 //! naming: the settings app's rings live in *its* crate, and a second copy of that drawing code is
 //! exactly what `pomelo-widgets` exists to prevent. Moving it there is a small piece of work for two
-//! apps instead of one, and it is not done. Also not here: the screen that *enters* the address and the
-//! password. The app reads what the backend was given ([`NasMonitor::watched`]); writing it down is
-//! [`NasBackend::remember`][pomelo_hal::traits::NasBackend::remember] and the screen that calls it.
+//! apps instead of one, and it is not done.
+//!
+//! # Where the devices are written down
+//!
+//! Nowhere in this crate. The list is [`NasBackend::devices`][pomelo_hal::traits::NasBackend::devices],
+//! the form ends in [`NasBackend::remember`][pomelo_hal::traits::NasBackend::remember], and a row's
+//! ✕ is [`NasBackend::forget`][pomelo_hal::traits::NasBackend::forget] — the backend is the side that
+//! knows how to reach this platform's flash, which on the board is the C side's `stdio` and not
+//! `std::fs` at all. That is also why the list is re-read after every write rather than kept in step
+//! by hand: the file is the truth, and the page is a drawing of it.
 
 mod format;
 pub mod style;
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use iced::theme::Palette;
-use iced::widget::{column, container, row, scrollable, text, Column, Row, Space};
-use iced::{Alignment, Color, Element, Length, Subscription, Theme};
+use iced::widget::{button, column, container, row, scrollable, text, Column, Row, Space};
+use iced::{Alignment, Border, Color, Element, Length, Subscription, Theme};
 
 use pomelo_hal::{Board, NasCredentials, NasFault, NasReading, NasStatus};
 use pomelo_material_symbols::Icon;
 use pomelo_widgets::preferences::{Language, SystemPreferences, ThemeMode};
+use pomelo_widgets::touch_keyboard::{self, KeyAction, KeyboardMode};
 
-/// How long between looks at the NAS, when the credentials file does not say.
+/// How long between looks at the machine on the monitor page, when its credentials do not say.
 ///
-/// Five seconds: slow enough that the NAS's own disks are not the thing being measured, and fast enough
-/// that somebody watching a copy of a file sees the numbers move. See
+/// Five seconds: slow enough that the machine's own disks are not the thing being measured, and fast
+/// enough that somebody watching a copy of a file sees the numbers move. See
 /// [`NasCredentials::interval`][pomelo_hal::NasCredentials::interval], which is where a person's own
 /// answer is read from.
 pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Which half of the page is up.
+/// Which of the app's three pages is up.
+///
+/// Three and not one, because a board can be pointed at more than one machine and "which one am I
+/// looking at" is the question the first two pages exist to ask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Screen {
+    /// The machines this board has been told about, and the button that adds another.
+    List,
+    /// One machine's numbers: the overview cards and the disk table.
+    Monitor,
+    /// The address, the account and the password of a machine being added or corrected.
+    Form,
+}
+
+/// Which half of the monitoring page is up.
 ///
 /// Two and not one, because the two things a person wants are read differently: the cards are looked
 /// *at* (a glance, from across a room) and the disk table is read (a row at a time, sitting down). On a
@@ -79,55 +110,221 @@ pub enum Tab {
     Disks,
 }
 
+/// Which of the form's fields the keyboard is typing into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Field {
+    Host,
+    User,
+    Password,
+}
+
+/// What is wrong with the form, once somebody has pressed save.
+///
+/// A list of the two things the form can be missing rather than a sentence: which sentence to draw is
+/// the view's business, and it depends on the language like every other word on the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Wrong {
+    /// No address to reach.
+    Host,
+    /// No account to log in as.
+    User,
+}
+
 /// What the monitor reacts to.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Message {
     /// Time has passed: `now` is when the platform said so. See the crate documentation for what this
     /// does at which rate.
     Tick(Instant),
-    /// A finger on one of the two tabs.
+    /// A finger on one of the monitoring page's two tabs.
     Show(Tab),
+    /// A row of the list was picked, by its place in the list.
+    ///
+    /// A place and not a host: the row is a `button` built in the same frame the finger lands in, so the
+    /// list cannot have moved under it — and what a tap does is read this app's own state.
+    Open(usize),
+    /// The list's "add a machine" button.
+    Add,
+    /// The monitoring page's edit button: the form, filled in with the machine it is on.
+    Edit,
+    /// A finger on one of the form's fields.
+    Focus(Field),
+    /// A key of the form's keyboard.
+    Key(KeyAction),
+    /// Whether the form draws the password in the clear.
+    Reveal(bool),
+    /// The form's save button, or the keyboard's return key.
+    Save,
+    /// The form's delete button: drop the machine being corrected from the list.
+    Delete,
+    /// Back to the list: the form's cancel button, and the arrow on the monitoring page.
+    Back,
 }
 
-/// The NAS monitor.
+/// The server monitor.
 pub struct NasMonitor {
     board: Arc<Board>,
-    /// The last reading this app has *seen*, which is the backend's snapshot as of the last tick.
+    /// The machines the board has been told about, as the list page draws them. Re-read from the
+    /// backend after every write rather than kept in step by hand: the file is the truth and the page
+    /// is a drawing of it.
+    devices: Vec<NasCredentials>,
+    /// The last reading of each machine this app has watched, by address — what a row of the list says
+    /// under its name.
+    ///
+    /// This app's own memory rather than the backend's: the backend watches one machine at a time, and
+    /// a row nobody has opened has nothing to show rather than a number from another machine's session.
+    seen: BTreeMap<String, NasReading>,
+    /// The last reading of the machine the monitor page is on, which is the backend's snapshot as of
+    /// the last tick.
     ///
     /// Held rather than asked for in `view`, for the reason the task viewer holds its reading: a frame
     /// costs a lock and a clone either way, and a state that is read once per tick is a state the tests
     /// can drive by hand.
     reading: NasReading,
-    /// The machine the board is watching, as the backend has it. `None` until somebody points the board
-    /// at one, and read once — a setting that changed under a running app is a setting nobody has a
-    /// screen for yet.
+    /// The machine the monitor page is on, if it is on one.
     ///
-    /// Read for the machine's name in the header and for the interval between looks; whether the board
-    /// can watch a NAS *at all* is not this field's business — that arrives as
-    /// [`NasFault::Unsupported`] in the reading, because it is the backend that knows.
+    /// Read for the name in its header and for the interval between looks; whether the board can watch
+    /// a machine *at all* is not this field's business — that arrives as [`NasFault::Unsupported`] in
+    /// the reading, because it is the backend that knows.
     watched: Option<NasCredentials>,
+    /// Which of the three pages is up.
+    screen: Screen,
+    /// What has been typed into the form.
+    form: Form,
     tab: Tab,
-    /// When the board was last asked to look, for the cadence in
-    /// [`NasMonitor::tick`].
+    /// When the board was last asked to look, for the cadence in [`NasMonitor::tick`].
     asked: Option<Instant>,
     preferences: SystemPreferences,
 }
 
-impl NasMonitor {
-    /// The monitor, having asked the board what it is watching and taken its first look.
-    pub fn new(board: Arc<Board>) -> Self {
-        let watched = board.nas().watching();
+/// What the form holds, and what it is for.
+///
+/// One struct for adding a machine and for correcting one, because they are the same three fields and
+/// the same button: what [`Form::editing`] changes is whether the address is one the list already has —
+/// which is what makes saving an *update* rather than an addition, and what the delete button is
+/// offered on.
+struct Form {
+    /// The address the form was opened on, when it was opened on a machine already in the list.
+    editing: Option<String>,
+    host: String,
+    user: String,
+    password: String,
+    /// The host key written down for this machine, carried through a correction rather than dropped:
+    /// it is not one of the form's fields, but throwing it away would be this page editing a file it
+    /// does not understand. See `nas_credentials`.
+    host_key: Option<String>,
+    /// Which of the three fields the keyboard is typing into.
+    focus: Field,
+    /// Which page of the keyboard is up.
+    keyboard: KeyboardMode,
+    /// Whether the password is drawn in the clear. A password typed on a touch keyboard is a password
+    /// typed with a thumb, and being able to read it back is what keeps it from being typed twice.
+    revealed: bool,
+    /// What was wrong with it, the last time somebody pressed save.
+    wrong: Option<Wrong>,
+}
 
-        // The first look is asked for here rather than waiting for a tick: a page opened onto a machine
-        // that is up should not spend its first interval blank. A board that cannot look at all answers
-        // with a reading that says so, which is what the view draws.
-        let _ = board.nas().refresh();
+impl Form {
+    /// An empty form: a machine being added.
+    fn adding() -> Self {
+        Self {
+            editing: None,
+            host: String::new(),
+            user: String::new(),
+            password: String::new(),
+            host_key: None,
+            focus: Field::Host,
+            keyboard: KeyboardMode::Lower,
+            revealed: false,
+            wrong: None,
+        }
+    }
+
+    /// The form filled in with `device`: a machine being corrected.
+    fn of(device: &NasCredentials) -> Self {
+        Self {
+            editing: Some(device.host.clone()),
+            host: device.host.clone(),
+            user: device.user.clone(),
+            password: device.password.clone(),
+            host_key: device.host_key.clone(),
+            ..Self::adding()
+        }
+    }
+
+    /// What the fields say, if they say enough to log in with.
+    ///
+    /// An address and an account, and nothing else: the port is 22 and the interval is five unless
+    /// somebody edits the file by hand, which is the pair of defaults `nas_credentials` documents. The
+    /// password may be empty, because an account with no password is a thing a box can have and
+    /// refusing it here would be this page disagreeing with `ssh`.
+    fn device(&self) -> Result<NasCredentials, Wrong> {
+        let host = self.host.trim();
+        let user = self.user.trim();
+
+        if host.is_empty() {
+            return Err(Wrong::Host);
+        }
+        if user.is_empty() {
+            return Err(Wrong::User);
+        }
+
+        Ok(NasCredentials {
+            host: host.to_string(),
+            port: 22,
+            user: user.to_string(),
+            password: self.password.clone(),
+            interval_secs: 5,
+            host_key: self.host_key.clone(),
+        })
+    }
+
+    /// The field the keyboard is typing into, as the string it types onto.
+    fn typed(&mut self) -> &mut String {
+        match self.focus {
+            Field::Host => &mut self.host,
+            Field::User => &mut self.user,
+            Field::Password => &mut self.password,
+        }
+    }
+
+    /// A key of the form's keyboard.
+    ///
+    /// The return key is not here: what it means is "save", and saving is the app's — this struct
+    /// cannot reach a backend. See [`NasMonitor::update`].
+    fn key(&mut self, action: KeyAction) {
+        match action {
+            KeyAction::Char(character) => self.typed().push(character),
+            KeyAction::Space => self.typed().push(' '),
+            KeyAction::Backspace => {
+                self.typed().pop();
+            }
+            KeyAction::SwitchMode(mode) => self.keyboard = mode,
+            KeyAction::Enter => {}
+        }
+
+        // Typing again is somebody answering what the last save complained about.
+        self.wrong = None;
+    }
+}
+
+impl NasMonitor {
+    /// The monitor, on the list of machines the board has been told about.
+    pub fn new(board: Arc<Board>) -> Self {
+        let devices = board.nas().devices();
 
         let mut monitor = Self {
             board,
+            devices,
+            seen: BTreeMap::new(),
             reading: NasReading::default(),
-            watched,
+            watched: None,
+            screen: Screen::List,
+            form: Form::adding(),
             tab: Tab::Overview,
+            // No look is asked for here: the page opens on a list, and a machine nobody has picked is a
+            // machine nobody has asked about. The clock starts when a row is picked — see
+            // [`NasMonitor::open`].
             asked: Some(Instant::now()),
             preferences: SystemPreferences::default(),
         };
@@ -147,18 +344,34 @@ impl NasMonitor {
         self.preferences = preferences;
     }
 
-    /// The last reading, as the page draws it. Read by the tests and by a host; a page gets it through
-    /// [`NasMonitor::view`].
+    /// The last reading, as the monitoring page draws it. Read by the tests and by a host; a page gets
+    /// it through [`NasMonitor::view`].
     pub fn reading(&self) -> &NasReading {
         &self.reading
     }
 
-    /// The NAS this board is watching, if any.
+    /// The machines the board has been told about, as the list draws them.
+    pub fn devices(&self) -> &[NasCredentials] {
+        &self.devices
+    }
+
+    /// Which of the three pages is up.
+    pub fn screen(&self) -> Screen {
+        self.screen
+    }
+
+    /// The last reading this app has seen of `host`, if it has seen one. What a row of the list draws
+    /// under its name.
+    pub fn seen(&self, host: &str) -> Option<&NasReading> {
+        self.seen.get(host)
+    }
+
+    /// The machine the monitoring page is on, if it is on one.
     pub fn watched(&self) -> Option<&NasCredentials> {
         self.watched.as_ref()
     }
 
-    /// Which half of the page is up.
+    /// Which half of the monitoring page is up.
     pub fn tab(&self) -> Tab {
         self.tab
     }
@@ -175,6 +388,31 @@ impl NasMonitor {
         match message {
             Message::Tick(now) => self.tick(now),
             Message::Show(tab) => self.tab = tab,
+            Message::Open(index) => self.open(index),
+            Message::Add => {
+                self.form = Form::adding();
+                self.screen = Screen::Form;
+            }
+            Message::Edit => {
+                if let Some(watched) = self.watched.clone() {
+                    self.form = Form::of(&watched);
+                    self.screen = Screen::Form;
+                }
+            }
+            Message::Focus(field) => self.form.focus = field,
+            Message::Key(action) => {
+                // The keyboard's return key saves, like the button under it — and saving is the app's,
+                // because the file is the backend's. See [`Form::key`], which is why this is here.
+                if action == KeyAction::Enter {
+                    self.save();
+                } else {
+                    self.form.key(action);
+                }
+            }
+            Message::Reveal(revealed) => self.form.revealed = revealed,
+            Message::Save => self.save(),
+            Message::Delete => self.delete(),
+            Message::Back => self.cancel(),
         }
     }
 
@@ -182,10 +420,14 @@ impl NasMonitor {
     ///
     /// Two rates in one message, because the platform only sends one: the *pull* is every tick, so that
     /// an answer that arrived between two ticks is on screen at the next one, and the *ask* is on the
-    /// interval. A first tick asks immediately — the constructor already has, and this is what keeps a
-    /// window that has been open for a while from waiting out a stale interval.
+    /// interval — and only while the monitoring page is up. A look is a network round trip to another
+    /// machine, and a page nobody is on has no business opening sessions to it.
     pub fn tick(&mut self, now: Instant) {
         self.pull();
+
+        if self.screen != Screen::Monitor {
+            return;
+        }
 
         let due = match self.asked {
             Some(asked) => now.duration_since(asked) >= self.interval(),
@@ -235,24 +477,11 @@ impl NasMonitor {
         let muted = style::muted(theme);
         let words = Words::of(self.preferences.language);
 
-        let body: Element<'_, Message> = match &self.reading.status {
-            // The board cannot do this at all. Not "the NAS is down" and not "nothing is set up":
-            // nothing a person does to the NAS changes this screen, so it says what would.
-            NasStatus::Offline(NasFault::Unsupported) => notice(&words.unsupported, sizes, muted),
-            // Nothing to watch, which is a board somebody has not finished setting up.
-            NasStatus::Unconfigured => notice(&words.unconfigured, sizes, muted),
-            _ => match self.tab {
-                Tab::Overview => self.overview(sizes, theme, ink, muted, &words),
-                Tab::Disks => self.disks(sizes, ink, muted, &words),
-
-            },
+        let page: Element<'_, Message> = match self.screen {
+            Screen::List => self.list(sizes, theme, ink, muted, &words),
+            Screen::Form => self.form(sizes, theme, ink, muted, &words),
+            Screen::Monitor => self.monitor(sizes, theme, ink, muted, &words),
         };
-
-        let page = column![self.header(sizes, theme, ink, muted, &words), body]
-            .spacing(style::GAP)
-            .padding(style::MARGIN)
-            .width(Length::Fill)
-            .height(Length::Fill);
 
         container(page)
             .width(Length::Fill)
@@ -261,6 +490,39 @@ impl NasMonitor {
                 background: Some(style::surface(theme).into()),
                 ..container::Style::default()
             })
+            .into()
+    }
+
+    /// One machine's page: its header, and whichever of its two halves is up.
+    ///
+    /// The notice states come before the tabs rather than inside them, because a board that cannot
+    /// watch anything has no halves to switch between — see the crate documentation on the three states
+    /// that are not failures.
+    fn monitor(
+        &self,
+        sizes: style::Sizes,
+        theme: ThemeMode,
+        ink: Color,
+        muted: Color,
+        words: &Words,
+    ) -> Element<'_, Message> {
+        let body: Element<'_, Message> = match &self.reading.status {
+            // The board cannot do this at all. Not "the machine is down" and not "nothing is set up":
+            // nothing a person does to the machine changes this screen, so it says what would.
+            NasStatus::Offline(NasFault::Unsupported) => notice(&words.unsupported, sizes, muted),
+            // Nothing to watch, which is a board somebody has not finished setting up.
+            NasStatus::Unconfigured => notice(&words.unconfigured, sizes, muted),
+            _ => match self.tab {
+                Tab::Overview => self.overview(sizes, theme, ink, muted, words),
+                Tab::Disks => self.disks(sizes, ink, muted, words),
+            },
+        };
+
+        column![self.header(sizes, theme, ink, muted, words), body]
+            .spacing(style::GAP)
+            .padding(style::MARGIN)
+            .width(Length::Fill)
+            .height(Length::Fill)
             .into()
     }
 
@@ -311,7 +573,7 @@ impl NasMonitor {
             .watched
             .as_ref()
             .map(|credentials| credentials.host.clone())
-            .unwrap_or_else(|| String::from("NAS"));
+            .unwrap_or_else(|| String::from(words.server));
 
         let uptime = self
             .reading
@@ -341,9 +603,15 @@ impl NasMonitor {
         ]
         .spacing(2.0);
 
-        let mut line = Row::with_children(vec![identity.into()])
-            .width(Length::Fill)
-            .align_y(Alignment::Center);
+        // The way back to the list comes first on the row: a page about one machine has to be able to
+        // say *which* machine and to offer a way out of it, and the arrow is the way out.
+        let mut line = Row::with_children(vec![
+            icon_button(Message::Back, Icon::ARROW_BACK, sizes, ink, muted),
+            Space::new().width(Length::Fixed(style::CELL_PAD)).into(),
+            identity.into(),
+        ])
+        .width(Length::Fill)
+        .align_y(Alignment::Center);
 
         if !uptime.is_empty() {
             line = line.push(Space::new().width(Length::Fill));
@@ -356,42 +624,386 @@ impl NasMonitor {
             );
         }
 
-        let tabs = row![
-            self.tab_button(Tab::Overview, words.overview, sizes, ink, muted),
-            self.tab_button(Tab::Disks, words.disks, sizes, ink, muted),
-        ]
-        .spacing(style::CELL_PAD);
+        // The two halves on the left and the way to correct this machine on the right: editing is not a
+        // half of the page, it is a thing a person does *to* the machine the page is about.
+        let tabs = Row::with_children(vec![
+            self.tab_button(Tab::Overview, words.overview, sizes, theme, ink, muted),
+            self.tab_button(Tab::Disks, words.disks, sizes, theme, ink, muted),
+            Space::new().width(Length::Fill).into(),
+            icon_button(Message::Edit, Icon::EDIT, sizes, ink, muted),
+        ])
+        .spacing(style::CELL_PAD)
+        .align_y(Alignment::Center);
 
-        column![line, tabs].spacing(style::GAP * 0.6).into()
+        // Inset past [`style::MARGIN`] so the name and the uptime clear the panel's rounded corners:
+        // this is the topmost row, and it is the one that meets them. See [`style::HEADER_INSET`].
+        column![line, tabs]
+            .spacing(style::GAP * 0.6)
+            .padding([0.0, style::HEADER_INSET - style::MARGIN])
+            .into()
+    }
+
+    /// The page that says which machines there are.
+    ///
+    /// A list and not a picker: it is the app's own front door, so it is where machines are added to it
+    /// — and, because a row says what this session last saw of the machine it names, it is also the page
+    /// that answers "are both boxes all right" without opening either. See [`NasMonitor::seen`].
+    fn list(
+        &self,
+        sizes: style::Sizes,
+        theme: ThemeMode,
+        ink: Color,
+        muted: Color,
+        words: &Words,
+    ) -> Element<'_, Message> {
+        let header = column![
+            text(words.title).size(sizes.headline).color(ink),
+            text(format::machines(self.devices.len(), words.language))
+                .size(sizes.small)
+                .color(muted),
+        ]
+        .spacing(1.0)
+        // Inset like every other topmost row: see [`style::HEADER_INSET`].
+        .padding([0.0, style::HEADER_INSET - style::MARGIN]);
+
+        let body: Element<'_, Message> = if self.devices.is_empty() {
+            // Nothing told to it yet, which is a board somebody has not finished setting up rather than
+            // a failure — the same thing the monitoring page says about itself when it has no machine.
+            container(text(words.no_devices).size(sizes.text).color(muted))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center)
+                .into()
+        } else {
+            let mut rows = Column::new()
+                .spacing(style::CELL_PAD)
+                .width(Length::Fill);
+
+            for (index, device) in self.devices.iter().enumerate() {
+                rows = rows.push(self.device_row(index, device, sizes, theme, ink, muted, words));
+            }
+
+            scrollable(rows).height(Length::Fill).into()
+        };
+
+        column![header, body, add_button(sizes, theme, ink, words)]
+            .spacing(style::GAP)
+            .padding(style::MARGIN)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
+
+    /// One machine in the list: where it is, who logs in, and whatever this app last saw of it.
+    fn device_row(
+        &self,
+        index: usize,
+        device: &NasCredentials,
+        sizes: style::Sizes,
+        theme: ThemeMode,
+        ink: Color,
+        muted: Color,
+        words: &Words,
+    ) -> Element<'_, Message> {
+        let inks = style::status_ink(theme);
+        let reading = self.seen(&device.host);
+
+        let dot = match reading.map(|reading| &reading.status) {
+            Some(NasStatus::Online) => inks.online(),
+            Some(NasStatus::Connecting) => inks.waiting(),
+            Some(NasStatus::Offline(_)) => inks.offline(),
+            _ => muted,
+        };
+
+        let stale = reading
+            .and_then(NasReading::age)
+            .is_some_and(|age| age > device.interval() * 2);
+
+        // What is known about it — which, for a row nobody has opened, is *nothing*: a row that borrowed
+        // the last look's status would be a row claiming a machine this session never reached is fine.
+        let note = match reading {
+            Some(reading) => match &reading.status {
+                NasStatus::Online => reading
+                    .age()
+                    .map(|age| format::age(age, words.language))
+                    .unwrap_or_default(),
+                NasStatus::Connecting => String::from(words.connecting),
+                NasStatus::Offline(fault) => String::from(words.fault(*fault)),
+                NasStatus::Unconfigured => String::new(),
+            },
+            None => String::from(words.not_looked),
+        };
+
+        button(
+            Row::with_children(vec![
+                text(Icon::DNS.glyph())
+                    .font(pomelo_material_symbols::font())
+                    .size(sizes.text)
+                    .color(muted)
+                    .into(),
+                Space::new().width(Length::Fixed(style::CELL_PAD)).into(),
+                Column::with_children(vec![
+                    text(device.host.clone()).size(sizes.text).color(ink).into(),
+                    text(format!("{} · {note}", device.user))
+                        .size(sizes.small)
+                        .color(inks.age(stale))
+                        .into(),
+                ])
+                .spacing(1.0)
+                .width(Length::Fill)
+                .into(),
+                Space::new().width(Length::Fixed(style::CELL_PAD)).into(),
+                text(Icon::CIRCLE.glyph())
+                    .font(pomelo_material_symbols::font())
+                    .size(sizes.small * 0.7)
+                    .color(dot)
+                    .into(),
+            ])
+            .align_y(Alignment::Center)
+            .width(Length::Fill),
+        )
+        .padding(style::CELL_PAD * 1.5)
+        .width(Length::Fill)
+        .on_press(Message::Open(index))
+        .style(move |_theme, status| button::Style {
+            background: Some(
+                if matches!(status, button::Status::Pressed) {
+                    style::track(theme)
+                } else {
+                    style::card(theme)
+                }
+                .into(),
+            ),
+            border: Border {
+                radius: sizes.small.into(),
+                ..Border::default()
+            },
+            ..button::Style::default()
+        })
+        .into()
+    }
+
+    /// The page that writes a machine down: three fields, the panel's own keyboard, and the line a
+    /// mistake appears on.
+    fn form(
+        &self,
+        sizes: style::Sizes,
+        theme: ThemeMode,
+        ink: Color,
+        muted: Color,
+        words: &Words,
+    ) -> Element<'_, Message> {
+        let fields = Column::with_children(vec![
+            self.field(Field::Host, words.host, false, sizes, theme, ink, muted),
+            self.field(Field::User, words.account, false, sizes, theme, ink, muted),
+            self.field(Field::Password, words.password, true, sizes, theme, ink, muted),
+        ])
+        .spacing(style::CELL_PAD)
+        .width(Length::Fill);
+
+        // The line a mistake appears on, and it keeps its place whether there is one or not: a page
+        // whose fields jump up and down as somebody types is a page that moves under the finger doing
+        // the typing.
+        let wrong: Element<'_, Message> = text(match self.form.wrong {
+            Some(wrong) => words.wrong(wrong),
+            None => "",
+        })
+        .size(sizes.small)
+        .color(style::status_ink(theme).offline())
+        .into();
+
+        let buttons = Row::with_children(vec![
+            form_button(words.save, Message::Save, true, sizes, theme, ink),
+            Space::new().width(Length::Fixed(style::CELL_PAD)).into(),
+            form_button(words.cancel, Message::Back, false, sizes, theme, ink),
+            Space::new().width(Length::Fill).into(),
+            self.delete_button(sizes, theme, words),
+        ])
+        .align_y(Alignment::Center)
+        .width(Length::Fill);
+
+        let title = if self.form.editing.is_some() {
+            words.edit_device
+        } else {
+            words.add
+        };
+
+        column![
+            container(text(title).size(sizes.headline).color(ink))
+                .padding([0.0, style::HEADER_INSET - style::MARGIN]),
+            scrollable(fields).height(Length::Fill),
+            wrong,
+            buttons,
+            container(touch_keyboard::band_with_theme(
+                self.form.keyboard,
+                Message::Key,
+                theme,
+            ))
+            .height(Length::Fixed(touch_keyboard::band_height(style::PANEL)))
+            .width(Length::Fill),
+        ]
+        .spacing(style::GAP)
+        .padding(style::MARGIN)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    }
+
+    /// One field of the form: what it is, and what has been typed into it.
+    fn field(
+        &self,
+        field: Field,
+        label: &str,
+        secret: bool,
+        sizes: style::Sizes,
+        theme: ThemeMode,
+        ink: Color,
+        muted: Color,
+    ) -> Element<'_, Message> {
+        let focused = self.form.focus == field;
+
+        let typed = match field {
+            Field::Host => &self.form.host,
+            Field::User => &self.form.user,
+            Field::Password => &self.form.password,
+        };
+
+        // A password is dots, and the eye beside it turns them back into letters: a password typed on a
+        // touch keyboard is typed with a thumb, and being able to read it back is what keeps it from
+        // being typed twice. See [`Form::revealed`].
+        let value: Element<'_, Message> = if secret && !self.form.revealed {
+            dots(typed.chars().count(), sizes, ink)
+        } else {
+            text(typed.clone()).size(sizes.text).color(ink).into()
+        };
+
+        let mut contents = Row::with_children(vec![
+            container(text(label.to_string()).size(sizes.small).color(muted))
+                .width(Length::Fixed(style::FIELD_LABEL))
+                .into(),
+            value,
+        ])
+        .align_y(Alignment::Center)
+        .width(Length::Fill);
+
+        if secret {
+            contents = contents.push(Space::new().width(Length::Fill));
+            contents = contents.push(icon_button(
+                Message::Reveal(!self.form.revealed),
+                if self.form.revealed {
+                    Icon::VISIBILITY_OFF
+                } else {
+                    Icon::VISIBILITY
+                },
+                sizes,
+                ink,
+                muted,
+            ));
+        }
+
+        button(contents)
+            .padding(style::CELL_PAD * 1.5)
+            .width(Length::Fill)
+            .on_press(Message::Focus(field))
+            .style(move |_theme, _status| button::Style {
+                background: Some(style::card(theme).into()),
+                border: Border {
+                    radius: sizes.small.into(),
+                    // The field the keyboard is typing into is the one with a line around it. A caret
+                    // would say the same thing, and this says it without a clock to blink against.
+                    width: if focused { 1.5 } else { 0.0 },
+                    color: if focused {
+                        style::network()
+                    } else {
+                        Color::TRANSPARENT
+                    },
+                },
+                ..button::Style::default()
+            })
+            .into()
+    }
+
+    /// The form's delete button, on a machine that is already in the list and on nothing else.
+    ///
+    /// Off a form opened to *add* a machine there is nothing to drop, so the button is not drawn rather
+    /// than drawn and refused — and it sits at the far end of the row from save, which is where a
+    /// destructive button belongs.
+    fn delete_button(
+        &self,
+        sizes: style::Sizes,
+        theme: ThemeMode,
+        words: &Words,
+    ) -> Element<'static, Message> {
+        if self.form.editing.is_none() {
+            return Space::new().into();
+        }
+
+        let danger = style::status_ink(theme).offline();
+
+        button(text(words.delete.to_string()).size(sizes.text))
+            .padding([style::CELL_PAD * 1.2, style::CELL_PAD * 2.5])
+            .on_press(Message::Delete)
+            .style(move |_theme, status| {
+                let pressed = matches!(status, button::Status::Pressed);
+
+                button::Style {
+                    background: Some(if pressed { danger } else { style::card(theme) }.into()),
+                    text_color: if pressed { Color::WHITE } else { danger },
+                    border: Border {
+                        radius: sizes.small.into(),
+                        ..Border::default()
+                    },
+                    ..button::Style::default()
+                }
+            })
+            .into()
     }
 
     /// One of the two tabs: the page's own name on a button that says whether it is the one showing.
+    ///
+    /// A `button` and not the `container` this used to be, which is the whole of why the disks half of
+    /// this page did nothing when it was pressed: a container has no press to give, so the message that
+    /// switches the tab was never sent and the page sat on its overview for ever.
     fn tab_button(
         &self,
         tab: Tab,
         label: &str,
         sizes: style::Sizes,
+        theme: ThemeMode,
         ink: Color,
         muted: Color,
     ) -> Element<'static, Message> {
         let showing = self.tab == tab;
         let accent = style::network();
 
-        container(text(label.to_string()).size(sizes.small).color(if showing {
-            ink
-        } else {
-            muted
-        }))
-        .padding([style::CELL_PAD * 0.6, style::CELL_PAD * 2.0])
-        .style(move |_theme| container::Style {
-            background: showing.then(|| accent.into()),
-            border: iced::Border {
-                radius: (sizes.small * 0.8).into(),
-                ..iced::Border::default()
-            },
-            ..container::Style::default()
-        })
-        .into()
+        button(text(label.to_string()).size(sizes.small))
+            .padding([style::CELL_PAD * 0.6, style::CELL_PAD * 2.0])
+            .on_press(Message::Show(tab))
+            .style(move |_theme, status| {
+                // Only a finger on it. `Hovered` is not a press: this platform leaves the pointer where
+                // the finger lifted, so a button that was *touched* stays hovered until something else
+                // moves the pointer. See the settings app's `is_pressed`, which paid for this once.
+                let pressed = matches!(status, button::Status::Pressed);
+
+                button::Style {
+                    background: Some(
+                        match (showing, pressed) {
+                            (true, _) => accent,
+                            (false, true) => style::track(theme),
+                            (false, false) => Color::TRANSPARENT,
+                        }
+                        .into(),
+                    ),
+                    text_color: if showing { ink } else { muted },
+                    border: iced::Border {
+                        radius: (sizes.small * 0.8).into(),
+                        ..iced::Border::default()
+                    },
+                    ..button::Style::default()
+                }
+            })
+            .into()
     }
 
     /// The cards: what a person checks from across the room.
@@ -446,13 +1058,10 @@ impl NasMonitor {
             muted,
         );
 
-        let read: u64 = self.reading.disks.iter().map(|disk| disk.read_per_sec).sum();
-        let written: u64 = self
-            .reading
-            .disks
-            .iter()
-            .map(|disk| disk.write_per_sec)
-            .sum();
+        let disks = &self.reading.disks;
+
+        let read: u64 = disks.iter().map(|disk| disk.read_per_sec).sum();
+        let written: u64 = disks.iter().map(|disk| disk.write_per_sec).sum();
 
         let network_card = card(
             words.network,
@@ -478,10 +1087,22 @@ impl NasMonitor {
             muted,
         );
 
+        // The headline is what the disks are doing altogether, and the line under it splits the two
+        // directions. The read rate alone would not do as the headline: on a machine whose page cache
+        // answers every read — three gigabytes of one on the NAS this was written against — `/proc`'s
+        // read counter can sit still for hours, and a card titled 硬盘读写 whose big number never moves
+        // reads as a card that is broken. The network card's headline is its incoming half because a
+        // network has one that matters more; a disk has no such half, so this one's is the sum of both.
         let disk_card = card(
             words.disks_speed,
-            format::rate(read),
-            format!("{} {}", words.written, format::rate(written)),
+            format::rate(read + written),
+            format!(
+                "{} {}   {} {}",
+                words.read,
+                format::rate(read),
+                words.written,
+                format::rate(written)
+            ),
             None,
             style::disk(),
             sizes,
@@ -490,11 +1111,61 @@ impl NasMonitor {
             muted,
         );
 
+        // The two figures about the disks *as a whole*: the room they have between them, and the one of
+        // them that is working. Both were in the reading and neither was drawn — this half of the page
+        // had a table of capacities on it and no summary of them.
+        let capacity: u64 = disks.iter().filter_map(|disk| disk.size_bytes).sum();
+
+        let storage_card = card(
+            words.storage,
+            if disks.is_empty() {
+                String::from("—")
+            } else {
+                format::bytes(capacity)
+            },
+            if disks.is_empty() {
+                String::new()
+            } else {
+                format::disks(disks.len(), words.language)
+            },
+            None,
+            style::storage(),
+            sizes,
+            theme,
+            ink,
+            muted,
+        );
+
+        let busiest = disks
+            .iter()
+            .max_by(|a, b| a.busy_percent.total_cmp(&b.busy_percent));
+
+        let busy_card = card(
+            words.disk_busy,
+            busiest
+                .map(|disk| format!("{:.0}%", disk.busy_percent))
+                .unwrap_or_else(|| String::from("—")),
+            busiest.map(|disk| disk.device.clone()).unwrap_or_default(),
+            busiest.map(|disk| disk.busy_percent / 100.0),
+            style::busy(),
+            sizes,
+            theme,
+            ink,
+            muted,
+        );
+
+        // Six cards and not four. Two rows of two gave each card half the page and it drew one line of
+        // text at the top of it, which is the empty half the page used to be; three rows of two on the
+        // same panel is the same screen holding the four a person checks *and* the two that answer the
+        // next question they ask — how much room the disks have, and which of them is the busy one.
         Column::with_children(vec![
             Row::with_children(vec![cpu_card, memory_card])
                 .spacing(style::GAP)
                 .into(),
             Row::with_children(vec![network_card, disk_card])
+                .spacing(style::GAP)
+                .into(),
+            Row::with_children(vec![storage_card, busy_card])
                 .spacing(style::GAP)
                 .into(),
         ])
@@ -570,9 +1241,99 @@ impl NasMonitor {
         .into()
     }
 
+    /// Picks `index` of the list: the board is pointed at that machine, and its page goes up.
+    fn open(&mut self, index: usize) {
+        let Some(device) = self.devices.get(index).cloned() else {
+            return;
+        };
+
+        // Talking the backend into watching it *is* how this app points anything anywhere: an address
+        // the list already has is corrected rather than added a second time, so this is the same call
+        // the form makes. See the trait's note on who touches the file.
+        let _ = self.board.nas().remember(&device);
+
+        self.watched = Some(device);
+        self.reading = NasReading::default();
+        self.tab = Tab::Overview;
+        self.screen = Screen::Monitor;
+
+        // The first look is asked for here and not on the next tick: a page opened onto a machine that
+        // is up should not spend its first interval blank. `refresh` only *asks* — the answer arrives
+        // when the machine answers — so the pull after it is this app's, and on a board it leaves the
+        // page saying "connecting…", which is the truth about a session that has not come up yet.
+        let _ = self.board.nas().refresh();
+        self.asked = Some(Instant::now());
+        self.pull();
+    }
+
+    /// Saves the form: the machine goes into the list, and the page goes back to it.
+    fn save(&mut self) {
+        let device = match self.form.device() {
+            Ok(device) => device,
+            Err(wrong) => {
+                self.form.wrong = Some(wrong);
+                return;
+            }
+        };
+
+        if self.board.nas().remember(&device).is_err() {
+            // The board could not write it down — a flash that is full, or an image with no backend in
+            // it at all. The form stays up with what was typed still in it, which is the only copy of
+            // it there is.
+            self.form.wrong = Some(Wrong::Host);
+            return;
+        }
+
+        self.reload();
+        self.screen = Screen::List;
+    }
+
+    /// Drops the machine the form is on, and goes back to the list.
+    fn delete(&mut self) {
+        let Some(host) = self.form.editing.clone() else {
+            // Nothing to delete: this form was opened to *add* a machine.
+            return;
+        };
+
+        let _ = self.board.nas().forget(&host);
+
+        self.seen.remove(&host);
+
+        // If that was the machine the monitoring page was on, the page has nothing left to be about.
+        if self
+            .watched
+            .as_ref()
+            .is_some_and(|device| device.host == host)
+        {
+            self.watched = None;
+            self.reading = NasReading::default();
+        }
+
+        self.reload();
+        self.screen = Screen::List;
+    }
+
+    /// Leaves the form without writing anything down.
+    fn cancel(&mut self) {
+        self.screen = Screen::List;
+    }
+
+    /// Re-reads the list from the backend, which is where it lives.
+    fn reload(&mut self) {
+        self.devices = self.board.nas().devices();
+    }
+
     /// Reads the backend's snapshot into this state.
+    ///
+    /// Also into this app's own map, keyed by the machine it came from: the backend watches one machine
+    /// at a time, and a row watched once keeps saying what it said — with its age — rather than going
+    /// blank the moment somebody looks at a different one.
     fn pull(&mut self) {
         self.reading = self.board.nas().reading();
+
+        if let Some(device) = &self.watched {
+            self.seen.insert(device.host.clone(), self.reading.clone());
+        }
     }
 }
 
@@ -642,9 +1403,14 @@ fn cell(value: &str, size: f32, color: Color) -> Element<'static, Message> {
 
 /// One card: what the metric is, the number a glance wants, the line under it, and a bar.
 ///
-/// A card with no share draws no bar, which is how the two cards whose subject is a *rate* — the
-/// network and the disks — are told apart from the two whose subject is a share of a whole. A bar for
-/// "8.4M/s" would be a bar with nothing to be full of.
+/// A card with no share draws no bar, which tells the ones whose subject is a *share of a whole* — the
+/// CPU, the memory, the busiest disk — from the ones whose subject is a rate or a count and has nothing
+/// to be full of. A bar for "8.4M/s" would be a bar with nothing to be a bar of.
+///
+/// The body is centred in the card rather than pinned to the top of it, because the card is an equal
+/// share of the page and the text is not: centred, the room left over is a margin above and below the
+/// number instead of a hole under it. See the settings app's rings, which are centred for the same
+/// reason — a number at the top of a tall box reads as a box with something missing.
 fn card(
     title: &str,
     headline: String,
@@ -672,6 +1438,7 @@ fn card(
         .padding(style::CELL_PAD * 2.0)
         .width(Length::Fill)
         .height(Length::Fill)
+        .align_y(Alignment::Center)
         .style(move |_theme| container::Style {
             background: Some(style::card(theme).into()),
             border: iced::Border {
@@ -712,6 +1479,142 @@ fn bar(share: f32, accent: Color, sizes: style::Sizes, theme: ThemeMode) -> Elem
     .into()
 }
 
+/// A bare glyph on a button: the actions in a header that are not readings — back, edit, reveal.
+///
+/// Drawn muted and turning ink under the finger, which is the pair of colours every other muted thing
+/// on the page uses, and with no fill at all: a header has no room for a second shape on it.
+fn icon_button(
+    message: Message,
+    icon: Icon,
+    sizes: style::Sizes,
+    ink: Color,
+    muted: Color,
+) -> Element<'static, Message> {
+    button(
+        text(icon.glyph())
+            .font(pomelo_material_symbols::font())
+            .size(sizes.text)
+            .color(muted),
+    )
+    .padding(style::CELL_PAD * 0.8)
+    .on_press(message)
+    .style(move |_theme, status| button::Style {
+        background: None,
+        text_color: if matches!(status, button::Status::Pressed) {
+            ink
+        } else {
+            muted
+        },
+        ..button::Style::default()
+    })
+    .into()
+}
+
+/// The list's "add a machine" button: the one thing on that page that is not a machine.
+///
+/// Filled with the card colour and turning the network green under a finger, because it is the page's
+/// only action and the thing somebody who has just opened the app is most likely to be looking for.
+fn add_button(
+    sizes: style::Sizes,
+    theme: ThemeMode,
+    ink: Color,
+    words: &Words,
+) -> Element<'static, Message> {
+    button(
+        Row::with_children(vec![
+            text(Icon::ADD.glyph())
+                .font(pomelo_material_symbols::font())
+                .size(sizes.text)
+                .color(ink)
+                .into(),
+            Space::new().width(Length::Fixed(style::CELL_PAD)).into(),
+            text(words.add).size(sizes.text).color(ink).into(),
+        ])
+        .align_y(Alignment::Center),
+    )
+    .padding(style::CELL_PAD * 1.5)
+    .width(Length::Fill)
+    .on_press(Message::Add)
+    .style(move |_theme, status| button::Style {
+        background: Some(
+            if matches!(status, button::Status::Pressed) {
+                style::network()
+            } else {
+                style::card(theme)
+            }
+            .into(),
+        ),
+        border: Border {
+            radius: sizes.small.into(),
+            ..Border::default()
+        },
+        ..button::Style::default()
+    })
+    .into()
+}
+
+/// One of the form's two ordinary buttons: save and cancel, which differ only in which one is filled.
+fn form_button(
+    label: &str,
+    message: Message,
+    primary: bool,
+    sizes: style::Sizes,
+    theme: ThemeMode,
+    ink: Color,
+) -> Element<'static, Message> {
+    button(text(label.to_string()).size(sizes.text))
+        .padding([style::CELL_PAD * 1.2, style::CELL_PAD * 2.5])
+        .on_press(message)
+        .style(move |_theme, status| button::Style {
+            background: Some(
+                match (primary, matches!(status, button::Status::Pressed)) {
+                    (true, _) => style::network(),
+                    (false, true) => style::track(theme),
+                    (false, false) => style::card(theme),
+                }
+                .into(),
+            ),
+            // White on the filled one whatever the theme: the accent is the same green either way, and
+            // ink would be dark ink on it in light mode.
+            text_color: if primary { Color::WHITE } else { ink },
+            border: Border {
+                radius: sizes.small.into(),
+                ..Border::default()
+            },
+            ..button::Style::default()
+        })
+        .into()
+}
+
+/// A password, as one dot per character.
+///
+/// Painted rather than typed: the font this board carries is a Chinese and Latin subset with no `•` in
+/// it, which is the same wall the settings app's password prompt runs into — see its
+/// `style::typed_password`, which draws its own dots for the same reason.
+fn dots(count: usize, sizes: style::Sizes, ink: Color) -> Element<'static, Message> {
+    let dot = sizes.small * 0.35;
+
+    let mut row = Row::new().spacing(4.0).align_y(Alignment::Center);
+
+    for _ in 0..count {
+        row = row.push(
+            container(Space::new())
+                .width(Length::Fixed(dot))
+                .height(Length::Fixed(dot))
+                .style(move |_theme| container::Style {
+                    background: Some(ink.into()),
+                    border: Border {
+                        radius: (dot / 2.0).into(),
+                        ..Border::default()
+                    },
+                    ..container::Style::default()
+                }),
+        );
+    }
+
+    row.into()
+}
+
 /// A whole-page notice: what is missing, said once, where the cards would be.
 ///
 /// The page keeps its header in this state, because the header is what says which machine — and a
@@ -732,12 +1635,32 @@ fn notice(message: &str, sizes: style::Sizes, muted: Color) -> Element<'static, 
 /// a table's heads.
 struct Words {
     language: Language,
+    /// The app's own name, which is the list's heading: the board's grid has a tile, and a page inside
+    /// the app has no other place to say what this is.
+    title: &'static str,
+    /// The list's button, and the form's heading when it is adding one.
+    add: &'static str,
+    /// The form's heading when it is correcting one.
+    edit_device: &'static str,
+    no_devices: &'static str,
+    not_looked: &'static str,
+    host: &'static str,
+    account: &'static str,
+    password: &'static str,
+    save: &'static str,
+    cancel: &'static str,
+    delete: &'static str,
+    wrong_host: &'static str,
+    wrong_user: &'static str,
     cpu: &'static str,
     memory: &'static str,
     network: &'static str,
     disks_speed: &'static str,
+    storage: &'static str,
+    disk_busy: &'static str,
     received: &'static str,
     sent: &'static str,
+    read: &'static str,
     written: &'static str,
     temperature: &'static str,
     uptime: &'static str,
@@ -745,6 +1668,9 @@ struct Words {
     overview: &'static str,
     disks: &'static str,
     heads: [&'static str; 6],
+    /// What to call the machine before one has been named — the header's fallback, for a board nobody
+    /// has pointed at anything yet. The credentials' host is what goes there once there are any.
+    server: &'static str,
     unconfigured: &'static str,
     unsupported: &'static str,
     no_network: &'static str,
@@ -759,12 +1685,28 @@ impl Words {
         match language {
             Language::Chinese => Self {
                 language,
+                title: "服务器监控",
+                add: "添加设备",
+                edit_device: "编辑设备",
+                no_devices: "还没有添加服务器：点下面的按钮填上地址和账号",
+                not_looked: "还没有看过",
+                host: "地址",
+                account: "账号",
+                password: "密码",
+                save: "保存",
+                cancel: "取消",
+                delete: "删除",
+                wrong_host: "要填地址",
+                wrong_user: "要填账号",
                 cpu: "CPU",
                 memory: "内存",
                 network: "网络",
                 disks_speed: "硬盘读写",
+                storage: "存储",
+                disk_busy: "磁盘繁忙",
                 received: "接收",
                 sent: "发送",
+                read: "读取",
                 written: "写入",
                 temperature: "温度",
                 uptime: "本次运行",
@@ -772,8 +1714,9 @@ impl Words {
                 overview: "概览",
                 disks: "硬盘",
                 heads: ["硬盘", "容量", "温度", "繁忙", "读取", "写入"],
-                unconfigured: "还没有配置 NAS：这台板子还不知道要看哪一台",
-                unsupported: "本版固件还没有 SSH 客户端，暂时看不了 NAS",
+                server: "服务器",
+                unconfigured: "还没有配置服务器：这台板子还不知道要看哪一台",
+                unsupported: "本版固件还没有 SSH 客户端，暂时看不了服务器",
                 no_network: "板子没连上网络",
                 unreachable: "连不上那台机器",
                 authentication: "账号或密码不对",
@@ -782,12 +1725,28 @@ impl Words {
             },
             Language::English => Self {
                 language,
+                title: "Server monitor",
+                add: "Add a server",
+                edit_device: "Edit server",
+                no_devices: "No servers yet: use the button below to add an address and an account",
+                not_looked: "not looked at yet",
+                host: "Address",
+                account: "Account",
+                password: "Password",
+                save: "Save",
+                cancel: "Cancel",
+                delete: "Delete",
+                wrong_host: "an address is required",
+                wrong_user: "an account is required",
                 cpu: "CPU",
                 memory: "Memory",
                 network: "Network",
                 disks_speed: "Disks",
+                storage: "Storage",
+                disk_busy: "Disk busy",
                 received: "in",
                 sent: "out",
+                read: "read",
                 written: "written",
                 temperature: "temp",
                 uptime: "up",
@@ -795,8 +1754,9 @@ impl Words {
                 overview: "Overview",
                 disks: "Disks",
                 heads: ["DISK", "SIZE", "TEMP", "BUSY", "READ", "WRITE"],
-                unconfigured: "No NAS configured: this board has not been told which one to watch",
-                unsupported: "This image has no SSH client yet, so it cannot watch a NAS",
+                server: "Server",
+                unconfigured: "No server configured: this board has not been told which one to watch",
+                unsupported: "This image has no SSH client yet, so it cannot watch a server",
                 no_network: "the board is not on a network",
                 unreachable: "nothing answered",
                 authentication: "wrong user or password",
@@ -817,42 +1777,91 @@ impl Words {
             NasFault::Unsupported => self.unsupported,
         }
     }
+
+    /// What to say about a form that will not save, in this language.
+    fn wrong(&self, wrong: Wrong) -> &'static str {
+        match wrong {
+            Wrong::Host => self.wrong_host,
+            Wrong::User => self.wrong_user,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A board watching the simulator's NAS, built the way a desktop test builds one.
-    fn monitored() -> NasMonitor {
-        let board = Arc::new(Board::simulated());
+    /// One machine, as the form would have written it.
+    fn credentials(host: &str) -> NasCredentials {
+        NasCredentials {
+            host: host.to_string(),
+            port: 22,
+            user: String::from("nasstat"),
+            password: String::from("hunter2"),
+            interval_secs: 5,
+            host_key: None,
+        }
+    }
 
-        board
-            .nas()
-            .remember(&NasCredentials {
-                host: String::from("192.168.1.10"),
-                port: 22,
-                user: String::from("nasstat"),
-                password: String::from("hunter2"),
-                interval_secs: 5,
-                host_key: None,
-            })
-            .unwrap();
+    /// A board told about one machine and opened the way the launcher opens it: on the list.
+    fn monitor() -> NasMonitor {
+        let board = Arc::new(Board::simulated());
+        board.nas().remember(&credentials("192.168.1.10")).unwrap();
 
         NasMonitor::new(board)
+    }
+
+    /// Types `text` into the field the form is on, a character at a time — which is what the panel's own
+    /// keyboard does.
+    fn type_into(monitor: &mut NasMonitor, field: Field, text: &str) {
+        monitor.update(Message::Focus(field));
+
+        for character in text.chars() {
+            monitor.update(Message::Key(KeyAction::Char(character)));
+        }
+    }
+
+    /// The app opens on the list, and a row is what puts a machine on the monitoring page.
+    ///
+    /// The whole of the shape this app grew: a board can be pointed at several machines, so the page
+    /// says *which* one it is about before it says anything about it.
+    #[test]
+    fn the_app_opens_on_the_list_and_a_row_opens_the_machine() {
+        let mut monitor = monitor();
+
+        assert_eq!(monitor.screen(), Screen::List);
+        assert_eq!(monitor.devices().len(), 1);
+        assert!(monitor.watched().is_none(), "and nothing is being looked at yet");
+
+        monitor.update(Message::Open(0));
+
+        assert_eq!(monitor.screen(), Screen::Monitor);
+        assert_eq!(monitor.watched().unwrap().host, "192.168.1.10");
+        // The look is asked for as the page opens and the simulator answers inside the call, so the
+        // first frame of the monitoring page is a machine that has already answered.
+        assert_eq!(monitor.reading().status, NasStatus::Online);
+        assert_eq!(monitor.reading().disks.len(), 3);
+        assert!(
+            monitor.seen("192.168.1.10").is_some(),
+            "and the row of the list remembers what it saw"
+        );
+        let _ = monitor.view();
+
+        // Back leaves the machine in the list, and the row still saying what it said.
+        monitor.update(Message::Back);
+
+        assert_eq!(monitor.screen(), Screen::List);
+        assert_eq!(monitor.devices().len(), 1);
+        assert!(monitor.seen("192.168.1.10").is_some());
+        let _ = monitor.view();
     }
 
     /// The page draws from a reading, and a reading arrives from the backend rather than from a frame:
     /// the app pulls on every tick and asks only on the interval.
     #[test]
     fn a_tick_pulls_every_time_and_asks_on_the_interval() {
-        let mut monitor = monitored();
-
-        // Opening the page asks for a look, and this simulator answers inside the call — so the state a
-        // window shows on its first frame is a machine that has already answered.
-        assert_eq!(monitor.reading().status, NasStatus::Online);
-        assert_eq!(monitor.reading().disks.len(), 3);
-        let _ = monitor.view();
+        let mut monitor = monitor();
+        monitor.update(Message::Open(0));
 
         // A tick inside the interval pulls and does not ask again: one look per interval, not one per
         // frame, which is the whole of why the app has an `asked` at all.
@@ -867,6 +1876,88 @@ mod tests {
         assert_ne!(monitor.asked, Some(start), "a look when the interval is up");
         assert!(monitor.reading().age().is_some());
 
+        let _ = monitor.view();
+    }
+
+    /// A tick on the list asks for nothing: a look is a network round trip to another machine, and a
+    /// page nobody is on has no business opening sessions to it.
+    #[test]
+    fn the_list_does_not_ask_for_a_look() {
+        let mut monitor = monitor();
+        let start = monitor.asked.unwrap();
+
+        monitor.tick(start + Duration::from_secs(600));
+
+        assert_eq!(monitor.asked, Some(start), "the list's clock does not start");
+    }
+
+    /// Typing a machine into the form and saving puts it in the list, and the fields the form does not
+    /// ask about come out as the defaults the credentials file documents.
+    #[test]
+    fn the_form_adds_a_machine() {
+        let mut monitor = monitor();
+
+        monitor.update(Message::Add);
+        assert_eq!(monitor.screen(), Screen::Form);
+
+        type_into(&mut monitor, Field::Host, "192.168.1.20");
+
+        // Saving with no account is refused, and the form says which half of the login is missing.
+        monitor.update(Message::Save);
+
+        assert_eq!(monitor.screen(), Screen::Form, "the form stays up");
+        assert_eq!(monitor.form.wrong, Some(Wrong::User));
+
+        type_into(&mut monitor, Field::User, "nasstat");
+        monitor.update(Message::Save);
+
+        assert_eq!(monitor.screen(), Screen::List);
+        assert_eq!(monitor.devices().len(), 2);
+        assert_eq!(monitor.devices()[1].host, "192.168.1.20");
+        assert_eq!(monitor.devices()[1].user, "nasstat");
+        assert_eq!(monitor.devices()[1].port, 22, "the port is the file's default");
+        assert_eq!(monitor.devices()[1].interval_secs, 5);
+        let _ = monitor.view();
+    }
+
+    /// A form opened on a machine already in the list writes that entry rather than a second one, and
+    /// the delete on it drops the entry it was opened on.
+    #[test]
+    fn the_form_corrects_and_deletes() {
+        let mut monitor = monitor();
+
+        monitor.update(Message::Open(0));
+        monitor.update(Message::Edit);
+
+        assert_eq!(monitor.screen(), Screen::Form);
+        assert_eq!(monitor.form.host, "192.168.1.10", "filled in with what is there");
+        assert!(monitor.form.editing.is_some(), "and it is a correction");
+
+        // Retyping the password, which is what a form is usually opened for.
+        monitor.update(Message::Focus(Field::Password));
+
+        while !monitor.form.password.is_empty() {
+            monitor.update(Message::Key(KeyAction::Backspace));
+        }
+        monitor.update(Message::Key(KeyAction::Char('n')));
+        monitor.update(Message::Save);
+
+        assert_eq!(monitor.screen(), Screen::List);
+        assert_eq!(monitor.devices().len(), 1, "corrected, not added a second time");
+        assert_eq!(monitor.devices()[0].password, "n");
+
+        // And the same machine, dropped.
+        monitor.update(Message::Open(0));
+        monitor.update(Message::Edit);
+        monitor.update(Message::Delete);
+
+        assert_eq!(monitor.screen(), Screen::List);
+        assert!(monitor.devices().is_empty());
+        assert!(
+            monitor.watched().is_none(),
+            "and the page has nothing left to be about"
+        );
+        assert_eq!(monitor.reading().status, NasStatus::Unconfigured);
         let _ = monitor.view();
     }
 
@@ -890,6 +1981,10 @@ mod tests {
         struct Refusing;
 
         impl NasBackend for Refusing {
+            fn devices(&self) -> Vec<NasCredentials> {
+                Vec::new()
+            }
+
             fn watching(&self) -> Option<NasCredentials> {
                 None
             }
@@ -898,7 +1993,7 @@ mod tests {
                 Err(HalError::NotSupported)
             }
 
-            fn forget(&mut self) -> Result<(), HalError> {
+            fn forget(&mut self, _host: &str) -> Result<(), HalError> {
                 Err(HalError::NotSupported)
             }
 
@@ -1037,7 +2132,8 @@ mod tests {
     /// The two tabs are the two halves of one page, and switching is a message rather than a rebuild.
     #[test]
     fn the_tabs_switch() {
-        let mut monitor = monitored();
+        let mut monitor = monitor();
+        monitor.update(Message::Open(0));
 
         assert_eq!(monitor.tab(), Tab::Overview);
 

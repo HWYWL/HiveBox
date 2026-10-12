@@ -11,7 +11,10 @@ use std::sync::Mutex;
 use pomelo_hal::wifi_credentials::{self, WifiCredentials};
 use pomelo_hal::{ApInfo, HalError, ScanState, WifiBackend, WifiState, WifiStatus};
 
-mod ffi {
+// `pub(crate)` so the NAS backend can share `HalWifiStatus` and `hal_wifi_get_status` rather than
+// declaring the same C function a second time — two `extern` declarations of one symbol have to
+// agree on their types, and a second status struct would not.
+pub(crate) mod ffi {
     use std::ffi::c_char;
 
     pub const SSID_MAX_LEN: usize = 33;

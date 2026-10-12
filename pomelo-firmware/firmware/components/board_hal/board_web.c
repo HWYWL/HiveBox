@@ -1614,6 +1614,118 @@ static esp_err_t handle_wifi_connect(httpd_req_t *req)
 /* Written only after the status says the connection is up — the browser calls this, see the note above
  * the section. `autoconnect` is what this page is promising: a network chosen here is a network the
  * box joins by itself next time. */
+/*
+ * The machines the box watches, as three fields and one file.
+ *
+ * Not NVS: credentials in this project live in AppData as files, for the reason `pomelo-hal`'s
+ * `nas_credentials` gives -- an app that read the file itself would work on a desktop and do nothing
+ * on the board, where Rust's `std::fs` cannot write through ESP-IDF's VFS. This writes the same file
+ * the app's backend reads, and the *backend* is what notices a change and re-points the SSH session:
+ * all that happens here is that it is written down.
+ *
+ * The file holds a *list* -- `[[device]]` blocks, one per machine -- because a board can be pointed at
+ * more than one, and this form is one entry in it. So it **appends**: what is already there stays where
+ * it is and the new machine goes after it. Saving the same address twice therefore leaves two blocks
+ * for one machine, which is what the device's reader is written for: it keeps the last of them
+ * (`nas_credentials::parse_devices`), and the device's own page rewrites the file properly the next
+ * time it saves anything.
+ *
+ * `host_key` is deliberately absent. Trusting the server's key the first time and refusing it after
+ * that is the SSH client's business (`pomelo-hal-esp32/src/nas.rs`, which keeps its own `known_hosts`
+ * beside this file); a fingerprint written here would be a second opinion that nothing checks.
+ */
+#define WEB_NAS_CONF "/internal/AppData/NAS/nas.conf"
+
+/* The size the *device* reads this file back with -- `pomelo-hal-esp32`'s `nas`, which parses it out
+ * of a `FILE_CAPACITY` buffer. A list that outgrew it would be a list the device read as *empty*, so
+ * this form refuses to make one rather than writing past the reader. */
+#define WEB_NAS_CONF_MAX 4096
+
+static esp_err_t handle_nas_remember(httpd_req_t *req)
+{
+    char host[WEB_NAME_MAX];
+    char user[WEB_NAME_MAX];
+    char password[WEB_QUERY_MAX];
+
+    if (!query_string(req, "host", host, sizeof host) || host[0] == '\0') {
+        return send_blocked(req, "host is required");
+    }
+    if (!query_string(req, "user", user, sizeof user) || user[0] == '\0') {
+        return send_blocked(req, "user is required");
+    }
+    if (!query_string(req, "password", password, sizeof password)) {
+        password[0] = '\0';
+    }
+
+    /* Is there room for one more? The file is read into the buffer the device reads it back with and
+     * nothing is done with the bytes: what this asks is "does it still fit", and a file that no longer
+     * does is one the device could not read either -- see WEB_NAS_CONF_MAX. */
+    char     *probe = malloc(WEB_NAS_CONF_MAX);
+    size_t    held = 0;
+    esp_err_t fits = ESP_FAIL;
+
+    if (probe != NULL) {
+        fits = hal_storage_read_file(WEB_NAS_CONF, probe, WEB_NAS_CONF_MAX, &held);
+        free(probe);
+    }
+
+    if (fits == ESP_ERR_INVALID_SIZE) {
+        return send_blocked(req, "监控列表已满：先在设备上删掉一台服务器，再添加");
+    }
+    if (fits != ESP_OK && fits != ESP_ERR_NOT_FOUND) {
+        return send_error(req, "500 Internal Server Error", "read_failed", esp_err_to_name(fits));
+    }
+
+    /* One machine's block. The leading newline is what keeps it off the last line of the block before
+     * it: every writer here leaves the file ending in one, and a blank line costs nothing if it does
+     * not. */
+    char text[1024];
+    size_t used = 0;
+
+    used += (size_t)snprintf(text + used, sizeof text - used, "\n[[device]]\nhost = ");
+    if (!toml_quote(text, sizeof text, &used, host)) {
+        return send_blocked(req, "the address is too long");
+    }
+    used += (size_t)snprintf(text + used, sizeof text - used, "\nuser = ");
+    if (!toml_quote(text, sizeof text, &used, user)) {
+        return send_blocked(req, "the account name is too long");
+    }
+    used += (size_t)snprintf(text + used, sizeof text - used, "\npassword = ");
+    if (!toml_quote(text, sizeof text, &used, password)) {
+        return send_blocked(req, "the password is too long");
+    }
+    // The two values the form does not ask for, written out rather than left out: `port` defaults to
+    // 22 in the parser, and `interval_secs` to five. Saying so in the file makes it editable by hand
+    // without knowing what the defaults are -- which is the escape hatch for a machine on another port.
+    used += (size_t)snprintf(text + used, sizeof text - used, "\nport = 22\ninterval_secs = 5\n");
+
+    esp_err_t ret = hal_storage_append_file(WEB_NAS_CONF, text, used);
+
+    if (ret != ESP_OK) {
+        return send_error(req, "500 Internal Server Error", "save_failed", esp_err_to_name(ret));
+    }
+
+    ESP_LOGI(TAG, "NAS added: %s@%s", user, host);
+
+    return send_json(req, "{\"ok\":true}");
+}
+
+/// Forgets *every* machine: the file goes, and the backend notices that it has.
+///
+/// Every one of them and not the one this page's form last wrote: the file is the list, there is no
+/// field on this page that says which entry is meant, and "stop watching" is a switch rather than an
+/// editor. Dropping one machine is the device's own page, which has a row per machine to drop.
+static esp_err_t handle_nas_forget(httpd_req_t *req)
+{
+    esp_err_t ret = hal_storage_remove_file(WEB_NAS_CONF);
+
+    if (ret != ESP_OK && ret != ESP_ERR_NOT_FOUND) {
+        return send_error(req, "500 Internal Server Error", "forget_failed", esp_err_to_name(ret));
+    }
+
+    return send_json(req, "{\"ok\":true}");
+}
+
 static esp_err_t handle_wifi_remember(httpd_req_t *req)
 {
     char ssid[WEB_QUERY_MAX];
@@ -1754,6 +1866,8 @@ static const web_route_t s_routes[] = {
     { "/api/wifi/scan",       HTTP_GET,  handle_wifi_scan_results },
     { "/api/wifi/connect",    HTTP_POST, handle_wifi_connect },
     { "/api/wifi/remember",   HTTP_POST, handle_wifi_remember },
+    { "/api/nas/remember",     HTTP_POST, handle_nas_remember },
+    { "/api/nas/forget",       HTTP_POST, handle_nas_forget },
     { "/api/wifi/disconnect", HTTP_POST, handle_wifi_disconnect },
     { "/api/wifi/forget",     HTTP_POST, handle_wifi_forget },
     { "/api/restart",         HTTP_POST, handle_restart },
