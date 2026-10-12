@@ -377,7 +377,15 @@ esp_err_t hal_wifi_scan_start(void)
     s_scan_state = HAL_WIFI_SCAN_SCANNING;
     unlock();
 
+    /* An active scan with the dwell cut down: 60 ms at least and 90 ms at most per channel, where the
+     * driver's own defaults let it sit on a channel that answers for up to a second and a half. That is
+     * the difference between a list that is there while somebody is looking at it and one that appears
+     * after they have given up and pressed the button again. What the shorter dwell costs is the
+     * weakest access points -- the ones this board could barely hold a connection to anyway. */
     wifi_scan_config_t scan_cfg = {0};
+    scan_cfg.scan_time.active.min = 60;
+    scan_cfg.scan_time.active.max = 90;
+
     esp_err_t ret = esp_wifi_scan_start(&scan_cfg, false); // false = asynchronous
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "esp_wifi_scan_start: %s", esp_err_to_name(ret));

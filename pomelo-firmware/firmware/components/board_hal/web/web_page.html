@@ -193,6 +193,8 @@ main { padding-top: 16px; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .row-val { font-size: 14.5px; color: var(--label-2); font-variant-numeric: tabular-nums; }
+/* The row the form below is correcting: the same wash the log's current line uses. */
+.row.editing { background: var(--tint-soft); }
 .chev { color: var(--label-3); flex: 0 0 auto; }
 .tile {
   width: 36px; height: 36px; border-radius: 10px; flex: 0 0 auto;
@@ -532,12 +534,19 @@ dialog.full { margin: auto; width: 100%; }
 .slider input[type="range"]::-moz-range-thumb { width: 22px; height: 22px; border: 0; border-radius: 50%; background: #fff; }
 .slider-val { font-size: 13px; color: var(--label-2); font-variant-numeric: tabular-nums; min-width: 40px; text-align: right; }
 
+/* The mirror, and the one thing it must never be is *cropped*: the panel is square, the card is not, and
+   the picture is the page's whole reason for existing — a calculator whose bottom row is behind the
+   buttons is a page that shows a screen and lies about it. So the picture is sized to fit inside the
+   frame rather than to fill it: as wide as the card allows, and no taller than the frame. The frame's
+   height is the one number both of them are held to, which is why it is a variable here. */
 .stage {
+  --stage-tall: 62vh;
   position: relative; background: #000; margin: 0; overflow: hidden;
-  display: grid; place-items: center; min-height: 240px; max-height: 62vh;
+  display: grid; place-items: center; min-height: 240px; max-height: var(--stage-tall);
 }
 .stage img {
-  width: 100%; height: auto; display: block; cursor: crosshair;
+  width: auto; height: auto; max-width: 100%; max-height: var(--stage-tall);
+  display: block; cursor: crosshair;
   touch-action: none; user-select: none; -webkit-user-drag: none;
 }
 .stage .stage-note {
@@ -638,6 +647,7 @@ textarea.code.wrap { white-space: pre-wrap; word-break: break-word; }
       <button data-view="files" class="on">文件</button>
       <button data-view="wifi">网络</button>
       <button data-view="control">控制</button>
+      <button data-view="servers">服务器</button>
       <button data-view="logs">日志</button>
       <button data-view="system">设备</button>
     </nav>
@@ -684,19 +694,13 @@ textarea.code.wrap { white-space: pre-wrap; word-break: break-word; }
     </div>
   </section>
 
-  <section id="view-system" hidden>
-    <div class="card hero" id="hero"></div>
-    <div class="group" style="margin-top:16px"><div class="card" id="sysInfo"></div></div>
+  <section id="view-servers" hidden>
     <div class="group">
-      <div class="group-title">存储</div>
-      <div class="card" id="sysStorage"></div>
-    </div>
-    <div class="bar-actions">
-      <button class="btn" id="sysRefresh"><svg class="ic sm"><use href="#i-refresh"/></svg>刷新</button>
-      <button class="btn danger" id="rebootBtn"><svg class="ic sm"><use href="#i-power"/></svg>重启设备</button>
+      <div class="group-title">已保存的服务器</div>
+      <div class="card" id="serverList"></div>
     </div>
     <div class="group">
-      <div class="group-title">服务器监控</div>
+      <div class="group-title">添加到监控列表</div>
       <div class="card" style="padding:14px">
         <label class="field">
           <svg class="ic sm"><use href="#i-link"/></svg>
@@ -707,61 +711,32 @@ textarea.code.wrap { white-space: pre-wrap; word-break: break-word; }
           <input id="nasUser" placeholder="登录账号" autocomplete="off" spellcheck="false">
         </label>
         <label class="field" style="margin-top:10px">
-          <svg class="ic sm"><use href="#i-check"/></svg>
+          <svg class="ic sm"><use href="#i-lock"/></svg>
           <input id="nasPassword" type="password" placeholder="密码" autocomplete="off">
         </label>
         <div class="bar-actions" style="padding:12px 0 0;margin:0">
           <button class="btn primary" id="nasSave">添加到监控列表</button>
-          <button class="btn" id="nasForget">清空监控列表</button>
+          <button class="btn" id="nasCancel" hidden>取消</button>
+          <button class="btn" id="nasClear">清空监控列表</button>
         </div>
         <div class="pv-note" style="padding:10px 4px 0;text-align:left" id="nasOut">
-          设备用自带的 SSH 客户端登录服务器读状态，密码只写在设备里，端口默认 22。
-          这里填的每一台都会追加到设备的监控列表里（同一地址再存一次，以最后一次为准）；
-          列表在设备的「服务器监控」应用里看，也可以在那上面增删。要改端口，改这台设备里的
-          /internal/AppData/NAS/nas.conf。
+          密码只写在设备里，端口默认 22；地址是这台机器的身份，同一地址再存一次就是「更正」那一台
+          （行尾的铅笔也可以直接改）。这张列表就是设备上「服务器监控」应用里的那一份，两边随时都能改。
         </div>
       </div>
-      <script>
-        // The two buttons are wired here, beside the fields they belong to, rather than in the page's
-        // own script: this is one self-contained block, and it leans on nothing but `api()`, which the
-        // rest of the page uses for every call it makes.
-        const nasOut = document.getElementById("nasOut");
+    </div>
+  </section>
 
-        async function nasSave() {
-          const host = document.getElementById("nasHost").value.trim();
-          const user = document.getElementById("nasUser").value.trim();
-          const password = document.getElementById("nasPassword").value;
-
-          if (!host || !user) {
-            nasOut.textContent = "地址和账号都要填。";
-            return;
-          }
-
-          nasOut.textContent = "正在保存…";
-
-          try {
-            await api("/api/nas/remember", { host: host, user: user, password: password }, "POST");
-            nasOut.textContent = "已加入监控列表。回到设备上的「服务器监控」应用，点这台服务器就开始连接。";
-            document.getElementById("nasPassword").value = "";
-          } catch (error) {
-            nasOut.textContent = "保存失败：" + (error && error.message ? error.message : error);
-          }
-        }
-
-        async function nasForget() {
-          nasOut.textContent = "正在清空…";
-
-          try {
-            await api("/api/nas/forget", {}, "POST");
-            nasOut.textContent = "监控列表已清空，设备上的凭据文件也删掉了。";
-          } catch (error) {
-            nasOut.textContent = "清空失败：" + (error && error.message ? error.message : error);
-          }
-        }
-
-        document.getElementById("nasSave").addEventListener("click", nasSave);
-        document.getElementById("nasForget").addEventListener("click", nasForget);
-      </script>
+  <section id="view-system" hidden>
+    <div class="card hero" id="hero"></div>
+    <div class="group" style="margin-top:16px"><div class="card" id="sysInfo"></div></div>
+    <div class="group">
+      <div class="group-title">存储</div>
+      <div class="card" id="sysStorage"></div>
+    </div>
+    <div class="bar-actions">
+      <button class="btn" id="sysRefresh"><svg class="ic sm"><use href="#i-refresh"/></svg>刷新</button>
+      <button class="btn danger" id="rebootBtn"><svg class="ic sm"><use href="#i-power"/></svg>重启设备</button>
     </div>
   </section>
 
@@ -774,7 +749,7 @@ textarea.code.wrap { white-space: pre-wrap; word-break: break-word; }
       <div class="group-title">远程操作</div>
       <div class="card">
         <div class="stage" id="stage">
-          <div class="stage-note" id="stageNote">点「截屏」看一眼现在的屏幕，之后可以在画面上点按或拖动，操作会和手指按在设备上一样。</div>
+          <div class="stage-note" id="stageNote">正在取回屏幕…打开这一页就会显示现在的画面；之后可以在画面上点按或拖动，操作和手指按在设备上一样。想取一张新的，点下面的「截屏」。</div>
         </div>
         <div class="bar-actions" style="padding:12px 14px 14px;margin:0">
           <button class="btn tinted" id="shotBtn"><svg class="ic sm"><use href="#i-refresh"/></svg>截屏</button>
@@ -1018,6 +993,8 @@ const state = {
   system: null,
   wifi: null,
   scan: null,
+  servers: null,         // the last /api/nas/list answer: [{ host, user, port }]
+  editing: null,         // the host the server form is correcting, or null when it is adding one
   query: "",
   sort: { key: "name", dir: 1 },
   select: false,
@@ -2129,12 +2106,11 @@ function renderScan() {
     return;
   }
 
-  const seen = new Map();
-  for (const net of scan.networks || []) {
-    const before = seen.get(net.ssid);
-    if (!before || net.rssi > before.rssi) seen.set(net.ssid, net);
-  }
-  const networks = Array.from(seen.values()).sort((a, b) => b.rssi - a.rssi);
+  /* Every access point the scan found, strongest first — and *every* one of them, repeats and all.
+     Folding the same name together answered a different question from the one this list is for: it asked
+     "which networks are here" when what a person needs is "which access points can this board join". One
+     name on three channels is three of those, and the row's own meta says which is which. */
+  const networks = (scan.networks || []).slice().sort((a, b) => b.rssi - a.rssi);
   if (!networks.length) {
     box.innerHTML = '<div class="empty" style="padding:30px 20px"><svg class="ic"><use href="#i-wifi"/></svg>' +
       '<div class="empty-title">没有发现网络</div><div class="empty-note">把设备挪近一点，或者再扫描一次</div></div>';
@@ -2270,10 +2246,181 @@ async function copyText(text) {
   }
 }
 
-/* --- the five views -------------------------------------------------------- */
+/* --- the servers ----------------------------------------------------------- */
+
+/* The machines the board watches, as the device's own app lists them. Read, not remembered: the list
+   is a file on the board and the device's page writes the same one, so this asks every time the view
+   is opened rather than keeping a copy that could disagree with it. */
+async function loadServers(quiet) {
+  try {
+    const answer = await api("/api/nas/list");
+    state.servers = answer.devices || [];
+  } catch (error) {
+    if (!quiet) toast(error.message, "bad");
+    return;
+  }
+
+  renderServers();
+}
+
+function renderServers() {
+  const box = $("serverList");
+
+  if (!state.servers) { box.innerHTML = skeletonHtml(); return; }
+
+  if (!state.servers.length) {
+    box.innerHTML =
+      '<div class="row"><div class="row-main">' +
+      '<div class="row-name">还没有服务器</div>' +
+      '<div class="row-meta">在下面填一台的地址和账号，它就会出现在这里 —— ' +
+      '设备上的「服务器监控」里也会多出这一台。</div>' +
+      "</div></div>";
+    return;
+  }
+
+  /* No password in the row and none in the answer it came from: the board takes one from this page and
+     has no reason to hand one back. What a row is, is the address and who to log in as -- and the two
+     things a row can do, which are to be corrected and to be dropped. */
+  box.innerHTML = state.servers.map((device) =>
+    '<div class="row' + (state.editing === device.host ? " editing" : "") + '">' +
+    '<svg class="ic sm" style="color:var(--label-2)"><use href="#i-box"/></svg>' +
+    '<div class="row-main">' +
+    '<div class="row-name">' + esc(device.host) + "</div>" +
+    '<div class="row-meta">' + esc(device.user || "—") + " · 端口 " + esc(device.port || "22") +
+    (state.editing === device.host ? " · 正在下面的表单里修改" : "") + "</div>" +
+    "</div>" +
+    '<button class="icon-btn" data-edit="' + esc(device.host) + '" aria-label="修改">' +
+    '<svg class="ic sm"><use href="#i-pencil"/></svg></button>' +
+    '<button class="icon-btn" data-forget="' + esc(device.host) + '" aria-label="移除">' +
+    '<svg class="ic sm"><use href="#i-trash"/></svg></button>' +
+    "</div>").join("");
+}
+
+/* The form, switched from adding a machine to correcting one.
+ *
+ * The password field is emptied and says so: the board never hands a password back, and asking somebody
+ * to retype one it already has would be asking them for something the board is holding. Empty means
+ * "leave it as it is"; the file on the board is where a password is cleared. */
+function startEdit(host) {
+  const device = (state.servers || []).find((held) => held.host === host);
+  if (!device) return;
+
+  state.editing = device.host;
+  $("nasHost").value = device.host;
+  $("nasUser").value = device.user || "";
+  $("nasPassword").value = "";
+  $("nasPassword").placeholder = "留空则不改动";
+  $("nasSave").textContent = "保存修改";
+  $("nasCancel").hidden = false;
+  $("nasOut").textContent = "正在修改 " + device.host + "：地址和账号可以改，密码留空就是不动它。";
+
+  renderServers();
+  $("nasHost").focus();
+}
+
+function cancelEdit() {
+  state.editing = null;
+  $("nasHost").value = "";
+  $("nasUser").value = "";
+  $("nasPassword").value = "";
+  $("nasPassword").placeholder = "密码";
+  $("nasSave").textContent = "添加到监控列表";
+  $("nasCancel").hidden = true;
+  $("nasOut").textContent = "这台设备会把密码存进自己的文件里，网页不会再读出来。";
+
+  renderServers();
+}
+
+async function nasSave() {
+  const out = $("nasOut");
+  const host = $("nasHost").value.trim();
+  const user = $("nasUser").value.trim();
+  const password = $("nasPassword").value;
+
+  if (!host || !user) {
+    out.textContent = "地址和账号都要填。";
+    return;
+  }
+
+  const editing = state.editing;
+  out.textContent = editing ? "正在保存修改…" : "正在保存…";
+
+  try {
+    // One endpoint for both: the board writes the machine it is given, in the place that machine already
+    // has when it has one. See `handle_nas_remember`.
+    await api("/api/nas/remember", { host: host, user: user, password: password }, "POST");
+    await loadServers(true);
+
+    if (editing) {
+      cancelEdit();
+      out.textContent = editing === host
+        ? "已保存：" + host + " 的信息已更新。"
+        : "已保存为 " + host + "。地址变了就是另一台 —— 原来的 " + editing +
+          " 还在列表里，需要的话把它删掉。";
+    } else {
+      $("nasHost").value = "";
+      $("nasUser").value = "";
+      $("nasPassword").value = "";
+      out.textContent = "已加入。设备上的「服务器监控」现在也有这一台，点它就开始连接。";
+    }
+  } catch (error) {
+    out.textContent = "保存失败：" + (error && error.message ? error.message : error);
+  }
+}
+
+async function forgetServer(host) {
+  const sure = await confirmSheet({
+    title: "移除这一台？",
+    note: host,
+    hint: "设备自己的「服务器监控」里也会没有它。",
+    ok: "移除",
+    danger: true
+  });
+  if (!sure) return;
+
+  const out = $("nasOut");
+  const was_editing = state.editing;
+  out.textContent = "正在移除…";
+
+  try {
+    await api("/api/nas/forget", { host: host }, "POST");
+    await loadServers(true);
+
+    // A form still pointed at a machine that is gone is a form that would put it back on the next save.
+    if (was_editing === host) cancelEdit();
+
+    out.textContent = "已移除 " + host + "。";
+  } catch (error) {
+    out.textContent = "移除失败：" + (error && error.message ? error.message : error);
+  }
+}
+
+async function nasClear() {
+  const sure = await confirmSheet({
+    title: "清空监控列表？",
+    note: "设备上保存的每一台都会删掉。",
+    hint: "设备自己的「服务器监控」里也会一台不剩。",
+    ok: "清空",
+    danger: true
+  });
+  if (!sure) return;
+
+  const out = $("nasOut");
+  out.textContent = "正在清空…";
+
+  try {
+    await api("/api/nas/forget", {}, "POST");
+    out.textContent = "监控列表已清空。";
+    await loadServers(true);
+  } catch (error) {
+    out.textContent = "清空失败：" + (error && error.message ? error.message : error);
+  }
+}
+
+/* --- the six views --------------------------------------------------------- */
 function setView(view) {
   state.view = view;
-  for (const name of ["files", "wifi", "control", "logs", "system"]) {
+  for (const name of ["files", "wifi", "control", "servers", "logs", "system"]) {
     $("view-" + name).hidden = name !== view;
   }
 
@@ -2286,12 +2433,30 @@ function setView(view) {
   thumb.style.transform = "translateX(" + active.offsetLeft + "px)";
 
   try { localStorage.setItem("hivebox.view", view); } catch (error) { /* private mode */ }
-  if (view === "wifi") { renderWifi(); refreshWifi(true); }
+
+  /* A view is given what it cannot draw without, once, and then keeps it: the list of nearby networks
+     (a scan is seconds of radio, so it happens on the first look at the page and the button is what
+     asks again), the list of servers, and the picture of the screen. Every one of them is drawn from
+     what the last answer said until something asks for a new one. */
+  if (view === "wifi") {
+    renderWifi();
+    refreshWifi(true);
+    if (!state.scan) scanWifi();
+  }
   if (view === "system") renderSystem();
+  if (view === "servers") { renderServers(); loadServers(true); }
 
   /* The stream is opened when the log is being looked at and closed when it is not: a connection to
      the box is one of four, and one left open behind another tab is one a person cannot use. */
-  if (view === "control") { renderScreen(); loadScreen(true); renderRtc(); loadRtc(true); }
+  if (view === "control") {
+    renderScreen();
+    loadScreen(true);
+    renderRtc();
+    loadRtc(true);
+    /* And the picture of the screen, taken as the view opens. It is what this page is *for*: a stage
+       with a button under it and nothing on it is a page that has not said what it can do. */
+    captureScreen();
+  }
   if (view === "logs") { renderDiag(); loadDiag(true); readTail(); openStream(); }
   else closeStream();
 }
@@ -2516,8 +2681,12 @@ function askIdle() {
 }
 
 /* One picture, asked for whenever someone asks. There is no way to read the panel back, so this is
-   the shadow the driver kept on the way past — which is precisely what is on the glass. */
-function captureScreen() {
+   the shadow the driver kept on the way past — which is precisely what is on the glass.
+
+   `quiet` keeps what is on the stage until the new picture has arrived, which is what a refresh after a
+   touch wants: the fetch is about a second on this board, and a mirror that blanks out to a note every
+   time somebody taps it is a mirror that looks broken every time somebody uses it. */
+function captureScreen(quiet) {
   const stage = $("stage");
   if (state.screen && state.screen.capture === false) {
     stage.innerHTML = "<div class=\"stage-note\">" + esc(ERRORS.no_capture) + "</div>";
@@ -2526,16 +2695,24 @@ function captureScreen() {
 
   const picture = new Image();
   picture.alt = "设备屏幕";
-  stage.innerHTML = "<div class=\"stage-note\">正在取回屏幕…</div>";
+  if (!quiet) stage.innerHTML = "<div class=\"stage-note\">正在取回屏幕…</div>";
   picture.onload = () => {
     stage.innerHTML = "";
     stage.appendChild(picture);
     wireStage(picture);
   };
   picture.onerror = () => {
-    stage.innerHTML = "<div class=\"stage-note\">" + esc(ERRORS.capture_failed) + "</div>";
+    if (!quiet) stage.innerHTML = "<div class=\"stage-note\">" + esc(ERRORS.capture_failed) + "</div>";
   };
   picture.src = "/api/screenshot?t=" + Date.now();
+}
+
+/* And the picture again, a moment after a touch: what the tap did is on the panel, and the image the
+   browser is holding is the panel as it was before it. Delayed, so that a drag's release is one capture
+   rather than one per move — and so the board has drawn what it was just asked to do. */
+function refreshStage() {
+  clearTimeout(refreshStage.timer);
+  refreshStage.timer = setTimeout(() => captureScreen(true), 500);
 }
 
 function flashStage() {
@@ -2593,6 +2770,7 @@ function wireStage(picture) {
     sendTouch("up", at.x, at.y);
     down = null;
     flashStage();
+    refreshStage();
   };
 
   picture.onpointerup = release;
@@ -3220,7 +3398,7 @@ $("analysis").onclick = (event) => {
 };
 
 /* --- the screen, the clock, the stream ------------------------------------- */
-$("shotBtn").onclick = captureScreen;
+$("shotBtn").onclick = () => captureScreen();
 $("beepBtn").onclick = beep;
 $("screenOffBtn").onclick = () => setScreen({ on: false }, "屏幕已熄灭");
 
@@ -3243,6 +3421,29 @@ $("view-control").addEventListener("click", (event) => {
   else if (!state.screen) return;
   else if (on("scrPower")) setScreen({ on: !state.screen.on });
   else if (on("scrIdle")) askIdle();
+});
+
+/* The server view's actions, wired once for the view rather than per row: the rows are replaced every
+   time the list is read, so a handler attached to one of them would be replaced with it. */
+$("view-servers").addEventListener("click", (event) => {
+  const on = (selector) => event.target.closest && event.target.closest(selector);
+  const button = (selector) => (on(selector) ? event.target.closest(selector) : null);
+
+  const edit = button("[data-edit]");
+  if (edit) {
+    startEdit(edit.dataset.edit);
+    return;
+  }
+
+  const forget = button("[data-forget]");
+  if (forget) {
+    forgetServer(forget.dataset.forget);
+    return;
+  }
+
+  if (on("#nasSave")) nasSave();
+  else if (on("#nasCancel")) cancelEdit();
+  else if (on("#nasClear")) nasClear();
 });
 
 $("probeBtn").onclick = runProbe;

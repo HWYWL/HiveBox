@@ -1624,11 +1624,11 @@ static esp_err_t handle_wifi_connect(httpd_req_t *req)
  * all that happens here is that it is written down.
  *
  * The file holds a *list* -- `[[device]]` blocks, one per machine -- because a board can be pointed at
- * more than one, and this form is one entry in it. So it **appends**: what is already there stays where
- * it is and the new machine goes after it. Saving the same address twice therefore leaves two blocks
- * for one machine, which is what the device's reader is written for: it keeps the last of them
- * (`nas_credentials::parse_devices`), and the device's own page rewrites the file properly the next
- * time it saves anything.
+ * more than one, and this form is one entry in it. Saving an address that is already in the list
+ * **replaces** that entry, in the place it already has: the device's reader keeps the last block for a
+ * host (`nas_credentials::parse_devices`), so appending was never read wrong -- but two blocks for one
+ * machine in a file with four kilobytes for all of them is a list that fills up with one machine, and
+ * an *edit* that appends would be a worse version of the same thing.
  *
  * `host_key` is deliberately absent. Trusting the server's key the first time and refusing it after
  * that is the SSH client's business (`pomelo-hal-esp32/src/nas.rs`, which keeps its own `known_hosts`
@@ -1640,6 +1640,45 @@ static esp_err_t handle_wifi_connect(httpd_req_t *req)
  * of a `FILE_CAPACITY` buffer. A list that outgrew it would be a list the device read as *empty*, so
  * this form refuses to make one rather than writing past the reader. */
 #define WEB_NAS_CONF_MAX 4096
+
+/* One field out of a `key = value` line of the list, defined beside the reader further down.
+ *
+ * The two halves of one format are the writer here and the reader there, and the writer is the half that
+ * comes first in this file: a declaration is the whole of what it needs to know about the other. */
+static bool device_field(const char *line, const char *key, char *out, size_t cap);
+
+/* One machine's block, appended to `out`: answers the bytes it took, or 0 if it did not fit.
+ *
+ * The leading newline is what keeps it off the last line of the block before it: every writer here
+ * leaves the file ending in one, and a blank line costs nothing if it does not. `port` comes in as text
+ * because the caller may be carrying one over from an entry it is replacing -- see
+ * `handle_nas_remember` -- and `interval_secs` is written out rather than left out, so that the file can
+ * be read and edited by hand without knowing what the defaults are. */
+static size_t device_block(char *out, size_t cap, size_t used,
+                           const char *host, const char *user, const char *password, const char *port)
+{
+    size_t began = used;
+
+    if (used + 64 >= cap) {
+        return 0;
+    }
+
+    used += (size_t)snprintf(out + used, cap - used, "\n[[device]]\nhost = ");
+    if (!toml_quote(out, cap, &used, host)) {
+        return 0;
+    }
+    used += (size_t)snprintf(out + used, cap - used, "\nuser = ");
+    if (!toml_quote(out, cap, &used, user)) {
+        return 0;
+    }
+    used += (size_t)snprintf(out + used, cap - used, "\npassword = ");
+    if (!toml_quote(out, cap, &used, password)) {
+        return 0;
+    }
+    used += (size_t)snprintf(out + used, cap - used, "\nport = %s\ninterval_secs = 5\n", port);
+
+    return used - began;
+}
 
 static esp_err_t handle_nas_remember(httpd_req_t *req)
 {
@@ -1657,71 +1696,391 @@ static esp_err_t handle_nas_remember(httpd_req_t *req)
         password[0] = '\0';
     }
 
-    /* Is there room for one more? The file is read into the buffer the device reads it back with and
-     * nothing is done with the bytes: what this asks is "does it still fit", and a file that no longer
-     * does is one the device could not read either -- see WEB_NAS_CONF_MAX. */
-    char     *probe = malloc(WEB_NAS_CONF_MAX);
-    size_t    held = 0;
-    esp_err_t fits = ESP_FAIL;
+    char  *text = malloc(WEB_NAS_CONF_MAX);
+    char  *kept = malloc(WEB_NAS_CONF_MAX);
+    size_t held = 0;
 
-    if (probe != NULL) {
-        fits = hal_storage_read_file(WEB_NAS_CONF, probe, WEB_NAS_CONF_MAX, &held);
-        free(probe);
+    if (text == NULL || kept == NULL) {
+        free(text);
+        free(kept);
+        return send_busy(req);
     }
 
-    if (fits == ESP_ERR_INVALID_SIZE) {
-        return send_blocked(req, "监控列表已满：先在设备上删掉一台服务器，再添加");
+    /* Read with one byte to spare, so that what comes back is always a C string: the file has to fit the
+     * buffer the *device* reads it with, which is one byte more than this -- see WEB_NAS_CONF_MAX. */
+    esp_err_t read = hal_storage_read_file(WEB_NAS_CONF, text, WEB_NAS_CONF_MAX - 1, &held);
+    if (read != ESP_OK && read != ESP_ERR_NOT_FOUND) {
+        free(text);
+        free(kept);
+        return send_error(req, "500 Internal Server Error", "read_failed", esp_err_to_name(read));
     }
-    if (fits != ESP_OK && fits != ESP_ERR_NOT_FOUND) {
-        return send_error(req, "500 Internal Server Error", "read_failed", esp_err_to_name(fits));
+    text[read == ESP_OK ? held : 0] = '\0';
+
+    /* Every block that is not this host, in order -- and where this host's block was, the new one.
+     *
+     * The block is the text from one `[[device]]` to the next, so what is carried over is the file's own
+     * bytes. Two fields inside this host's block are read out before it is dropped, because the form asks
+     * for neither: the port (somebody set it by hand once) and the password (a page has no business
+     * asking a person to retype one it already has -- an empty password field means "leave it as it is",
+     * and to *clear* one the file is still the escape hatch). */
+    size_t kept_len = 0;
+    bool   replaced = false;
+    char   port[16] = "22";
+    char   was_password[WEB_QUERY_MAX] = "";
+
+    for (char *at = text; *at != '\0'; ) {
+        char *end = strstr(at + 1, "[[device]]");
+        if (end == NULL) {
+            end = at + strlen(at);
+        }
+
+        char named[WEB_NAME_MAX] = "";
+
+        for (char *line = at; line < end; ) {
+            char  *break_at = memchr(line, '\n', (size_t)(end - line));
+            size_t length   = break_at != NULL ? (size_t)(break_at - line) : (size_t)(end - line);
+            char   field[512];
+
+            if (length < sizeof field) {
+                memcpy(field, line, length);
+                field[length] = '\0';
+
+                if (device_field(field, "host", named, sizeof named)) {
+                    break;
+                }
+            }
+
+            line = break_at != NULL ? break_at + 1 : end;
+        }
+
+        size_t wrote;
+
+        if (strcmp(named, host) == 0) {
+            for (char *line = at; line < end; ) {
+                char  *break_at = memchr(line, '\n', (size_t)(end - line));
+                size_t length   = break_at != NULL ? (size_t)(break_at - line) : (size_t)(end - line);
+                char   field[512];
+
+                if (length < sizeof field) {
+                    memcpy(field, line, length);
+                    field[length] = '\0';
+
+                    if (device_field(field, "port", port, sizeof port)) {
+                        /* carried over */
+                    } else if (device_field(field, "password", was_password, sizeof was_password)) {
+                        /* carried over, unless the form sent a new one */
+                    }
+                }
+
+                line = break_at != NULL ? break_at + 1 : end;
+            }
+
+            wrote = device_block(
+                kept, WEB_NAS_CONF_MAX, kept_len, host, user,
+                password[0] != '\0' ? password : was_password, port);
+            replaced = true;
+        } else {
+            wrote = (size_t)(end - at);
+
+            if (kept_len + wrote >= WEB_NAS_CONF_MAX) {
+                free(text);
+                free(kept);
+                return send_blocked(req, "监控列表已满：先在设备上删掉一台服务器，再添加");
+            }
+
+            memcpy(kept + kept_len, at, wrote);
+        }
+
+        if (wrote == 0) {
+            free(text);
+            free(kept);
+            return send_blocked(req, "监控列表已满：先在设备上删掉一台服务器，再添加");
+        }
+
+        kept_len += wrote;
+        at = end;
     }
 
-    /* One machine's block. The leading newline is what keeps it off the last line of the block before
-     * it: every writer here leaves the file ending in one, and a blank line costs nothing if it does
-     * not. */
-    char text[1024];
-    size_t used = 0;
+    if (!replaced) {
+        size_t wrote = device_block(kept, WEB_NAS_CONF_MAX, kept_len, host, user, password, "22");
 
-    used += (size_t)snprintf(text + used, sizeof text - used, "\n[[device]]\nhost = ");
-    if (!toml_quote(text, sizeof text, &used, host)) {
-        return send_blocked(req, "the address is too long");
-    }
-    used += (size_t)snprintf(text + used, sizeof text - used, "\nuser = ");
-    if (!toml_quote(text, sizeof text, &used, user)) {
-        return send_blocked(req, "the account name is too long");
-    }
-    used += (size_t)snprintf(text + used, sizeof text - used, "\npassword = ");
-    if (!toml_quote(text, sizeof text, &used, password)) {
-        return send_blocked(req, "the password is too long");
-    }
-    // The two values the form does not ask for, written out rather than left out: `port` defaults to
-    // 22 in the parser, and `interval_secs` to five. Saying so in the file makes it editable by hand
-    // without knowing what the defaults are -- which is the escape hatch for a machine on another port.
-    used += (size_t)snprintf(text + used, sizeof text - used, "\nport = 22\ninterval_secs = 5\n");
+        if (wrote == 0) {
+            free(text);
+            free(kept);
+            return send_blocked(req, "监控列表已满：先在设备上删掉一台服务器，再添加");
+        }
 
-    esp_err_t ret = hal_storage_append_file(WEB_NAS_CONF, text, used);
+        kept_len += wrote;
+    }
+
+    esp_err_t ret = hal_storage_write_file(WEB_NAS_CONF, kept, kept_len);
+
+    free(text);
+    free(kept);
 
     if (ret != ESP_OK) {
         return send_error(req, "500 Internal Server Error", "save_failed", esp_err_to_name(ret));
     }
 
-    ESP_LOGI(TAG, "NAS added: %s@%s", user, host);
+    ESP_LOGI(TAG, "NAS saved: %s@%s", user, host);
 
     return send_json(req, "{\"ok\":true}");
 }
 
-/// Forgets *every* machine: the file goes, and the backend notices that it has.
-///
-/// Every one of them and not the one this page's form last wrote: the file is the list, there is no
-/// field on this page that says which entry is meant, and "stop watching" is a switch rather than an
-/// editor. Dropping one machine is the device's own page, which has a row per machine to drop.
+/* One field out of a `key = value` line of the device list, unescaped.
+ *
+ * The list's shape is the device reader's (`pomelo-hal`'s `parse_devices`), read the other way: two
+ * strings in quotes, two numbers bare, and the same two escapes the writer above puts in a quote. False
+ * for a line that is some other key, which is most of them.
+ */
+static bool device_field(const char *line, const char *key, char *out, size_t cap)
+{
+    size_t key_len = strlen(key);
+
+    if (cap == 0 || strncmp(line, key, key_len) != 0) {
+        return false;
+    }
+
+    const char *at = line + key_len;
+    while (*at == ' ' || *at == '\t') {
+        at++;
+    }
+    if (*at != '=') {
+        return false;
+    }
+    at++;
+    while (*at == ' ' || *at == '\t') {
+        at++;
+    }
+
+    size_t used = 0;
+
+    if (*at == '"') {
+        at++;
+        while (*at != '\0' && *at != '"' && used + 1 < cap) {
+            if (*at == '\\' && (at[1] == '"' || at[1] == '\\')) {
+                at++;
+            }
+            out[used++] = *at++;
+        }
+    } else {
+        while (*at != '\0' && *at != '\n' && *at != '\r' && *at != ' ' && used + 1 < cap) {
+            out[used++] = *at++;
+        }
+    }
+
+    out[used] = '\0';
+
+    return used > 0;
+}
+
+/* One machine as a JSON object. `port` falls back to 22 for an entry whose writer left it out: the
+ * parser's own default, said here so that the page does not have to know it. */
+static void device_json(web_buf_t *buf, const char *host, const char *user, const char *port)
+{
+    buf_puts(buf, "{\"host\":");
+    buf_json(buf, host);
+    buf_puts(buf, ",\"user\":");
+    buf_json(buf, user);
+    buf_puts(buf, ",\"port\":");
+    buf_json(buf, port[0] != '\0' ? port : "22");
+    buf_puts(buf, "}");
+}
+
+/* Emits the entry being read, if one is, and clears the flag for the next: `[[device]]` is both where
+ * an entry starts and what ends the one before it. */
+static void device_flush(web_buf_t *buf, bool *first, bool *reading,
+                         char host[], char user[], char port[])
+{
+    if (!*reading) {
+        return;
+    }
+
+    if (!*first) {
+        buf_puts(buf, ",");
+    }
+
+    device_json(buf, host, user, port);
+
+    *first   = false;
+    *reading = false;
+}
+
+/* The machines in the list, in the order the file names them: what the page's server view draws.
+ *
+ * No passwords. This page hands one *to* the device and never needs one back, and this answer is drawn
+ * in a browser tab -- a board that read its credentials out to whoever opened a page would have a
+ * password one bookmark away. `host` is what the rest of these endpoints take, so it is what a row
+ * needs to act on one machine.
+ */
+static esp_err_t handle_nas_list(httpd_req_t *req)
+{
+    char  *text = malloc(WEB_NAS_CONF_MAX);
+    size_t held = 0;
+
+    if (text == NULL) {
+        return send_busy(req);
+    }
+
+    esp_err_t ret = hal_storage_read_file(WEB_NAS_CONF, text, WEB_NAS_CONF_MAX - 1, &held);
+    if (ret == ESP_ERR_NOT_FOUND) {
+        free(text);
+        return send_json(req, "{\"devices\":[]}");
+    }
+    if (ret != ESP_OK) {
+        free(text);
+        return send_error(req, "500 Internal Server Error", "read_failed", esp_err_to_name(ret));
+    }
+    text[held] = '\0';
+
+    web_buf_t buf;
+    buf_init(&buf, 512);
+    buf_puts(&buf, "{\"devices\":[");
+
+    bool first   = true;
+    bool reading = false;
+    char host[WEB_NAME_MAX] = "";
+    char user[WEB_NAME_MAX] = "";
+    char port[WEB_NAME_MAX] = "";
+
+    /* A line at a time, in the reader's order: `[[device]]` opens an entry, the lines under it fill it,
+     * and the next marker -- or the end of the file -- writes it out. */
+    for (char *line = text; line != NULL && *line != '\0'; ) {
+        char *next = strchr(line, '\n');
+        if (next != NULL) {
+            *next = '\0';
+        }
+
+        if (strncmp(line, "[[device]]", 10) == 0) {
+            device_flush(&buf, &first, &reading, host, user, port);
+            reading = true;
+            host[0] = user[0] = port[0] = '\0';
+        } else if (device_field(line, "host", host, sizeof host)) {
+            /* the address, which is what a row is named by */
+        } else if (device_field(line, "user", user, sizeof user)) {
+            /* the account, which the row shows beside it */
+        } else if (device_field(line, "port", port, sizeof port)) {
+            /* the port, which most entries leave at 22 */
+        }
+
+        line = next != NULL ? next + 1 : NULL;
+    }
+
+    device_flush(&buf, &first, &reading, host, user, port);
+    buf_puts(&buf, "]}");
+
+    if (buf.full) {
+        buf_free(&buf);
+        return send_busy(req);
+    }
+
+    esp_err_t sent = send_json(req, buf.data);
+    buf_free(&buf);
+
+    return sent;
+}
+
+/* Forgets one machine, or every machine when the query names none.
+ *
+ * One machine is the file written again without that block -- and copied byte for byte, so a field this
+ * page has never heard of (a port somebody set by hand) survives being forgotten. Every machine is the
+ * file removed, which is what a board nobody has pointed at anything looks like, and how this endpoint
+ * behaved before it could be asked about one.
+ */
 static esp_err_t handle_nas_forget(httpd_req_t *req)
 {
-    esp_err_t ret = hal_storage_remove_file(WEB_NAS_CONF);
+    char host[WEB_NAME_MAX];
 
-    if (ret != ESP_OK && ret != ESP_ERR_NOT_FOUND) {
-        return send_error(req, "500 Internal Server Error", "forget_failed", esp_err_to_name(ret));
+    if (!query_string(req, "host", host, sizeof host) || host[0] == '\0') {
+        esp_err_t ret = hal_storage_remove_file(WEB_NAS_CONF);
+
+        if (ret != ESP_OK && ret != ESP_ERR_NOT_FOUND) {
+            return send_error(req, "500 Internal Server Error", "forget_failed", esp_err_to_name(ret));
+        }
+
+        ESP_LOGI(TAG, "NAS list cleared");
+
+        return send_json(req, "{\"ok\":true}");
     }
+
+    char  *text = malloc(WEB_NAS_CONF_MAX);
+    char  *kept = malloc(WEB_NAS_CONF_MAX);
+    size_t held = 0;
+
+    if (text == NULL || kept == NULL) {
+        free(text);
+        free(kept);
+        return send_busy(req);
+    }
+
+    esp_err_t ret = hal_storage_read_file(WEB_NAS_CONF, text, WEB_NAS_CONF_MAX - 1, &held);
+    if (ret == ESP_ERR_NOT_FOUND) {
+        free(text);
+        free(kept);
+        return send_json(req, "{\"ok\":true}");
+    }
+    if (ret != ESP_OK) {
+        free(text);
+        free(kept);
+        return send_error(req, "500 Internal Server Error", "read_failed", esp_err_to_name(ret));
+    }
+    text[held] = '\0';
+
+    /* One block at a time: from a `[[device]]` to the next one, or to the end of the file. */
+    size_t kept_len = 0;
+
+    for (char *at = text; *at != '\0'; ) {
+        char *end = strstr(at + 1, "[[device]]");
+        if (end == NULL) {
+            end = at + strlen(at);
+        }
+
+        char named[WEB_NAME_MAX] = "";
+
+        for (char *line = at; line < end; ) {
+            char  *break_at = memchr(line, '\n', (size_t)(end - line));
+            size_t length   = break_at != NULL ? (size_t)(break_at - line) : (size_t)(end - line);
+            char   field[256];
+
+            if (length < sizeof field) {
+                memcpy(field, line, length);
+                field[length] = '\0';
+
+                if (device_field(field, "host", named, sizeof named)) {
+                    break;
+                }
+            }
+
+            line = break_at != NULL ? break_at + 1 : end;
+        }
+
+        if (strcmp(named, host) != 0 && kept_len + (size_t)(end - at) < WEB_NAS_CONF_MAX) {
+            memcpy(kept + kept_len, at, (size_t)(end - at));
+            kept_len += (size_t)(end - at);
+        }
+
+        at = end;
+    }
+
+    esp_err_t saved;
+
+    if (kept_len == 0) {
+        saved = hal_storage_remove_file(WEB_NAS_CONF);
+        if (saved == ESP_ERR_NOT_FOUND) {
+            saved = ESP_OK;
+        }
+    } else {
+        saved = hal_storage_write_file(WEB_NAS_CONF, kept, kept_len);
+    }
+
+    free(text);
+    free(kept);
+
+    if (saved != ESP_OK) {
+        return send_error(req, "500 Internal Server Error", "forget_failed", esp_err_to_name(saved));
+    }
+
+    ESP_LOGI(TAG, "NAS forgotten: %s", host);
 
     return send_json(req, "{\"ok\":true}");
 }
@@ -1867,6 +2226,7 @@ static const web_route_t s_routes[] = {
     { "/api/wifi/connect",    HTTP_POST, handle_wifi_connect },
     { "/api/wifi/remember",   HTTP_POST, handle_wifi_remember },
     { "/api/nas/remember",     HTTP_POST, handle_nas_remember },
+    { "/api/nas/list",         HTTP_GET,  handle_nas_list },
     { "/api/nas/forget",       HTTP_POST, handle_nas_forget },
     { "/api/wifi/disconnect", HTTP_POST, handle_wifi_disconnect },
     { "/api/wifi/forget",     HTTP_POST, handle_wifi_forget },
@@ -1878,7 +2238,12 @@ static const web_route_t s_routes[] = {
     { "/api/move",            HTTP_POST, handle_move },
     { "/api/archive",         HTTP_POST, handle_archive },
     { "/api/analysis",        HTTP_GET,  handle_analysis },
-    { "/api/display",         HTTP_GET | HTTP_POST, handle_display },
+    /* Two entries and not one with both methods: `httpd_uri_t.method` is a single `httpd_method_t`, and
+     * `HTTP_GET | HTTP_POST` is `1 | 3`, which is `3` -- `HTTP_POST`. One entry written that way answers a
+     * POST and refuses the GET the page reads the screen with, which is a screen card that never leaves
+     * its skeleton. See `handle_display`, which does both jobs already. */
+    { "/api/display",         HTTP_GET,  handle_display },
+    { "/api/display",         HTTP_POST, handle_display },
     { "/api/screenshot",      HTTP_GET,  handle_screenshot },
     { "/api/remote",          HTTP_POST, handle_remote },
     { "/api/audio",           HTTP_POST, handle_audio },
