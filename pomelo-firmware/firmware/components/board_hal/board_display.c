@@ -28,6 +28,18 @@
 
 static const char *TAG = "board_display";
 
+/* QSPI clock for the panel. 80 MHz is the ESP32-S3 SPI master's ceiling and the fastest this
+ * CO5300 is driven on this board; the four data lines and the clock already run at maximum drive
+ * strength (see the gpio_set_drive_capability calls in board_display_init) for clean edges.
+ *
+ * A full frame is 480 * 480 * 2 = 460.8 KB: 15.3 ms of pure transfer at 60 MHz, 11.5 ms at 80 MHz.
+ * Nothing on this board is fast enough to hide 3.8 ms per full-screen flush in anything else.
+ *
+ * Anything above this is out of spec for the SPI master and will not clock at all. If a particular
+ * board shows artefacts (sparkle, dropped columns, a bent image), 60 MHz is the known-good value to
+ * fall back to. */
+#define BOARD_DISPLAY_QSPI_PCLK_HZ (80 * 1000 * 1000)
+
 static esp_lcd_panel_handle_t s_panel_handle = NULL;
 static esp_lcd_panel_io_handle_t s_io_handle = NULL;
 static SemaphoreHandle_t s_trans_done_sem = NULL;
@@ -182,7 +194,8 @@ esp_err_t board_display_init(void)
         return ESP_OK;
     }
 
-    ESP_LOGI(TAG, "Initializing Waveshare 480x480 AMOLED display at 60MHz QSPI (high drive strength)...");
+    ESP_LOGI(TAG, "Initializing Waveshare 480x480 AMOLED display at %dMHz QSPI (high drive strength)...",
+             BOARD_DISPLAY_QSPI_PCLK_HZ / 1000000);
     const spi_bus_config_t buscfg = CO5300_PANEL_BUS_QSPI_CONFIG(BSP_LCD_PCLK,
                                                                  BSP_LCD_DATA0,
                                                                  BSP_LCD_DATA1,
@@ -195,7 +208,7 @@ esp_err_t board_display_init(void)
         return ret;
     }
 
-    // Boost QSPI GPIO output drive capability to maximum (40mA, Cap 3) for clean 60MHz signal edges
+    // Boost QSPI GPIO output drive capability to maximum (40mA, Cap 3) for clean 80MHz signal edges
     gpio_set_drive_capability(BSP_LCD_PCLK, GPIO_DRIVE_CAP_3);
     gpio_set_drive_capability(BSP_LCD_DATA0, GPIO_DRIVE_CAP_3);
     gpio_set_drive_capability(BSP_LCD_DATA1, GPIO_DRIVE_CAP_3);
@@ -224,7 +237,7 @@ esp_err_t board_display_init(void)
 #endif
 
     esp_lcd_panel_io_spi_config_t io_config = CO5300_PANEL_IO_QSPI_CONFIG(BSP_LCD_CS, s_on_color_trans_done, NULL);
-    io_config.pclk_hz = 60 * 1000 * 1000; // 60MHz high-speed QSPI clock
+    io_config.pclk_hz = BOARD_DISPLAY_QSPI_PCLK_HZ;
     io_config.trans_queue_depth = 10;
 
     co5300_vendor_config_t vendor_config = {
