@@ -41,6 +41,11 @@
 | <img src="docs/images/clock.png" width="160" alt="时钟"> | <img src="docs/images/overview.png" width="160" alt="概览"> | <img src="docs/images/power-log.png" width="160" alt="电池"> | <img src="docs/images/files.png" width="160" alt="文件管理"> |
 | 一枚表盘带秒针，下面是大号数字时间与日期；同一个磁贴里还有番茄钟与闹钟两页 | 五张卡一屏：电池、无线网络、存储（内部 + 存储卡），下面还有内存与服务器；右上角是「重新检测」 | 页头写着「电池」，磁贴上叫「电量日志」；顶部是过热警示条，下面电量卡 + 放电曲线，充电中不给剩余时间估算 | 内部 / 存储卡两个卷，路径与目录项，底部五个动作：新建文件夹、重命名、复制、粘贴、删除 |
 
+| 天气 | 信道地图 | 游戏 |
+| :---: | :---: | :---: |
+| <img src="docs/images/weather.png" width="160" alt="天气"> | <img src="docs/images/wifi-map.png" width="160" alt="信道地图"> | <img src="docs/images/games.png" width="160" alt="游戏"> |
+| 打开先按 IP 定位到城市（页眉写着地名，这张是广州），再取**当地**的现在与未来几天；「数据来自 Open-Meteo」是服务名 —— 它不要密钥也不要账号 | 十三个信道的压力图，加一条建议信道（这里是 6）；下面还有信号分布（每行 10 dBm）与网络列表，5 GHz 照列但不参与算术 | 一个磁贴打开的是**游戏列表**，点进去才是棋盘；加第二款游戏不用再占一个桌面磁贴，每局用开机时长当种子 |
+
 ---
 
 ## 🚀 快速上手
