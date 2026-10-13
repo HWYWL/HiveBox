@@ -101,28 +101,109 @@ pub fn wait_touch_event(timeout_ms: u32) -> Option<iced_core::Event> {
     }
 }
 
+/// One damaged rectangle in the panel's own coordinates.
+///
+/// Already rounded out to the two-pixel boundary the CO5300's QSPI controller requires, and kept
+/// integral, so the merge decision below weighs the pixel areas that will actually be transferred
+/// rather than the float bounds they came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Region {
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+}
+
+impl Region {
+    /// The panel rectangle `rect` covers, or `None` if it covers nothing.
+    ///
+    /// The CO5300 only accepts even coordinates. Rounding outwards makes this a superset of the
+    /// damaged rectangle, which is the safe direction: a pixel is repainted twice at worst.
+    fn of(rect: Rectangle) -> Option<Self> {
+        let x1 = (rect.x.floor() as i32).max(0) / 2 * 2;
+        let y1 = (rect.y.floor() as i32).max(0) / 2 * 2;
+        let x2 = (((rect.x + rect.width).ceil() as i32 + 1) / 2 * 2).min(PANEL_WIDTH as i32);
+        let y2 = (((rect.y + rect.height).ceil() as i32 + 1) / 2 * 2).min(PANEL_HEIGHT as i32);
+
+        (x2 > x1 && y2 > y1).then_some(Self { x1, y1, x2, y2 })
+    }
+
+    fn area(&self) -> i64 {
+        i64::from(self.x2 - self.x1) * i64::from(self.y2 - self.y1)
+    }
+
+    fn union(&self, other: &Self) -> Self {
+        Self {
+            x1: self.x1.min(other.x1),
+            y1: self.y1.min(other.y1),
+            x2: self.x2.max(other.x2),
+            y2: self.y2.max(other.y2),
+        }
+    }
+}
+
+/// How much extra, unchanged area one merge may cost, as a fraction of the area already being sent.
+///
+/// Two separate regions cost two address-window command blocks (`CASET`, `RASET`, `RAMWR`) and a
+/// drained ping-pong pipeline between them; one merged region costs whatever unchanged pixels lie
+/// in the gap. It is the gap that has to be bounded: a status-bar repaint and an animation elsewhere
+/// on the screen are two cheap transfers apart and nearly a full frame together.
+const MERGE_SLACK: f64 = 0.25;
+
+/// Groups damaged rectangles into the fewest transfers that do not waste much.
+///
+/// Largest first, so a big region absorbs the ones around it rather than a small one growing a
+/// bounding box across the screen. Each region joins the first group it nearly fits in; the rest go
+/// out as they are. A drag across the launcher's grid is damaged as several touching tiles and those
+/// still become one transfer — they have no gap to pay for — while damage in two opposite corners
+/// now costs two small transfers instead of one covering everything between them.
+fn plan(mut regions: Vec<Region>) -> Vec<Region> {
+    regions.sort_by(|a, b| b.area().cmp(&a.area()));
+
+    let mut planned: Vec<Region> = Vec::with_capacity(regions.len());
+
+    for region in regions {
+        let mut join = None;
+
+        for (index, group) in planned.iter().enumerate() {
+            let merged = group.union(&region);
+            let gap = merged.area() - group.area() - region.area();
+            let sent = group.area() + region.area();
+
+            if gap as f64 <= sent as f64 * MERGE_SLACK {
+                join = Some((index, merged));
+                break;
+            }
+        }
+
+        match join {
+            Some((index, merged)) => planned[index] = merged,
+            None => planned.push(region),
+        }
+    }
+
+    planned
+}
+
 /// Hands damaged rectangular regions of the frame buffer to the panel via DMA.
+///
+/// Each planned region is one `hal_display_draw_bitmap`, which the driver slices into vertical
+/// strips and drains before returning. Almost every pixel of a planned region was going to be sent
+/// anyway; the alternative this replaced — the bounding box of *every* region — sent the whole
+/// screen to repaint a clock ticking in the status bar.
 pub fn flush_damage(damage: &[Rectangle], pixels: &[u16]) {
-    if damage.is_empty() {
-        return;
-    }
+    let regions: Vec<Region> = damage.iter().filter_map(|rect| Region::of(*rect)).collect();
 
-    // Merge multiple disjoint rectangles during swiping into a single continuous bounding box
-    // to prevent multi-pass fragmented DMA transfers that cause visual tearing and command stalls.
-    let mut union = damage[0];
-    for bounds in &damage[1..] {
-        union = union.union(bounds);
-    }
-
-    // Enforce 2-pixel aligned boundaries for hardware CO5300 QSPI DMA controller
-    let x1 = (union.x.floor() as i32).max(0) / 2 * 2;
-    let y1 = (union.y.floor() as i32).max(0) / 2 * 2;
-    let x2 = (((union.x + union.width).ceil() as i32 + 1) / 2 * 2).min(PANEL_WIDTH as i32);
-    let y2 = (((union.y + union.height).ceil() as i32 + 1) / 2 * 2).min(PANEL_HEIGHT as i32);
-
-    if x2 > x1 && y2 > y1 {
+    for region in plan(regions) {
         unsafe {
-            hal_display_draw_bitmap(x1, y1, x2, y2, pixels.as_ptr(), PANEL_WIDTH as i32);
+            hal_display_draw_bitmap(
+                region.x1,
+                region.y1,
+                region.x2,
+                region.y2,
+                pixels.as_ptr(),
+                PANEL_WIDTH as i32,
+            );
         }
     }
 }
@@ -426,5 +507,108 @@ fn block_on<F: Future>(future: F) -> F::Output {
         if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
             return output;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A rectangle at integer coordinates, phrased the way damage arrives.
+    fn at(x: f32, y: f32, side: f32) -> Rectangle {
+        Rectangle::new(Point::new(x, y), Size::new(side, side))
+    }
+
+    fn planned(damage: &[Rectangle]) -> Vec<Region> {
+        let regions = damage.iter().filter_map(|rect| Region::of(*rect)).collect();
+
+        plan(regions)
+    }
+
+    #[test]
+    fn a_region_rounds_out_to_the_two_pixel_grid() {
+        // The controller takes even coordinates only, so an odd start comes back one pixel early and
+        // the far edge one pixel late. Rounding out, never in: a superset repaints a pixel twice.
+        let region = Region::of(at(3.0, 5.0, 10.0)).expect("a region");
+
+        assert_eq!((region.x1, region.y1, region.x2, region.y2), (2, 4, 14, 16));
+    }
+
+    #[test]
+    fn damage_that_covers_nothing_is_dropped() {
+        // A zero-area rectangle, and one entirely off the left edge. Neither is a transfer, and
+        // neither may become a `hal_display_draw_bitmap` call.
+        assert!(Region::of(Rectangle::new(Point::new(10.0, 10.0), Size::default())).is_none());
+        assert!(Region::of(at(-50.0, -50.0, 10.0)).is_none());
+    }
+
+    #[test]
+    fn damage_in_two_corners_stays_two_transfers() {
+        // The point of the whole change: a clock in the status bar and something else at the far
+        // corner must not turn into one transfer spanning everything between them.
+        let damage = [at(4.0, 4.0, 8.0), at(460.0, 460.0, 8.0)];
+
+        assert_eq!(
+            planned(&damage),
+            vec![
+                Region {
+                    x1: 4,
+                    y1: 4,
+                    x2: 12,
+                    y2: 12
+                },
+                Region {
+                    x1: 460,
+                    y1: 460,
+                    x2: 468,
+                    y2: 468
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn touching_tiles_become_one_transfer() {
+        // A drag across the launcher's grid damages several tiles that share an edge. They have no
+        // gap to pay for, so they still go out as a single transfer -- which is what the bounding
+        // box this replaced was for, kept for the case that earned it.
+        let damage = [at(0.0, 0.0, 20.0), at(20.0, 0.0, 20.0), at(40.0, 0.0, 20.0)];
+
+        assert_eq!(
+            planned(&damage),
+            vec![Region {
+                x1: 0,
+                y1: 0,
+                x2: 60,
+                y2: 20
+            }]
+        );
+    }
+
+    #[test]
+    fn a_merge_is_refused_when_the_gap_costs_more_than_the_transfer() {
+        // One small tile and one at the far side: the merge would send a screen to move two tiles.
+        assert_eq!(planned(&[at(0.0, 0.0, 16.0), at(464.0, 464.0, 16.0)]).len(), 2);
+
+        // The same two tiles pulled together, with a gap under the slack: one transfer is cheaper
+        // than two address-window blocks, so they merge.
+        assert_eq!(planned(&[at(0.0, 0.0, 16.0), at(20.0, 0.0, 16.0)]).len(), 1);
+    }
+
+    #[test]
+    fn overlapping_regions_never_accumulate() {
+        // The same rectangle twice -- which a diff can produce -- is one transfer of that rectangle,
+        // not two and not a larger one.
+        let damage = [at(100.0, 100.0, 32.0), at(100.0, 100.0, 32.0)];
+
+        assert_eq!(
+            planned(&damage),
+            vec![Region {
+                x1: 100,
+                y1: 100,
+                x2: 132,
+                y2: 132
+            }]
+        );
     }
 }
