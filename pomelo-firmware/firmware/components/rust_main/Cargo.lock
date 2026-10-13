@@ -1980,6 +1980,7 @@ version = "0.1.0"
 dependencies = [
  "app-launcher",
  "iced_winit",
+ "pomelo-gfx",
  "pomelo-hal",
  "pomelo-hal-esp32",
 ]

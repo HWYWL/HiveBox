@@ -14,6 +14,31 @@ pub extern "C" fn rust_main_entry() {
     let board = pomelo_hal_esp32::board();
     board.init();
 
+    // The span kernels, measured on this chip rather than reasoned about from a host's.
+    //
+    // It runs here, first, for two reasons. The buffer is a megabyte-class allocation, and the only
+    // reliable moment to ask for one of those is before anything else has taken a piece of the heap
+    // — an `try_reserve_exact` that fails prints a line and gives up rather than panicking, but a
+    // failure would mean no numbers at all. And the figures are wanted once, not per frame, so this
+    // is a boot cost rather than a cost in the loop.
+    //
+    // It is the other half of what `render-debug` prints. The `[phase]` line is a *real* frame split
+    // by phase; this is the same kernels run in isolation. When the two disagree, the difference is
+    // the answer: a full-screen `fill_rect` that is fast here and slow in `clear` is a memory
+    // problem, not an arithmetic one, and arithmetic is the only thing a vector kernel can fix.
+    //
+    // Each kernel is timed for a fixed wall-clock budget rather than a fixed iteration count, which
+    // is what makes this identical to what the host runs. It also bounds the worst case: the first
+    // version of this used a count tuned on a host, which on the panel meant seventeen seconds in a
+    // tight loop with no yield — long enough to starve the idle task and trip the task watchdog
+    // during boot. The budget keeps every measurement to a few hundred milliseconds.
+    #[cfg(feature = "render-debug")]
+    {
+        println!("[bench] span kernels at the device's own clock");
+        pomelo_gfx::bench::report();
+        println!("[bench] done");
+    }
+
     // The radio comes up, and maybe connects, on a thread of its own. Boot is for the panel: a
     // connection is a thing that happens *later*, and a board that waited for one would show nothing
     // for as long as the network took. No file, or a switch left off, and this thread does nothing

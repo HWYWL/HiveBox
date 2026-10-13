@@ -28,7 +28,7 @@ default = []
 # 1. Enables renderer phase timings (iced-pomelo-winit/profile)
 # 2. Terminal reports frame paint/flush timings and damage stats
 # 3. Screen overlays highlight borders around damaged (dirty) rectangles
-render-debug = ["iced-pomelo-winit/profile"]
+render-debug = ["iced-pomelo-winit/profile", "dep:pomelo-gfx", "pomelo-gfx/bench"]
 
 [dependencies]
 # The platform layer. `renderer` is on unconditionally here, and this is the right place for it: the
@@ -39,6 +39,11 @@ render-debug = ["iced-pomelo-winit/profile"]
 iced-pomelo-winit = { package = "iced_winit", path = "../../../../ui-framework/iced-pomelo-winit", features = [
     "renderer",
 ] }
+# Named directly for one thing only: the device-side span benchmark that `render-debug` turns on
+# (`pomelo-gfx/bench`), which is what produces the ns/pixel figures the vector work is decided by.
+# Optional, so a build that is not measuring neither pulls the `bench` API into scope nor has its
+# feature set decided from here — the renderer reaches this crate through `iced-pomelo-gfx`.
+pomelo-gfx = { path = "../../../../ui-framework/pomelo-gfx", optional = true }
 app-launcher = { path = "../../../../pomelo-apps/app-launcher", default-features = false }
 # The board's hardware lives next door in the firmware — the FFI declarations sit beside the C
 # they call. This crate is the composition root that injects it and translates hardware button
