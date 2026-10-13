@@ -21,7 +21,7 @@ pub use pomelo_widgets::{AppIcon, AppMeta as Entry};
 
 include!(concat!(env!("OUT_DIR"), "/baked_icons.rs"));
 
-/// Eleven apps, in the order the grid shows them: each [`crate::PER_PAGE`] fill a page, and the rest
+/// Fourteen apps, in the order the grid shows them: each [`crate::PER_PAGE`] fill a page, and the rest
 /// fall on the one after.
 ///
 /// The order is the interface's and not the alphabet's. The four on the first page are the four
@@ -33,7 +33,14 @@ include!(concat!(env!("OUT_DIR"), "/baked_icons.rs"));
 /// the box itself and is the one tile that is about more than one thing, the file manager, which is
 /// about the two filesystems this box can mount and is the way to move anything in either, and the
 /// power log, which is about the battery and is the only tile on the grid that is about *time* — the
-/// overview shows what the battery is, and this one shows what it has been doing.
+/// overview shows what the battery is, and this one shows what it has been doing. The channel map
+/// closes the third page: it is about the air around the box, which is the one thing that page watches
+/// which belongs to neither the box nor the machine beside it.
+///
+/// The fourth page is the two things the box has no say in. The weather is the channel map's subject
+/// one layer up — the sky rather than the air — and it is read the same way, over the network, which
+/// is why the two are neighbours across the page break. The games app is last because it is the only
+/// tile on the grid whose subject is not the box at all: it is the person holding it.
 pub const CATALOGUE: &[Entry] = &[
     // Page 1
     Entry {
@@ -128,5 +135,42 @@ pub const CATALOGUE: &[Entry] = &[
         // A violet, in the widest hue gap left: between the server's blue-violet and the clock's plum
         // there is a stretch of purple that nothing else on the grid is using.
         accent: (170, 96, 214),
+    },
+    Entry {
+        name: "Wi-Fi Map",
+        name_zh: "信道地图",
+        // A radio being searched rather than a network being joined: this app is about the air, not about
+        // getting onto it, and the settings' Wi-Fi page is where joining lives. The plain `WIFI` glyph
+        // would be that other thing, and it is the one the list inside this app already uses per network.
+        icon: AppIcon::glyph(Icon::WIFI_FIND),
+        // A teal, between the tasks app's cyan and the terminal's green: the one stretch of hue left that
+        // is neither a signal-meter blue nor a success green.
+        accent: (0, 137, 123),
+    },
+    // Page 4
+    Entry {
+        name: "Weather",
+        name_zh: "天气",
+        // A sun behind a cloud, which is the app's own glyph for its most ordinary unsettled sky: the
+        // page inside picks one glyph per condition, so the tile's cannot be any single one of them —
+        // and of the set this is the one that reads as a *forecast* rather than as weather that has
+        // already happened. A plain cloud would be its overcast and a plain sun its clear.
+        icon: AppIcon::glyph(Icon::PARTLY_CLOUDY_DAY),
+        // The sky's own blue, a step from the channel map's teal and a step from the web manager's: the
+        // one hue left in the spread that is unmistakably a forecast and unmistakably not a radio.
+        accent: (2, 136, 209),
+    },
+    Entry {
+        name: "Games",
+        name_zh: "游戏",
+        // A gamepad, and the one glyph here that names a *category* rather than an app: this tile opens
+        // a list of games, so what it has to say is "games". The square grid the one game is played on
+        // (`GRID_VIEW`) is the glyph its row wears inside, exactly as the channel map's tile is not the
+        // per-network glyph its own list uses.
+        icon: AppIcon::glyph(Icon::SPORTS_ESPORTS),
+        // An arcade gold, in the one warm stretch the spread had left: it is the yellow end of the run
+        // that holds the calculator's orange and the music app's red, and it is a colour no reading of
+        // the box would ever claim for itself.
+        accent: (251, 192, 45),
     },
 ];

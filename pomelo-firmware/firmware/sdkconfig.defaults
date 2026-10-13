@@ -54,3 +54,14 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=65536
 # fails on hardware, revisit CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL and the
 # CONFIG_ESP_WIFI_*_BUFFER_NUM options.
 CONFIG_ESP_WIFI_ENABLED=y
+
+# mbedTLS allocates from PSRAM.
+#
+# Internal SRAM is what Wi-Fi buffers, DMA descriptors and every task stack come out of, and
+# a single TLS session asks for a 16 KB receive buffer in one contiguous block on top of the
+# context and the record layer. The internal pool is down to a few tens of kilobytes once the
+# GUI and the radio are up, so that block is not there to be had and `mbedtls_ssl_setup`
+# returns MBEDTLS_ERR_SSL_ALLOC_FAILED — every HTTPS page on this board failed to connect
+# because of it. The 8 MB of PSRAM have room to spare, and IDF's AES/PSA layers fall back to
+# their non-DMA paths for buffers that live there.
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y

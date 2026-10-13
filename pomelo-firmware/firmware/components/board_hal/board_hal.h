@@ -298,6 +298,114 @@ esp_err_t hal_wifi_disconnect(void);
 esp_err_t hal_wifi_get_status(hal_wifi_status_t *out_status);
 
 /* ---------------------------------------------------------------------------
+ * Network time (SNTP).
+ *
+ * The board's clock is the hardware RTC's (`hal_system_get_epoch`), and this is
+ * what puts a real time into it: `board_time.c` starts lwIP's SNTP client, the
+ * server answers, and the sync reaches the chip through `settimeofday` — which
+ * `board_rtc.c` wraps for exactly this, so the time also survives the next power
+ * cycle.
+ *
+ * It is here, beside Wi-Fi, because an address is what it needs and joining a
+ * network is the moment it becomes possible. Nothing reads time through this
+ * file: `hal_system_get_epoch` is the reading, and this is only what fills it.
+ * ------------------------------------------------------------------------- */
+
+/** @brief Start the SNTP client. Non-blocking, idempotent, safe from an event handler.
+ *
+ * Called by `board_wifi.c` from its `IP_EVENT_STA_GOT_IP` handler. The client then runs on a task of
+ * its own and retries on its own; the time it finds lands in the RTC by itself.
+ *
+ * @return
+ *      - ESP_OK once the client is running, or was already
+ *      - ESP_ERR_INVALID_STATE before the Wi-Fi stack is up
+ *      - what `esp_netif_sntp_init` said, if it refused
+ */
+esp_err_t hal_time_sync(void);
+
+/* ---------------------------------------------------------------------------
+ * HTTP client (`esp_http_client` + ESP-TLS).
+ *
+ * The board as a client of somebody else's service, for the Rust `HttpBackend`:
+ * a request is started and then polled, on the same shape as the Wi-Fi scan.
+ * `board_http.c` owns the one worker task and the one body buffer; this is the
+ * whole of what the Rust side sees of it.
+ *
+ * HTTPS is verified against the root bundle in the image, which means the clock
+ * has to be right — see `HAL_HTTP_FAULT_CLOCK` and `hal_time_sync()` above.
+ * ------------------------------------------------------------------------- */
+
+/** Most of a body this board will hold, in bytes. Kept in step with `HttpResponse::MAX_BODY_BYTES`. */
+#define HAL_HTTP_BODY_MAX 16384
+
+/** Longest URL accepted, including its terminator. */
+#define HAL_HTTP_URL_MAX  512
+
+#define HAL_HTTP_IDLE     0
+#define HAL_HTTP_RUNNING  1
+#define HAL_HTTP_DONE     2
+#define HAL_HTTP_FAILED  -1
+
+/** Why a request did not come back, as the closed list `HttpFault` mirrors. */
+#define HAL_HTTP_FAULT_NONE        0
+#define HAL_HTTP_FAULT_NO_NETWORK  1
+#define HAL_HTTP_FAULT_CLOCK       2
+#define HAL_HTTP_FAULT_UNREACHABLE 3
+#define HAL_HTTP_FAULT_TIMEOUT     4
+#define HAL_HTTP_FAULT_TLS         5
+#define HAL_HTTP_FAULT_TOO_LARGE   6
+
+/** @brief Ask for a URL. Returns at once; the answer arrives when it arrives.
+ *
+ * A `GET`, and the URL is the whole of the request. Nothing is sent until the worker task runs, so a
+ * URL that is obviously unfetchable is refused here rather than reported as a network fault: an
+ * argument error, a URL that does not fit, and a request already in flight are all answers from this
+ * call. A board that is off the network, or an `https` URL on a board whose clock has never been set,
+ * are *not* — those are the request's own answer, and they are waiting in `hal_http_get_state()`
+ * before the first byte of anything is sent.
+ *
+ * @return
+ *      - ESP_OK when the request has been taken (including the two faults above)
+ *      - ESP_ERR_INVALID_ARG for NULL, "", a URL over `HAL_HTTP_URL_MAX`, or a scheme that is
+ *        neither `http` nor `https`
+ *      - ESP_ERR_INVALID_STATE while another request is in flight
+ *      - ESP_ERR_NO_MEM when the worker task could not be created
+ */
+esp_err_t hal_http_start(const char *url);
+
+/** @brief How the request is going: `HAL_HTTP_*`. Cheap and safe to call any time. */
+int32_t hal_http_get_state(void);
+
+/** @brief Why it failed: `HAL_HTTP_FAULT_*`. Meaningful while the state is `HAL_HTTP_FAILED`. */
+int32_t hal_http_get_fault(void);
+
+/** @brief The answer of the request that just finished, and clear it.
+ *
+ * Hands back a pointer *into the client's own buffer* rather than a copy, so the bytes are valid until
+ * the next `hal_http_start` and the caller must read them before asking for anything else.
+ *
+ * @param[out] out_status Receives the status code the server wrote.
+ * @param[out] out_body   Receives a pointer to the body, not NUL-terminated as a document but with a
+ *                        NUL just past its end, so a `printf` of it is not a buffer overrun.
+ * @param[out] out_length Receives the body's length in bytes.
+ *
+ * @return
+ *      - ESP_OK
+ *      - ESP_ERR_INVALID_ARG for NULL out-parameters
+ *      - ESP_ERR_INVALID_STATE when there is nothing to take: the request is still running, it
+ *        failed, or its answer has already been read
+ */
+esp_err_t hal_http_take(int32_t *out_status, const uint8_t **out_body, size_t *out_length);
+
+/** @brief Abandon the request in flight, or drop the answer waiting to be taken.
+ *
+ * The state is `HAL_HTTP_IDLE` afterwards either way, and cancelling nothing is ESP_OK. A worker that
+ * is mid-read notices at the next chunk rather than instantly — it is the one holding the socket — so
+ * a request started immediately after a cancel can be refused for the remainder of that chunk.
+ */
+esp_err_t hal_http_cancel(void);
+
+/* ---------------------------------------------------------------------------
  * Storage: the built-in `internal` LittleFS partition and the microSD slot.
  *
  * The card is mounted on demand rather than assumed. This board wires its

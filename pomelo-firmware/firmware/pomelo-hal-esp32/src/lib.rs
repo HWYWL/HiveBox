@@ -36,6 +36,7 @@
 //! difference: `components/` = built by IDF, `firmware/<crate>/` = built by cargo.
 
 mod audio;
+mod http;
 mod imu;
 mod input;
 mod mic;
@@ -52,6 +53,7 @@ use std::sync::Arc;
 use pomelo_hal::Board;
 
 pub use audio::EspAudio;
+pub use http::EspHttp;
 pub use imu::EspImu;
 pub use input::EspInput;
 pub use mic::EspMic;
@@ -79,6 +81,7 @@ pub fn board() -> Arc<Board> {
         Box::new(web::EspWeb::new()),
         Box::new(system::EspSystem::new()),
         Box::new(nas::EspNas::new()),
+        Box::new(http::EspHttp::new()),
     ));
     event::start_event_pump(Arc::clone(&board));
     board

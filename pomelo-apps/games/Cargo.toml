@@ -1,0 +1,39 @@
+[package]
+name = "games"
+version = "0.1.0"
+edition = "2021"
+description = "A standard iced program: the games on this box, and the one being played"
+license = "GPL-3.0-only"
+
+# A member of the workspace at the root of `pomelo-apps` (`Cargo.toml`): that is what lets
+# `cargo test --workspace` run every app against one lock while each stays its own crate, with its own
+# `main.rs` and its own `desktop` feature.
+
+[dependencies]
+# The facade. No `canvas`: the board is four rows of four containers, which is what a grid of squares
+# is — a canvas would be a second renderer for a screenshot nobody takes.
+iced = { version = "0.14", default-features = false, features = ["thread-pool", "x11", "wayland"] }
+
+# The board, and one thing off it: how long it has been up, which is the only source of "not the same
+# game twice" this box has. Nothing here is a request or a peripheral.
+#
+# From GitHub by revision like its siblings: sibling repositories, and this project builds on its own.
+pomelo-hal = { git = "https://github.com/pomelos-on-sale/pomelo-hal.git", rev = "20eaa910f0a05cd68684d6aa868fd78457c51be9" }
+
+# The shared preferences: the theme, the language, and the font tier the page's chrome comes out of.
+pomelo-widgets = { git = "https://github.com/pomelos-on-sale/pomelo-widgets.git", rev = "f499da5cc17ef16ced6e6b1e62286bb020837a0b" }
+
+# The icons: the game's own glyph, the four arrows of the pad, and the way back to the list.
+pomelo-material-symbols = { git = "https://github.com/pomelos-on-sale/pomelo-material-symbols.git", rev = "7dc390fb1924dc69b375e5ae77806857f798cc58" }
+
+[dev-dependencies]
+# The widget-tree tester: the real widget tree, no host, no window, no pixels.
+iced_test = "0.14"
+
+[features]
+# On by default, because a project of its own is a desktop program: iced needs *a* renderer, and this
+# is the one that needs no GPU. The board is the other way round — `rust_main` and `app-launcher`
+# depend on this crate with `default-features = false` and the platform layer turns `pomelo` on
+# instead.
+desktop = ["iced/tiny-skia"]
+default = ["desktop"]

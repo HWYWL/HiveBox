@@ -34,6 +34,7 @@ pomelo-hal = { git = "https://github.com/pomelos-on-sale/pomelo-hal.git", rev = 
 calculator = { path = "../calculator", default-features = false }
 clock = { path = "../clock", default-features = false }
 files = { path = "../files", default-features = false }
+games = { path = "../games", default-features = false }
 music-player = { path = "../music-player", default-features = false }
 power-log = { path = "../power-log", default-features = false }
 nas-monitor = { path = "../nas-monitor", default-features = false }
@@ -41,7 +42,9 @@ overview = { path = "../overview", default-features = false }
 settings = { path = "../settings", default-features = false }
 task-viewer = { path = "../task-viewer", default-features = false }
 terminal = { path = "../terminal", default-features = false }
+weather = { path = "../weather", default-features = false }
 web-manager = { path = "../web-manager", default-features = false }
+wifi-map = { path = "../wifi-map", default-features = false }
 
 # The icons the grid draws. A crate of its own -- a font and a table of `Icon` constants, with no
 # widgets in it -- so that this app does not have to depend on `pomelo-widgets` to draw a picture:

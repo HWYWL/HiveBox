@@ -34,6 +34,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use iced::theme::Palette;
+use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{button, container, row, scrollable, text, Column, Row, Space};
 use iced::{Alignment, Border, Color, Element, Length, Shadow, Subscription, Theme};
 
@@ -474,7 +475,13 @@ impl Overview {
 
         let page = Column::with_children(vec![
             self.header(sizes, theme, &words),
-            scrollable(cards).width(Length::Fill).into(),
+            // No scrollbar: it is drawn over the right edge of the cards rather than beside them, and
+            // its rail has no corner to it, so it squares off the right side of every card and runs
+            // the last ten pixels to the edge of the panel. The panel has a finger and not a pointer.
+            scrollable(cards)
+                .direction(Direction::Vertical(Scrollbar::hidden()))
+                .width(Length::Fill)
+                .into(),
         ])
         .spacing(style::GAP)
         .padding(style::MARGIN)

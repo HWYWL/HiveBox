@@ -239,6 +239,12 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         s_conn_state = HAL_WIFI_STATE_CONNECTED;
         unlock();
         ESP_LOGI(TAG, "Wi-Fi connected: ip=%s rssi=%d", ip, (int)rssi);
+
+        /* An address is what the time server needs, so this is the first moment the board can be
+         * told what time it is — and until it is, every HTTPS request is refused for a certificate
+         * it cannot judge. Non-blocking and started once; see board_time.c. */
+        hal_time_sync();
+
         {
             hal_event_t sys_ev = {
                 .type = HAL_EVENT_WIFI,

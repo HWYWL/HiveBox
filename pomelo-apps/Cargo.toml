@@ -1,4 +1,4 @@
-# The eleven applications, as one project.
+# The applications, as one project.
 #
 # Each app is its own crate — its own `main.rs`, its own test suite, its own `desktop` feature — and
 # this table is what makes them one project: one `Cargo.lock`, `cargo test --workspace` in one
@@ -19,13 +19,16 @@ members = [
     "calculator",
     "clock",
     "files",
+    "games",
     "music-player",
     "nas-monitor",
     "overview",
     "power-log",
     "settings",
     "terminal",
+    "weather",
     "web-manager",
+    "wifi-map",
 ]
 
 [patch."https://github.com/pomelos-on-sale/pomelo-widgets.git"]

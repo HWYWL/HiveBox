@@ -38,8 +38,8 @@
 //!
 //! # The grid is paged, and the page slides under the finger
 //!
-//! A page is [`PER_PAGE`] apps, one to a quadrant, so the eleven the catalogue has are three pages:
-//! four, four and three.
+//! A page is [`PER_PAGE`] apps, one to a quadrant, so the fourteen the catalogue has are four pages:
+//! four, four, four and two.
 //! A finger turning one is a **drag**: down on the grid, across, up. iced has no widget for that — a
 //! `button` captures the press it is given, and `Scrollable` scrolls for a wheel, a touch or its own
 //! scrollbar and for nothing else — so the gesture is read by `pomelo-widgets`' pager.
@@ -129,6 +129,7 @@ use iced::{
 use calculator::Calculator;
 use clock::Clock;
 use files::Files;
+use games::Games;
 use music_player::Player;
 use nas_monitor::NasMonitor;
 use overview::Overview;
@@ -137,7 +138,9 @@ use power_log::PowerLog;
 use settings::Settings;
 use task_viewer::TaskViewer;
 use terminal::Terminal;
+use weather::Weather;
 use web_manager::WebManager;
+use wifi_map::WifiMap;
 
 pub use apps::{Entry, CATALOGUE};
 pub use pomelo_material_symbols::Icon;
@@ -183,7 +186,7 @@ enum Screen {
 ///
 /// Indices, because that is what the grid hands over when a tile is tapped. The tests assert that
 /// each of these still names the app it says it does, and every entry has one: the catalogue and
-/// the list of apps are the same eleven things, in the same order.
+/// the list of apps are the same fourteen things, in the same order.
 pub const MUSIC: usize = 0;
 pub const WEB_MANAGER: usize = 1;
 pub const TERMINAL: usize = 2;
@@ -195,6 +198,9 @@ pub const CLOCK: usize = 7;
 pub const OVERVIEW: usize = 8;
 pub const FILES: usize = 9;
 pub const POWER_LOG: usize = 10;
+pub const WIFI_MAP: usize = 11;
+pub const WEATHER: usize = 12;
+pub const GAMES: usize = 13;
 
 /// What the launcher reacts to.
 ///
@@ -282,6 +288,13 @@ pub enum Message {
     Files(files::Message),
     /// The power log's own: the beat that looks at the gauge, or a finger asking for a sample now.
     PowerLog(power_log::Message),
+    /// The channel map's own: the frame that reads a scan, or a finger asking for another one.
+    WifiMap(wifi_map::Message),
+    /// The weather page's own: the frame that reads the answer, or a finger asking for another forecast.
+    Weather(weather::Message),
+    /// The games app's own: the row that opened a game, the slide that moved a tile, or the way back
+    /// to the list.
+    Games(games::Message),
 }
 
 /// The layer over the desktop that is moving, and which way it is going.
@@ -366,6 +379,14 @@ pub struct Launcher {
     /// The power log. Plain `power_log` and not `power_log_app`, for the same reason as the two above:
     /// nothing else in the launcher is called that.
     power_log: Option<PowerLog>,
+    /// The channel map. Plain `wifi_map` and not `wifi_map_app`, for the power log's reason: the
+    /// launcher has no status bar reading called that, only a count of bars.
+    wifi_map: Option<WifiMap>,
+    /// The weather page. Plain `weather` and not `weather_app`, for the wifi map's reason: nothing
+    /// else in the launcher is called that.
+    weather: Option<Weather>,
+    /// The games app. Plain `games` and not `games_app`, for the weather page's reason.
+    games: Option<Games>,
     /// Apps currently running in memory (foreground or background).
     running_apps: Vec<usize>,
     board: Arc<Board>,
@@ -429,6 +450,9 @@ impl Launcher {
             overview: None,
             files: None,
             power_log: None,
+            wifi_map: None,
+            weather: None,
+            games: None,
             clock,
             battery,
             charging,
@@ -492,6 +516,15 @@ impl Launcher {
             app.set_preferences(prefs);
         }
         if let Some(app) = &mut self.power_log {
+            app.set_preferences(prefs);
+        }
+        if let Some(app) = &mut self.wifi_map {
+            app.set_preferences(prefs);
+        }
+        if let Some(app) = &mut self.weather {
+            app.set_preferences(prefs);
+        }
+        if let Some(app) = &mut self.games {
             app.set_preferences(prefs);
         }
     }
@@ -650,6 +683,53 @@ impl Launcher {
         self.power_log.as_mut().unwrap()
     }
 
+    /// The channel map, which is handed the board and reads one backend through it: the radio.
+    ///
+    /// [`WifiMap::new`] starts a scan on the way in, so opening the tile shows a chart filling in rather
+    /// than an empty page waiting for somebody to press something. The scan is asynchronous and
+    /// tick-driven — see the app's own docs — which is why this app, like the four before it, is parked
+    /// in [`Launcher::subscription`] and poked by [`Message::Tick`] rather than being allowed to block.
+    pub fn get_or_create_wifi_map(&mut self) -> &mut WifiMap {
+        if self.wifi_map.is_none() {
+            let mut app = WifiMap::new(Arc::clone(&self.board));
+            app.set_preferences(self.preferences);
+            self.wifi_map = Some(app);
+        }
+        self.wifi_map.as_mut().unwrap()
+    }
+
+    /// The weather page, which is handed the board and reads one backend through it: the network.
+    ///
+    /// [`Weather::new`] asks for a forecast on the way in, which is the channel map's argument one
+    /// layer up: a page whose whole subject is a reading should open on that reading having been
+    /// *asked for* rather than on an empty card. The request is asynchronous and frame-driven — see
+    /// the app's own docs — so this app, like the one before it, is parked in
+    /// [`Launcher::subscription`] and poked by [`Message::Tick`] rather than being allowed to block.
+    pub fn get_or_create_weather(&mut self) -> &mut Weather {
+        if self.weather.is_none() {
+            let mut app = Weather::new(Arc::clone(&self.board));
+            app.set_preferences(self.preferences);
+            self.weather = Some(app);
+        }
+        self.weather.as_mut().unwrap()
+    }
+
+    /// The games app, which is handed the board for exactly one question and never again: how long it
+    /// has been up, which is the seed the first game is dealt from — see `Games::seed`.
+    ///
+    /// Alone among the apps in this list it asks for nothing and waits for nothing, so it is never
+    /// poked by [`Message::Tick`] and never parks a subscription in [`Launcher::subscription`]: what
+    /// moves on its page is a finger on the pad or an arrow key, and both arrive as a
+    /// [`Message::Games`].
+    pub fn get_or_create_games(&mut self) -> &mut Games {
+        if self.games.is_none() {
+            let mut app = Games::new(Arc::clone(&self.board));
+            app.set_preferences(self.preferences);
+            self.games = Some(app);
+        }
+        self.games.as_mut().unwrap()
+    }
+
     /// The hosted apps, for the host and the tests.
     pub fn calculator(&mut self) -> &Calculator {
         self.get_or_create_calculator()
@@ -697,6 +777,21 @@ impl Launcher {
     /// The power log app.
     pub fn power_log(&mut self) -> &PowerLog {
         self.get_or_create_power_log()
+    }
+
+    /// The channel map app.
+    pub fn wifi_map(&mut self) -> &WifiMap {
+        self.get_or_create_wifi_map()
+    }
+
+    /// The weather app.
+    pub fn weather(&mut self) -> &Weather {
+        self.get_or_create_weather()
+    }
+
+    /// The games app.
+    pub fn games(&mut self) -> &Games {
+        self.get_or_create_games()
     }
 
     /// Sets what the status bar shows.
@@ -750,6 +845,9 @@ impl Launcher {
             OVERVIEW => self.overview = None,
             FILES => self.files = None,
             POWER_LOG => self.power_log = None,
+            WIFI_MAP => self.wifi_map = None,
+            WEATHER => self.weather = None,
+            GAMES => self.games = None,
             _ => {}
         }
 
@@ -964,6 +1062,37 @@ impl Launcher {
         }
     }
 
+    /// The channel map. One page and no tabs, so the launcher's own back gesture is the way out, as it
+    /// is for the five pages before it.
+    fn wifi_map_screen(&self) -> Element<'_, Message> {
+        if let Some(app) = &self.wifi_map {
+            app.view().map(Message::WifiMap)
+        } else {
+            Space::new().into()
+        }
+    }
+
+    /// The weather page. One page and no tabs, so the launcher's own back gesture is the way out, as it
+    /// is for the six pages before it.
+    fn weather_screen(&self) -> Element<'_, Message> {
+        if let Some(app) = &self.weather {
+            app.view().map(Message::Weather)
+        } else {
+            Space::new().into()
+        }
+    }
+
+    /// The games app, the one screen here with a second page *inside* it: the list it opens on and the
+    /// game a row starts. Both are the app's own, so the launcher's back gesture leaves the whole app
+    /// rather than the game — the game's own way back to the list is on its page.
+    fn games_screen(&self) -> Element<'_, Message> {
+        if let Some(app) = &self.games {
+            app.view().map(Message::Games)
+        } else {
+            Space::new().into()
+        }
+    }
+
     /// The settings app, which is the one app here that brings its own back button: it navigates
     /// *inside* itself, so a second one from the launcher would be a second way out of a page. Its
     /// `go_back` reports whether it consumed the press, and that answer is what backgrounds it.
@@ -1154,6 +1283,23 @@ impl Launcher {
             }
         }
 
+        // The channel map's subscription is the terminal's case with a clock in it: it asks the platform
+        // for frames *only while a scan is in flight* — see `WifiMap::waiting` — so a page showing a
+        // finished scan costs nothing, and a window's sixty frames a second are what carries a scan from
+        // "running" to "drawn" in the thirty milliseconds it takes rather than in the second the
+        // launcher's own beat would take. On the board there are no frames and the beat is all there is,
+        // which is why [`Message::Tick`] is forwarded to it below as well.
+        if let (Screen::App(WIFI_MAP), Some(app)) = (self.screen, &self.wifi_map) {
+            subs.push(app.subscription().map(Message::WifiMap));
+        }
+
+        // The weather page's subscription is the channel map's, letter for letter: frames only while
+        // its request is in flight — see `Weather::waiting` — so a page showing a finished forecast
+        // costs nothing, and the same beat below is what ends the wait on a board with no frames.
+        if let (Screen::App(WEATHER), Some(app)) = (self.screen, &self.weather) {
+            subs.push(app.subscription().map(Message::Weather));
+        }
+
         Subscription::batch(subs)
     }
 
@@ -1235,6 +1381,15 @@ impl Launcher {
                     }
                     POWER_LOG => {
                         self.get_or_create_power_log();
+                    }
+                    WIFI_MAP => {
+                        self.get_or_create_wifi_map();
+                    }
+                    WEATHER => {
+                        self.get_or_create_weather();
+                    }
+                    GAMES => {
+                        self.get_or_create_games();
                     }
                     _ => {}
                 }
@@ -1340,6 +1495,24 @@ impl Launcher {
                 if let (Screen::App(POWER_LOG), Some(app)) = (self.screen, &mut self.power_log) {
                     app.update(power_log::Message::Tick(Instant::now()));
                 }
+
+                // The channel map is asked the sixth way, and its reason is the first one in this list
+                // again: a scan is a wait, and this is the beat that ends it on a board whose host
+                // serves no frames. One a second is slow for something that is over in thirty
+                // milliseconds, and it is the whole of what this page needs: what it draws is a
+                // finished scan, and a press of its own button asks for the next one.
+                if let (Screen::App(WIFI_MAP), Some(app)) = (self.screen, &mut self.wifi_map) {
+                    app.update(wifi_map::Message::Tick(Instant::now()));
+                }
+
+                // The weather page is asked the seventh way, and its reason is the sixth one again: a
+                // request is a wait, and this is the beat that ends it on a board whose host serves no
+                // frames. One a second is the whole of what the page needs — it draws an answer, and a
+                // press of its own button asks for the next one. The games app is the one app in this
+                // list that is asked nothing at all: nothing on its page moves on its own.
+                if let (Screen::App(WEATHER), Some(app)) = (self.screen, &mut self.weather) {
+                    app.update(weather::Message::Tick(Instant::now()));
+                }
             }
             Message::Resized(size) => {
                 self.size = size;
@@ -1359,6 +1532,9 @@ impl Launcher {
             Message::Overview(message) => self.get_or_create_overview().update(message),
             Message::Files(message) => self.get_or_create_files().update(message),
             Message::PowerLog(message) => self.get_or_create_power_log().update(message),
+            Message::WifiMap(message) => self.get_or_create_wifi_map().update(message),
+            Message::Weather(message) => self.get_or_create_weather().update(message),
+            Message::Games(message) => self.get_or_create_games().update(message),
             Message::Settings(settings::Message::Back) => return self.go_back(),
             Message::Settings(message) => {
                 let (task, new_prefs) = {
@@ -1822,6 +1998,9 @@ impl Launcher {
             OVERVIEW => self.overview_screen(),
             FILES => self.files_screen(),
             POWER_LOG => self.power_log_screen(),
+            WIFI_MAP => self.wifi_map_screen(),
+            WEATHER => self.weather_screen(),
+            GAMES => self.games_screen(),
             _ => self.launcher(),
         }
     }
@@ -2255,17 +2434,25 @@ mod tests {
         assert_eq!(CATALOGUE[FILES].name, "Files");
         assert_eq!(CATALOGUE[POWER_LOG].localized_name(Language::Chinese), "电量日志");
         assert_eq!(CATALOGUE[POWER_LOG].name, "Power Log");
+        assert_eq!(CATALOGUE[WIFI_MAP].localized_name(Language::Chinese), "信道地图");
+        assert_eq!(CATALOGUE[WIFI_MAP].name, "Wi-Fi Map");
+        assert_eq!(CATALOGUE[WEATHER].localized_name(Language::Chinese), "天气");
+        assert_eq!(CATALOGUE[WEATHER].name, "Weather");
+        assert_eq!(CATALOGUE[GAMES].localized_name(Language::Chinese), "游戏");
+        assert_eq!(CATALOGUE[GAMES].name, "Games");
     }
 
-    /// The grid's three pages, in the order they are drawn: the four the box is for, then the four that
-    /// are about the box itself and what is beside it, and then the last page, where the file manager
-    /// sits beside the overview and the power log.
+    /// The grid's four pages, in the order they are drawn: the four the box is for, the four that are
+    /// about the box itself and what is beside it, the four the third page ends on — the overview, the
+    /// file manager, the power log and, the one tile there that is about neither the box nor the machine
+    /// beside it, the channel map — and the last two, where the weather is the sky over the box and the
+    /// game is about nobody but the person holding it.
     ///
     /// Written out rather than derived, because the order *is* the interface: a page and a position
     /// are what a finger learns, and a reshuffle that left this test green would be the one kind of
     /// change nobody would notice until they were holding the box.
     #[test]
-    fn the_catalogue_is_three_pages_in_the_order_the_grid_shows_them() {
+    fn the_catalogue_is_four_pages_in_the_order_the_grid_shows_them() {
         let names: Vec<&str> = CATALOGUE.iter().map(|entry| entry.name).collect();
 
         assert_eq!(
@@ -2281,14 +2468,17 @@ mod tests {
                 "Clock",
                 "Overview",
                 "Files",
-                "Power Log"
+                "Power Log",
+                "Wi-Fi Map",
+                "Weather",
+                "Games"
             ]
         );
-        assert_eq!(CATALOGUE.len(), 11, "and the eleven are all the tiles there are");
+        assert_eq!(CATALOGUE.len(), 14, "and the fourteen are all the tiles there are");
         assert_eq!(
             Launcher::new(Arc::new(Board::simulated())).pages(),
-            3,
-            "four, four and three"
+            4,
+            "four, four, four and two"
         );
     }
 
@@ -3198,7 +3388,7 @@ mod tests {
     }
 
     /// The overview's own message goes to the overview, and only to it: the launcher is a router for
-    /// eleven apps and the wrong one of them reacting is the one bug a router can have.
+    /// fourteen apps and the wrong one of them reacting is the one bug a router can have.
     #[test]
     fn the_overviews_messages_reach_the_overview() {
         let mut launcher = Launcher::new(Arc::new(Board::simulated()));
@@ -3288,6 +3478,60 @@ mod tests {
             launcher.power_log().samples().len(),
             before + 1,
             "the pump's beat is the page's clock"
+        );
+    }
+
+    /// The weather page and the games app live the same four steps as the eight before them — built
+    /// when the tile is tapped, kept while backgrounded, freed on exit — and they are one test because
+    /// they are the two *shapes* a hosted app comes in: one that is waiting on the network, and one
+    /// that waits on nothing at all.
+    #[test]
+    fn the_weather_page_and_the_games_app_are_loaded_on_demand_and_freed_on_kill() {
+        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
+
+        assert!(launcher.weather.is_none());
+        assert!(launcher.games.is_none());
+
+        launcher.update(Message::Open(WEATHER));
+        assert!(launcher.weather.is_some());
+        assert_eq!(launcher.screen, Screen::App(WEATHER));
+
+        launcher.update(Message::Back);
+        assert_eq!(launcher.screen, Screen::Grid);
+        assert!(launcher.weather.is_some(), "backgrounding keeps it");
+
+        launcher.update(Message::Open(GAMES));
+        assert!(launcher.games.is_some());
+        assert_eq!(launcher.screen, Screen::App(GAMES));
+
+        launcher.update(Message::Exit);
+        assert!(launcher.games.is_none(), "killing frees it");
+
+        launcher.update(Message::Open(WEATHER));
+        launcher.update(Message::Exit);
+        assert!(
+            launcher.weather.is_none(),
+            "and the one that was only backgrounded goes the same way"
+        );
+    }
+
+    /// Their own messages reach them and only them — the router is where a message would otherwise be
+    /// dropped — and these two are the ends of its range: the app that is waiting on a request, and
+    /// the one that never waits at all.
+    #[test]
+    fn the_weather_and_games_messages_reach_their_apps() {
+        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
+
+        launcher.update(Message::Weather(weather::Message::Refresh));
+        assert!(launcher.weather.is_some(), "which creates it if it was not up");
+
+        launcher.update(Message::Games(games::Message::Open(
+            games::Game::TwentyFortyEight,
+        )));
+        assert!(launcher.games.is_some(), "and this one too");
+        assert!(
+            launcher.games().playing(),
+            "and the games app is the one that handled it"
         );
     }
 }

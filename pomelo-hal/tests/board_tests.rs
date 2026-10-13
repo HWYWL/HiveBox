@@ -2,7 +2,9 @@
 //!
 //! These run on the host, where the board under test is [`Board::simulated`].
 
-use pomelo_hal::{Board, HalError, ScanState, StorageBackend, VolumeKind, WifiState};
+use pomelo_hal::{
+    Board, HalError, HttpState, ScanState, StorageBackend, VolumeKind, WifiState,
+};
 
 /// Write a minimal 16-bit mono PCM WAV (0.1 s @ 8 kHz) to a temp file and
 /// return its path, so the audio backend has a real file to parse.
@@ -347,5 +349,203 @@ fn board_event_listener_and_tick_change_detection() {
     // Explicit emit
     board.emit_event(pomelo_hal::SystemEvent::InputAction(pomelo_hal::InputAction::Back));
     assert!(event_count.load(Ordering::SeqCst) >= 3);
+}
+
+// =============================================================================
+// The HTTP client
+// =============================================================================
+
+/// A request asked for and answered: the whole of what the HTTP client promises.
+///
+/// The four states in order, and the rule that ties them together: the answer is collected *once*,
+/// by the frame that saw `Done`.
+#[test]
+fn sim_http_request_lifecycle() {
+    let board = Board::simulated();
+
+    assert_eq!(board.http().state(), HttpState::Idle, "nothing asked for yet");
+
+    board.http().start("https://example.com/forecast").unwrap();
+    assert_eq!(board.http().state(), HttpState::Running);
+
+    // Nothing to take mid-flight: the answer is not late, it is not there yet.
+    assert!(matches!(board.http().take_result(), Err(HalError::Busy)));
+
+    // Cooperative ticks drive the simulated request to completion.
+    for _ in 0..3 {
+        board.tick();
+    }
+    assert_eq!(board.http().state(), HttpState::Done);
+
+    let response = board.http().take_result().unwrap();
+    assert!(response.ok());
+    assert_eq!(response.status, 200);
+
+    // Taken once, and the backend is free again afterwards.
+    assert_eq!(board.http().state(), HttpState::Idle);
+    assert!(matches!(board.http().take_result(), Err(HalError::Busy)));
+}
+
+/// What the page asked for is what the client was asked for.
+///
+/// The URL carries the whole request — the city's coordinates, the days of forecast — so a page that
+/// built the wrong one is a page whose answer is for somewhere else, and this is where that is
+/// caught. `last_url` is the simulator's own, which is why the assertion is made against a client
+/// rather than through the board: nothing above the trait gets to depend on it.
+#[test]
+fn sim_http_remembers_the_url_it_was_given() {
+    use pomelo_hal::sim::SimHttp;
+    use pomelo_hal::HttpBackend;
+
+    let mut http = SimHttp::answering("{}");
+    assert_eq!(http.last_url(), None);
+
+    let url = "https://api.example.com/v1/forecast?latitude=52.52&longitude=13.41";
+    http.start(url).unwrap();
+    assert_eq!(http.last_url(), Some(url));
+}
+
+/// A request in flight is the only one in flight.
+#[test]
+fn sim_http_takes_one_request_at_a_time() {
+    let board = Board::simulated();
+
+    board.http().start("https://example.com/a").unwrap();
+
+    assert!(
+        matches!(board.http().start("https://example.com/b"), Err(HalError::Busy)),
+        "a second request would overtake the first"
+    );
+}
+
+/// What is not a URL is refused as an argument, not reported as a network fault.
+#[test]
+fn sim_http_refuses_a_url_it_cannot_fetch() {
+    let board = Board::simulated();
+
+    for url in ["", "example.com", "ftp://example.com/a", "https:///a"] {
+        assert!(
+            matches!(board.http().start(url), Err(HalError::InvalidArg)),
+            "{url:?} should be refused"
+        );
+    }
+
+    assert_eq!(
+        board.http().state(),
+        HttpState::Idle,
+        "a refused request leaves nothing behind"
+    );
+}
+
+/// A board off the network fails, and says *which* way it failed.
+///
+/// The state is where a fault is reported, and it is not a result: there is nothing to collect, so
+/// asking for one has to be an error rather than an empty answer that a page would draw as weather.
+#[test]
+fn sim_http_offline_reports_the_fault_and_has_no_result() {
+    use pomelo_hal::sim::SimHttp;
+    use pomelo_hal::HttpFault;
+
+    let board = Board::simulated().with_http(Box::new(SimHttp::offline()));
+
+    board.http().start("https://example.com/forecast").unwrap();
+    for _ in 0..3 {
+        board.tick();
+    }
+
+    assert_eq!(board.http().state(), HttpState::Failed(HttpFault::NoNetwork));
+    assert!(matches!(board.http().take_result(), Err(HalError::Busy)));
+}
+
+/// A body and a status arrive together, and are the server's rather than the client's.
+#[test]
+fn sim_http_hands_over_the_body_and_the_status() {
+    use pomelo_hal::sim::SimHttp;
+
+    let board = Board::simulated()
+        .with_http(Box::new(SimHttp::answering("<html>gone</html>").with_status(404)));
+
+    board.http().start("https://example.com/forecast").unwrap();
+    for _ in 0..3 {
+        board.tick();
+    }
+
+    let response = board.http().take_result().unwrap();
+    assert_eq!(response.status, 404);
+    assert!(!response.ok());
+    assert_eq!(response.text(), Some("<html>gone</html>"));
+}
+
+/// A request that failed does not hold the slot: the next one is taken.
+///
+/// The one case a page cannot work around: a page that drew a fault has no answer to collect and
+/// nothing to cancel, so a client that went on refusing `start` would be a page that could never try
+/// again — and "turn the Wi-Fi on and press refresh" is the whole of what a fault line is for.
+#[test]
+fn sim_http_a_failed_request_frees_the_slot_for_the_next_one() {
+    use pomelo_hal::sim::SimHttp;
+    use pomelo_hal::HttpFault;
+
+    let board = Board::simulated().with_http(Box::new(SimHttp::offline()));
+
+    board.http().start("https://example.com/a").unwrap();
+    for _ in 0..3 {
+        board.tick();
+    }
+    assert_eq!(board.http().state(), HttpState::Failed(HttpFault::NoNetwork));
+
+    board.http().start("https://example.com/b").unwrap();
+    assert_eq!(board.http().state(), HttpState::Running, "the second try");
+
+    // And an answer nobody collected still is busy: that is a page that lost track of a request,
+    // which is a different mistake and must not be swallowed.
+    let board = Board::simulated();
+    board.http().start("https://example.com/c").unwrap();
+    for _ in 0..3 {
+        board.tick();
+    }
+    assert_eq!(board.http().state(), HttpState::Done);
+    assert!(matches!(
+        board.http().start("https://example.com/d"),
+        Err(HalError::Busy)
+    ));
+}
+
+/// Cancelling abandons the request, and abandoning nothing is not an error.
+#[test]
+fn sim_http_cancel_leaves_it_idle() {
+    let board = Board::simulated();
+
+    board.http().cancel().unwrap();
+
+    board.http().start("https://example.com/a").unwrap();
+    board.http().cancel().unwrap();
+    assert_eq!(board.http().state(), HttpState::Idle);
+
+    // The slot is free again, so the next request is taken rather than refused.
+    board.http().start("https://example.com/b").unwrap();
+    assert_eq!(board.http().state(), HttpState::Running);
+}
+
+/// Bytes that are not text are not text.
+///
+/// The body of an answer is bytes, and a page that wanted a `String` has to be told when the answer
+/// is not one — the alternative is a lossy conversion that turns somebody else's binary into this
+/// page's words.
+#[test]
+fn http_response_text_is_none_for_bytes_that_are_not_utf8() {
+    use pomelo_hal::HttpResponse;
+
+    let response = HttpResponse {
+        status: 200,
+        body: vec![0xff, 0xfe, 0x00],
+    };
+    assert_eq!(response.text(), None);
+
+    let response = HttpResponse {
+        status: 200,
+        body: b"{\"a\":1}".to_vec(),
+    };
+    assert_eq!(response.text(), Some("{\"a\":1}"));
 }
 

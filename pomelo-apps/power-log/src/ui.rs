@@ -12,6 +12,7 @@
 //! percentage printed above it by a rounding step — which is the trick the overview's bars are made of,
 //! turned on its side.
 
+use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{button, container, row, scrollable, text, Column, Row, Space};
 use iced::{Alignment, Border, Color, Element, Length, Shadow};
 
@@ -40,11 +41,17 @@ pub fn view(app: &PowerLog) -> Element<'_, Message> {
 
     let page = Column::with_children(vec![
         header(sizes, mode, &words),
+        // No scrollbar. It would be drawn over the right edge of the cards rather than beside them,
+        // and its rail is the one thing on the page without a corner: it would square off the right
+        // side of every card and run the strip the last ten pixels to the edge of the panel, which
+        // reads as content that does not fit. The panel has a finger and not a pointer, and a bar a
+        // hair wide is something to look at rather than something to grab, as on the track list.
         scrollable(
             Column::with_children(cards)
                 .spacing(style::GAP)
                 .width(Length::Fill),
         )
+        .direction(Direction::Vertical(Scrollbar::hidden()))
         .width(Length::Fill)
         .into(),
     ])

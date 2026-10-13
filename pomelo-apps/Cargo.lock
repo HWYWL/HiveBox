@@ -93,6 +93,7 @@ dependencies = [
  "calculator",
  "clock",
  "files",
+ "games",
  "iced",
  "image",
  "music-player",
@@ -105,7 +106,9 @@ dependencies = [
  "settings",
  "task-viewer",
  "terminal",
+ "weather",
  "web-manager",
+ "wifi-map",
 ]
 
 [[package]]
@@ -1020,6 +1023,17 @@ dependencies = [
  "memchr",
  "pin-project-lite",
  "slab",
+]
+
+[[package]]
+name = "games"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "iced_test",
+ "pomelo-hal",
+ "pomelo-material-symbols",
+ "pomelo-widgets",
 ]
 
 [[package]]
@@ -3735,6 +3749,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "weather"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "iced_test",
+ "pomelo-hal",
+ "pomelo-material-symbols",
+ "pomelo-widgets",
+]
+
+[[package]]
 name = "web-manager"
 version = "0.1.0"
 dependencies = [
@@ -3865,6 +3890,17 @@ dependencies = [
  "log",
  "thiserror 2.0.21",
  "web-sys",
+]
+
+[[package]]
+name = "wifi-map"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "iced_test",
+ "pomelo-hal",
+ "pomelo-material-symbols",
+ "pomelo-widgets",
 ]
 
 [[package]]

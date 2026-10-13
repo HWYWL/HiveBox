@@ -51,13 +51,14 @@ pub use error::HalError;
 pub use music_settings::MusicSettings;
 pub use nas_credentials::NasCredentials;
 pub use traits::{
-    AudioBackend, ImuBackend, InputBackend, MicBackend, NasBackend, PowerBackend, StorageBackend,
-    SystemBackend, WebBackend, WifiBackend,
+    AudioBackend, HttpBackend, ImuBackend, InputBackend, MicBackend, NasBackend, PowerBackend,
+    StorageBackend, SystemBackend, WebBackend, WifiBackend,
 };
 pub use types::{
-    ApInfo, AudioMeta, ChipInfo, FirmwareInfo, FlashLayout, FlashRegion, FlashRegionKind,
-    InputAction, MemoryInfo, NasCpu, NasDisk, NasFault, NasNetwork, NasReading, NasStatus, ScanState,
-    SystemEvent, TaskInfo, TaskState, Vec3, VolumeInfo, VolumeKind, WebStatus, WifiState, WifiStatus,
+    ApInfo, AudioMeta, ChipInfo, FirmwareInfo, FlashLayout, FlashRegion, FlashRegionKind, HttpFault,
+    HttpResponse, HttpState, InputAction, MemoryInfo, NasCpu, NasDisk, NasFault, NasNetwork,
+    NasReading, NasStatus, ScanState, SystemEvent, TaskInfo, TaskState, Vec3, VolumeInfo, VolumeKind,
+    WebStatus, WifiState, WifiStatus, signal_bars,
 };
 pub use wifi_credentials::WifiCredentials;
 
@@ -66,14 +67,14 @@ pub mod prelude {
     pub use crate::board::Board;
     pub use crate::error::HalError;
     pub use crate::traits::{
-        AudioBackend, ImuBackend, InputBackend, MicBackend, NasBackend, PowerBackend,
+        AudioBackend, HttpBackend, ImuBackend, InputBackend, MicBackend, NasBackend, PowerBackend,
         StorageBackend, SystemBackend, WebBackend, WifiBackend,
     };
     pub use crate::types::{
         ApInfo, AudioMeta, ChipInfo, FirmwareInfo, FlashLayout, FlashRegion, FlashRegionKind,
-        InputAction, MemoryInfo, NasCpu, NasDisk, NasFault, NasNetwork, NasReading, NasStatus,
-        ScanState, SystemEvent, TaskInfo, TaskState, Vec3, VolumeInfo, VolumeKind, WebStatus,
-        WifiState, WifiStatus,
+        HttpFault, HttpResponse, HttpState, InputAction, MemoryInfo, NasCpu, NasDisk, NasFault,
+        NasNetwork, NasReading, NasStatus, ScanState, SystemEvent, TaskInfo, TaskState, Vec3,
+        VolumeInfo, VolumeKind, WebStatus, WifiState, WifiStatus, signal_bars,
     };
     pub use crate::music_settings::MusicSettings;
     pub use crate::nas_credentials::NasCredentials;

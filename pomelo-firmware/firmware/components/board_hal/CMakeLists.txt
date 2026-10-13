@@ -24,8 +24,10 @@ idf_component_register(
         "board_audio.c"
         "board_wifi.c"
         "board_rtc.c"
+        "board_time.c"
         "board_storage.c"
         "board_system.c"
+        "board_http.c"
         "board_web.c"
         "board_socket.c"
     INCLUDE_DIRS "."
@@ -68,6 +70,10 @@ idf_component_register(
     PRIV_REQUIRES
         spi_flash
         esp_partition
+        # The root bundle HTTP client's TLS is verified against (`esp_crt_bundle_attach`, in
+        # `board_http.c`). Private for the same reason as the two above: no other component names it,
+        # and the roots themselves are a build setting rather than an API.
+        mbedtls
 )
 
 # Intercept POSIX settimeofday and clock_settime so they automatically persist to hardware RTC

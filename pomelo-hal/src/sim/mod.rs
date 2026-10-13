@@ -9,6 +9,7 @@
 //! `firmware/pomelo-hal-esp32/src/`.
 
 mod audio;
+mod http;
 mod imu;
 mod input;
 mod mic;
@@ -20,6 +21,7 @@ mod web;
 mod wifi;
 
 pub use audio::SimAudio;
+pub use http::SimHttp;
 pub use imu::SimImu;
 pub use input::SimInput;
 pub use mic::SimMic;

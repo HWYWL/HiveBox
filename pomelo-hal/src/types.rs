@@ -470,6 +470,91 @@ impl WebStatus {
     }
 }
 
+/// How a request is going, as [`HttpBackend`][crate::traits::HttpBackend] reports it.
+///
+/// The same start-and-poll shape the radio's scan has, for the same reason: a request is a second or
+/// two of the network's time, and a page that waited for one would be a page that stopped drawing.
+/// [`HttpState::Done`] means *there is an answer to collect* — see
+/// [`HttpBackend::take_result`][crate::traits::HttpBackend::take_result] — and not "the answer has
+/// been read".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HttpState {
+    /// Nothing has been asked for, or the last answer has been collected.
+    #[default]
+    Idle,
+    /// A request is in flight.
+    Running,
+    /// An answer is waiting to be taken.
+    Done,
+    /// The request did not come back, and this is why.
+    Failed(HttpFault),
+}
+
+/// Why a request did not come back with an answer.
+///
+/// A closed list rather than the platform's error code, and every one of them is something a person
+/// can act on — which is the test a fault has to pass to be worth a variant here. Which is why the
+/// clock is one: a certificate is judged against the system time, so a board that has never been told
+/// the time cannot make an HTTPS request at all, and "the settings page says 1970" *is* the reason
+/// the weather page is empty. See [`crate::traits::SystemBackend::clock`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpFault {
+    /// The board is not on a network, so there is nothing to reach the server through.
+    NoNetwork,
+    /// The clock has never been set, and this is an HTTPS request: the certificate's dates cannot be
+    /// judged against 1970, so the connection is refused before it is made.
+    ClockNotSet,
+    /// Nothing answered: the name did not resolve, the connection was refused, or the route is gone.
+    Unreachable,
+    /// The request was sent and nothing came back in time.
+    Timeout,
+    /// The server was reached and the TLS handshake did not complete — a certificate that does not
+    /// check out, or two ends that share no protocol.
+    Tls,
+    /// The answer was larger than this board will hold. See [`HttpResponse::MAX_BODY_BYTES`].
+    TooLarge,
+    /// This board cannot make requests at all: its image has no HTTP client in it. Not a fault of the
+    /// network, and the answer while a backend is still a placeholder — the same note
+    /// [`NasFault::Unsupported`] carries.
+    Unsupported,
+}
+
+/// An answer, once one has arrived.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpResponse {
+    /// The status code as the server wrote it. Carried rather than judged: a `404` with a body in it
+    /// is an answer, and what a page does with one is the page's business.
+    pub status: u16,
+    /// The body, exactly as it arrived.
+    ///
+    /// Bytes and not a `String`, because not every answer is text and the ones that are have not
+    /// always said so — see [`HttpResponse::text`], which is the reader for the ones that are.
+    pub body: Vec<u8>,
+}
+
+impl HttpResponse {
+    /// The most this board will hold of an answer.
+    ///
+    /// A bound and not a preference: the body is read into one buffer on the device, and a page that
+    /// asked for something unbounded is how a board runs out of memory reading it. 16 KB is several
+    /// times the largest answer any page here asks for, and is the same size as the content buffer
+    /// the TLS stack is built with (`sdkconfig`: `ASYMMETRIC_CONTENT_LEN`).
+    pub const MAX_BODY_BYTES: usize = 16 * 1024;
+
+    /// Whether the server called this a success.
+    pub fn ok(&self) -> bool {
+        (200..300).contains(&self.status)
+    }
+
+    /// The body as text, or `None` if it is not text.
+    ///
+    /// `None` for bytes that are not UTF-8, which is the honest answer for a body this page cannot
+    /// read: a lossy conversion would turn somebody else's binary into this page's words.
+    pub fn text(&self) -> Option<&str> {
+        std::str::from_utf8(&self.body).ok()
+    }
+}
+
 /// How a look at the NAS went, and whether there has been one.
 ///
 /// [`NasStatus::Connecting`] and [`NasStatus::Offline`] are different answers and both are ordinary
