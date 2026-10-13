@@ -49,6 +49,7 @@ which is how text and icons get their smooth edges.
 | `src/path.rs` | path building and flattening |
 | `src/geometry.rs` | points, rects, rounded rects, transforms |
 | `src/color.rs` | RGB565 ↔ ARGB conversions, blending, rectangular extraction |
+| `src/arch/` | the span blend kernels, behind the seam a vector implementation will answer through |
 
 ## Provenance
 

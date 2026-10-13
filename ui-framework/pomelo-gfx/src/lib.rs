@@ -1,3 +1,7 @@
+mod arch;
+
+#[cfg(feature = "bench")]
+pub mod bench;
 pub mod canvas;
 pub mod color;
 pub mod geometry;

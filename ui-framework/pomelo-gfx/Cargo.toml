@@ -9,5 +9,16 @@ readme = "README.md"
 keywords = ["graphics", "rasterizer", "rgb565", "embedded"]
 categories = ["graphics", "embedded"]
 
+[features]
+# The device-reachable half of the span benchmark (`crate::bench`). Off by default: it allocates a
+# whole frame buffer to measure into and prints to stdout, neither of which a shipped build wants.
+# It is a feature rather than an `examples/` binary because the firmware links this crate and not
+# an example, and the device's numbers are the ones that decide the vector work.
+bench = []
+
 [dependencies]
 kurbo = { version = "0.10", default-features = false, features = ["std"] }
+
+[[example]]
+name = "bench_spans"
+required-features = ["bench"]

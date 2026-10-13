@@ -1,3 +1,4 @@
+use crate::arch;
 use crate::color::{blend_rgb565, dither_float_to_rgb565, Color};
 use crate::geometry::{Point, RRect, Rect};
 use crate::paint::{LineCap, Paint, Shader, Stroke};
@@ -94,10 +95,7 @@ pub fn fill_rect(pixmap: &mut Pixmap565Mut<'_>, clip: Option<Rect>, rect: Rect, 
         if is_opaque {
             fill_u16_slice(slice, col565);
         } else {
-            let a = color.a;
-            for px in slice.iter_mut() {
-                *px = blend_rgb565(*px, col565, a);
-            }
+            arch::blend_span_rgb565(slice, col565, color.a);
         }
     }
 }
@@ -326,9 +324,7 @@ pub fn fill_rrect(pixmap: &mut Pixmap565Mut<'_>, clip: Option<Rect>, rrect: RRec
             if is_opaque {
                 fill_u16_slice(slice, col565);
             } else {
-                for px in slice.iter_mut() {
-                    *px = blend_rgb565(*px, col565, a);
-                }
+                arch::blend_span_rgb565(slice, col565, a);
             }
 
             // 3. Right subpixel anti-aliased edge
@@ -637,9 +633,7 @@ pub fn fill_circle(
             if is_opaque {
                 fill_u16_slice(slice, col565);
             } else {
-                for px in slice.iter_mut() {
-                    *px = blend_rgb565(*px, col565, a);
-                }
+                arch::blend_span_rgb565(slice, col565, a);
             }
 
             for x in solid_end..x_end {
@@ -701,25 +695,17 @@ pub fn blit_mask(
         return;
     }
 
-    let alpha_base = color.a as u32;
+    // One row of the glyph at a time, and the whole row in one call: `gx` is contiguous within
+    // it, so both halves of the clip become a single range rather than a test per pixel.
+    let run = (x2 - x1) as usize;
 
     for py in y1..y2 {
         let gy = (py - y) as usize;
         let row = pixmap.row_mut(py as u32);
+        let mask_start = gy * (w as usize) + (x1 - x) as usize;
+        let mask_row = &mask[mask_start..mask_start + run];
 
-        for px in x1..x2 {
-            let gx = (px - x) as usize;
-            let mask_alpha = mask[gy * (w as usize) + gx];
-            if mask_alpha == 0 {
-                continue;
-            }
-
-            let effective_alpha = ((alpha_base * mask_alpha as u32) / 255) as u8;
-            if effective_alpha > 0 {
-                let dst = &mut row[px as usize];
-                *dst = blend_rgb565(*dst, col565, effective_alpha);
-            }
-        }
+        arch::blit_mask_span(&mut row[x1 as usize..x2 as usize], mask_row, col565, color.a);
     }
 }
 
@@ -1314,9 +1300,7 @@ pub fn fill_convex_quad(
                             if a == 255 {
                                 fill_u16_slice(slice, col565);
                             } else {
-                                for px in slice.iter_mut() {
-                                    *px = blend_rgb565(*px, col565, a);
-                                }
+                                arch::blend_span_rgb565(slice, col565, a);
                             }
                         }
 
