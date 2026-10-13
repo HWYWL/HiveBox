@@ -4,24 +4,27 @@
 //! tree is the real one through `iced_test`, and the game is the real game — a board that has been
 //! played, or a position written down when the test needs one nobody could play their way to.
 //!
-//! The rules themselves are [`crate::grid`]'s tests and the generator is [`crate::random`]'s: what is
-//! asserted here is the wiring between them and the two screens — that the list opens a board, that a
-//! slide reaches it, that the way back is where a page's way back is, and that a board with nothing
-//! left to do says so rather than going quiet.
+//! The rules themselves are their own modules' tests — [`crate::grid`]'s, [`crate::snake`]'s and
+//! [`crate::tilt`]'s — and the generator is [`crate::random`]'s. What is asserted here is the wiring
+//! between them and the two screens: that a row opens a game, that a direction reaches it, that a
+//! snake's frame is its clock and the board's tilt is its steering, that the way back is where a
+//! page's way back is, and that a game with nothing left to do says so rather than going quiet.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use iced::keyboard::key::Named;
 use iced::keyboard::Key;
 use iced::Size;
 use iced_test::Simulator;
 use pomelo_hal::Board;
-use pomelo_widgets::preferences::{FontSizeTier, Language, SystemPreferences, ThemeMode};
+use pomelo_widgets::preferences::{Language, SystemPreferences, ThemeMode};
 
 use crate::game::TwentyFortyEight;
 use crate::grid::{Direction, SIDE};
+use crate::snake::{Cell, Snake};
 use crate::style::PANEL;
-use crate::{direction, Game, Games, Message, Page};
+use crate::{direction, Game, Games, Message, Page, Played};
 
 /// A screen tall enough to show the whole page without scrolling.
 ///
@@ -80,12 +83,7 @@ fn screen(app: &Games, height: f32) -> Simulator<'_, Message> {
 fn listing() -> Games {
     let mut app = Games::new(board());
 
-    app.set_preferences(SystemPreferences {
-        language: Language::English,
-        theme: ThemeMode::Dark,
-        font_tier: FontSizeTier::Standard,
-        ..SystemPreferences::default()
-    });
+    app.set_preferences(SystemPreferences::new(Language::English, ThemeMode::Dark));
 
     app
 }
@@ -101,18 +99,19 @@ fn opened() -> Games {
 /// The app with a board written down on it, for the two positions a game cannot be played into.
 fn showing(cells: [u32; SIDE * SIDE]) -> Games {
     let mut app = listing();
-    app.page = Page::Playing(Game::TwentyFortyEight, TwentyFortyEight::from_cells(cells));
+    app.page = Page::Playing(Played::Tiles(TwentyFortyEight::from_cells(cells)));
 
     app
 }
 
-/// The app opens on the list, and the list has the one game on it and says what it is.
+/// The app opens on the list, and the list has both games on it and says what they are.
 #[test]
 fn the_app_opens_on_the_list() {
     let app = listing();
 
     assert!(!app.playing(), "nothing is being played yet");
-    assert!(app.game().is_none());
+    assert!(app.tiles().is_none());
+    assert!(app.snake().is_none());
 
     let mut ui = screen(&app, TALL);
     assert!(ui.find("Games").is_ok(), "the page says what it is");
@@ -120,6 +119,14 @@ fn the_app_opens_on_the_list() {
     assert!(
         ui.find("Slide the tiles together and make 2048").is_ok(),
         "and says what the game is, because a name is not a rule"
+    );
+
+    // The second game is a row like the first: a name, and the rules under it. The list is a list.
+    assert!(ui.find("Snake").is_ok(), "and names the other game");
+    assert!(
+        ui.find("Eat apples and grow — don't hit the wall or yourself")
+            .is_ok(),
+        "and says what that one is, which is not what the first one is"
     );
 }
 
@@ -130,7 +137,7 @@ fn picking_a_game_deals_a_board() {
 
     assert!(app.playing(), "a game is open");
 
-    let game = app.game().expect("and it is a game");
+    let game = app.tiles().expect("and it is a game");
     let tiles: Vec<u32> = game
         .grid()
         .cells()
@@ -159,7 +166,7 @@ fn the_way_back_is_the_list_again() {
     app.update(Message::List);
 
     assert!(!app.playing());
-    assert!(app.game().is_none(), "a game left behind is not paused");
+    assert!(app.tiles().is_none(), "a game left behind is not paused");
 
     let mut ui = screen(&app, TALL);
     assert!(ui.find("Slide the tiles together and make 2048").is_ok());
@@ -179,14 +186,11 @@ fn a_slide_reaches_the_board() {
         0, 0, 0, 0, //
         0, 0, 0, 0,
     ];
-    app.page = Page::Playing(
-        Game::TwentyFortyEight,
-        TwentyFortyEight::from_cells(position),
-    );
+    app.page = Page::Playing(Played::Tiles(TwentyFortyEight::from_cells(position)));
 
-    app.update(Message::Slide(Direction::Left));
+    app.update(Message::Steer(Direction::Left));
 
-    let game = app.game().expect("a game");
+    let game = app.tiles().expect("a game");
     assert_eq!(game.grid().get(0, 0), 4, "the two twos met at the wall");
     assert_eq!(game.score(), 4);
     assert_eq!(
@@ -207,7 +211,7 @@ fn a_slide_reaches_the_board() {
 fn a_slide_on_the_list_does_nothing() {
     let mut app = listing();
 
-    app.update(Message::Slide(Direction::Left));
+    app.update(Message::Steer(Direction::Left));
     app.update(Message::Restart);
 
     assert!(!app.playing(), "the list is still the list");
@@ -222,7 +226,7 @@ fn a_new_game_starts_again() {
     let mut app = opened();
     app.update(Message::Restart);
 
-    let game = app.game().expect("a game");
+    let game = app.tiles().expect("a game");
     let tiles = game.grid().cells().iter().filter(|cell| **cell != 0).count();
 
     assert_eq!(tiles, 2);
@@ -240,7 +244,7 @@ fn a_new_game_starts_again() {
 #[test]
 fn a_finished_board_says_so() {
     let app = showing(STUCK);
-    assert!(app.game().expect("a game").is_over());
+    assert!(app.tiles().expect("a game").is_over());
 
     let mut ui = screen(&app, TALL);
     assert!(
@@ -262,7 +266,7 @@ fn a_won_board_says_so_and_goes_on() {
     assert!(!game.is_over(), "and the board is not finished");
 
     let mut app = listing();
-    app.page = Page::Playing(Game::TwentyFortyEight, game);
+    app.page = Page::Playing(Played::Tiles(game));
 
     let mut ui = screen(&app, TALL);
     assert!(ui.find("You made 2048 — carry on").is_ok());
@@ -288,4 +292,184 @@ fn the_four_arrows_are_the_four_directions() {
     assert_eq!(direction(Key::Named(Named::Enter)), None);
     assert_eq!(direction(Key::Character("w")), None);
     assert_eq!(direction(Key::Character("q")), None);
+}
+
+/// The app with snake open, in English, played by nothing.
+fn snaking() -> Games {
+    let mut app = listing();
+    app.update(Message::Open(Game::Snake));
+
+    app
+}
+
+/// The app with a snake written down on it, and the apple put somewhere it will not be eaten.
+///
+/// An apple is placed by hand for the same reason [`STUCK`] is written down: where a seed put it is
+/// where a seed put it, and a test that read the length of a snake after a step would otherwise pass
+/// or fail on whether that step happened to land on the apple.
+fn snaking_from(cells: &[Cell], heading: Direction, food: Cell) -> Games {
+    let mut app = listing();
+    let mut snake = Snake::from_body(cells, heading);
+    snake.put_food(food);
+    app.page = Page::Playing(Played::Snake(snake));
+
+    app
+}
+
+/// The second row of the list opens the second game, and not the first.
+#[test]
+fn the_second_row_opens_a_snake() {
+    let app = snaking();
+
+    assert!(app.playing(), "a game is on the panel");
+    assert!(app.snake().is_some(), "and it is the snake that is open");
+    assert!(
+        app.tiles().is_none(),
+        "and not the other game: a page holds one game"
+    );
+
+    let snake = app.snake().expect("a snake");
+    assert_eq!(snake.length(), 3, "a new snake is three cells long");
+    assert_eq!(snake.score(), 0, "and has eaten nothing");
+    assert!(!snake.is_over());
+
+    let mut ui = screen(&app, TALL);
+    assert!(ui.find("Snake").is_ok(), "the page names the game");
+    assert!(
+        ui.find("Tilt the box or use the arrows to turn").is_ok(),
+        "and both ways to steer it, because tipping is not something the pad can say"
+    );
+    assert!(ui.find("Score 0").is_ok(), "and what it is worth so far");
+}
+
+/// An arrow is a turn and a frame is a step, and the turn is taken on the step.
+#[test]
+fn a_snake_turns_on_an_arrow_and_steps_on_the_clock() {
+    // A straight snake in the middle of the board, heading right, with the apple out of its way.
+    let middle = Cell { row: 8, col: 8 };
+    let mut app = snaking_from(
+        &[
+            middle,
+            Cell { row: 8, col: 7 },
+            Cell { row: 8, col: 6 },
+        ],
+        Direction::Right,
+        Cell { row: 0, col: 0 },
+    );
+
+    let start = Instant::now();
+    app.stepped = start;
+
+    // An arrow is a turn, and a turn is not a step: the snake has not moved.
+    app.update(Message::Steer(Direction::Up));
+    assert_eq!(
+        app.snake().expect("a snake").head(),
+        middle,
+        "asking is not moving"
+    );
+
+    // A frame that arrives before the step has come round is not a step either: a snake moves on its
+    // clock, and a fast panel does not make it faster.
+    app.update(Message::Tick(start + Duration::from_millis(10)));
+    assert_eq!(
+        app.snake().expect("a snake").head(),
+        middle,
+        "a frame is not a step"
+    );
+
+    // And the frame that *is* the step takes the turn that was asked for.
+    app.update(Message::Tick(start + Duration::from_secs(1)));
+    let snake = app.snake().expect("a snake");
+    assert_eq!(snake.head().row, 7, "it moved up a row");
+    assert_eq!(snake.head().col, 8, "and not along the row it was on");
+    assert_eq!(snake.heading(), Direction::Up, "the way it was asked to");
+    assert_eq!(snake.length(), 3, "and it is the same length: no apple");
+}
+
+/// A wall is the end of it, the snake stops on the board rather than off it, and the page says so.
+#[test]
+fn a_snake_that_hits_the_wall_ends_and_the_page_says_so() {
+    // Up against the right-hand wall, heading into it.
+    let mut app = snaking_from(
+        &[
+            Cell { row: 8, col: 15 },
+            Cell { row: 8, col: 14 },
+            Cell { row: 8, col: 13 },
+        ],
+        Direction::Right,
+        Cell { row: 0, col: 0 },
+    );
+
+    let start = Instant::now();
+    app.stepped = start;
+    app.update(Message::Tick(start + Duration::from_secs(1)));
+
+    let snake = app.snake().expect("a snake");
+    assert!(snake.is_over(), "the wall is the end of it");
+    assert_eq!(
+        snake.head(),
+        Cell { row: 8, col: 15 },
+        "and it stays on the board: the last board is the one a person steered"
+    );
+
+    let mut ui = screen(&app, TALL);
+    assert!(
+        ui.find("You ran into something — start a new game").is_ok(),
+        "and the page says so rather than going quiet"
+    );
+}
+
+/// A frame with no game open, and a frame with the other game open, both do nothing at all.
+#[test]
+fn a_frame_is_only_a_clock_for_the_snake() {
+    // On the list there is no clock to keep.
+    let mut app = listing();
+    let start = Instant::now();
+    app.stepped = start - Duration::from_secs(10);
+    app.update(Message::Tick(start));
+    assert!(!app.playing(), "a frame does not open a game");
+
+    // 2048 moves when somebody moves it, and a frame must not slide it. The board is one a slide
+    // *would* change, so a frame that touched it would be a frame that showed up in this assertion.
+    let movable = [
+        0, 0, 0, 2, //
+        0, 0, 0, 2, //
+        0, 0, 0, 0, //
+        0, 0, 0, 0,
+    ];
+    let mut app = listing();
+    app.page = Page::Playing(Played::Tiles(TwentyFortyEight::from_cells(movable)));
+    app.stepped = start - Duration::from_secs(10);
+    app.update(Message::Tick(start));
+
+    assert_eq!(
+        app.tiles().expect("a game").grid().cells(),
+        movable,
+        "a frame is not a slide"
+    );
+}
+
+/// A tilt is a direction, and nothing else is.
+///
+/// The arithmetic is [`crate::tilt`]'s own tests. What is checked here is the wiring: that a tilt
+/// reaches the snake as a turn and nothing else about the page notices.
+#[test]
+fn a_tilt_reaches_the_snake_as_a_turn() {
+    // The board in the simulator answers flat, so the app's own reading steers nothing — which is
+    // what makes the pad and the arrow keys the whole of a test's input.
+    let mut app = snaking_from(
+        &[Cell { row: 8, col: 8 }, Cell { row: 8, col: 7 }],
+        Direction::Right,
+        Cell { row: 0, col: 15 },
+    );
+
+    let start = Instant::now();
+    app.stepped = start;
+    app.update(Message::Tick(start));
+
+    assert_eq!(
+        app.snake().expect("a snake").heading(),
+        Direction::Right,
+        "a board nobody is holding is not a steering"
+    );
 }

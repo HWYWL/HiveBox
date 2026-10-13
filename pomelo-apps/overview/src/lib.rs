@@ -199,7 +199,7 @@ impl Overview {
 /// One level bar: a track, and a fill that is a *share* of it.
 ///
 /// The fill is a fraction of the track's own width rather than a width in pixels, which is why the
-/// same bar is right at every font tier and in any container it is put in.
+/// same bar is right at the base font size and in any container it is put in.
 fn bar(share: f32, fill: Color, theme: ThemeMode) -> Element<'static, Message> {
     // Thousandths of the track, as portions of a row. The number is a `u16` where 1000 is the whole
     // bar, so the fill and the space left over always add up to the full width and the bar cannot
@@ -460,7 +460,7 @@ impl Overview {
     /// testable against readings written out by hand and cannot disagree with what a test asserts.
     pub fn view(&self) -> Element<'_, Message> {
         let theme = self.preferences.theme;
-        let sizes = style::Sizes::of(self.preferences.font_tier);
+        let sizes = style::Sizes::new();
         let words = Words::of(self.preferences.language);
 
         let cards = Column::with_children(vec![
@@ -913,7 +913,6 @@ mod tests {
     use super::*;
 
     use pomelo_hal::{NasCpu, NasNetwork};
-    use pomelo_widgets::preferences::FontSizeTier;
 
     /// An app on the simulated board, which answers every question this page asks.
     fn app() -> Overview {
@@ -927,19 +926,8 @@ mod tests {
 
         for language in [Language::Chinese, Language::English] {
             for theme in [ThemeMode::Dark, ThemeMode::Light] {
-                for font_tier in [
-                    FontSizeTier::ExtraSmall,
-                    FontSizeTier::Small,
-                    FontSizeTier::Standard,
-                    FontSizeTier::Large,
-                ] {
-                    app.set_preferences(SystemPreferences {
-                        language,
-                        theme,
-                        font_tier,
-                    });
-                    let _ = app.view();
-                }
+                app.set_preferences(SystemPreferences::new(language, theme));
+                let _ = app.view();
             }
         }
     }

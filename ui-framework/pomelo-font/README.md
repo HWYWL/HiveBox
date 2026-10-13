@@ -22,9 +22,7 @@ pomelo-font/
 │   └── source-han-sans-sc-regular.otf   # 源字体（不进 git，见下方下载命令）
 └── dist/
     ├── SourceHanSansSC-Regular-Subset.otf         # 运行时子集字体（进固件）
-    ├── SourceHanSansSC-Regular-Subset-common@14px.bin
-    ├── SourceHanSansSC-Regular-Subset-common@15px.bin
-    ├── SourceHanSansSC-Regular-Subset-common@18px.bin
+    ├── SourceHanSansSC-Regular-Subset-common@24px.bin
     └── MANIFEST.md                                # 由 bake.py 生成，记录烘培参数
 ```
 
@@ -58,8 +56,8 @@ pyftsubset source/source-han-sans-sc-regular.otf \
 ### 烘培字形表
 
 ```bash
-python3 bake.py                      # 默认字号：14、15、18 px
-python3 bake.py --sizes 14 15 18 21  # 添加 21 px
+python3 bake.py                      # 默认字号：24 px
+python3 bake.py --sizes 24 32        # 指定字号
 ```
 
 烘培完成后提交 `dist/` 的变更，在 `pomelo-os` 里更新 `vendor/pomelo-font` 的 submodule 指针。
@@ -75,15 +73,21 @@ python3 bake.py --sizes 14 15 18 21  # 添加 21 px
 
 > 界面文案里出现的新字如果不在子集里，屏幕上画出来的是一个方框（`.notdef`），不会报错也不会让构建失败。补字的步骤见「子集化」与「烘培字形表」两节：**子集化会重排 glyph_id，所以补字之后必须重烘**，两处 `dist/` 也要一起更新。
 
-烘培的字号对应正文用途，覆盖 app 中高频出现的字号：
+烘培的字号只有一个：
 
 | 字号 | 用途 |
 | ---: | --- |
-| 14 px | 设置/计算器/播放器的次要文本与数值 |
-| 15 px | 启动器标签与状态栏 |
-| 18 px | 终端正文 |
+| 24 px | 界面上的所有文字 |
 
-大字号（32/34/38/96 px 等展示字号）字符串很短，按需在线光栅化（约 1.6 ms/字），之后进 RAM 缓存，不值得烘。
+界面把正文字号统一收敛到 24 px（`pomelo-widgets` 的 `FONT_BASE`），四档可调的字号系统已经删除，
+18/20/30 px 不再出现在任何布局里，所以 `bake.py` 只烘这一档。
+
+**为什么一档就够**：设备端查表时把字号逐位（f32 的位）与表头比较，别的字号命中不了任何表，退回
+在线光栅化（约 1.6 ms/字形）并进 RAM 缓存 —— 慢，但不会画错。所以多烘一档是白占 flash
+（每字节约 0.93×字号² 字节），少烘一档只是慢。
+
+图标不在这个范围内：Material Symbols 是另一个字体家族（`pomelo-material-symbols`），不参与这套
+预烘表 —— 预烘表是与它签名的那个字体 id 绑定的，图标字的字号只是各页自己的测量值。
 
 ## 字体许可
 

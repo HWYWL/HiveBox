@@ -32,16 +32,13 @@ pub const PER_PAGE: usize = COLUMNS * ROWS;
 
 use std::time::Duration;
 
-use pomelo_widgets::{Curve, FontSizeTier, SystemPreferences};
+use pomelo_widgets::{Curve, FONT_BASE};
 
-/// The font size tiers obtained from SystemPreferences: [18.0, 20.0, 24.0, 30.0].
-#[allow(dead_code)]
-pub const FONT_SIZES: [f32; 4] = SystemPreferences::font_sizes();
-pub const FONT_EXTRA_SMALL: f32 = FontSizeTier::ExtraSmall.base_size(); // 18.0 px (Compact tier)
-pub const FONT_SMALL: f32 = FontSizeTier::Small.base_size();            // 20.0 px (Small tier)
-pub const FONT_STANDARD: f32 = FontSizeTier::Standard.base_size();      // 24.0 px (Standard tier)
-#[allow(dead_code)]
-pub const FONT_LARGE: f32 = FontSizeTier::Large.base_size();            // 30.0 px (Large tier)
+/// The font size the interface draws at, and the only one there is.
+///
+/// The four-tier scale is gone, and with it the 18/20/30 px baked glyph tables: [`FONT_BASE`] is the
+/// size of the one table that ships, and the size the bar, the labels and the sheet are drawn at.
+pub const FONT: f32 = FONT_BASE;
 
 /// The gap between the cells, and around the page.
 pub const GUTTER: f32 = 20.0;
@@ -56,8 +53,8 @@ pub const GLYPH: f32 = 54.0;
 /// ellipsis, because a label that wrapped would be a row a different height from the row beside it.
 pub const TILE_WIDTH: f32 = 160.0;
 
-/// The app grid icon label font size: sourced from the 18px system tier.
-pub const LABEL: f32 = FONT_EXTRA_SMALL;
+/// The app grid icon label font size: the size the interface draws at.
+pub const LABEL: f32 = FONT;
 pub const GLYPH_GAP: f32 = 10.0;
 
 /// Maximum width for a tile label before truncation with "...".
@@ -242,11 +239,13 @@ pub const STATUS_BG: (u8, u8, u8) = (255, 255, 255);
 pub const STATUS_BG_DARK: (u8, u8, u8) = (0, 0, 0);
 pub const STATUS_BG_LIGHT: (u8, u8, u8) = (255, 255, 255);
 
-pub const STATUS_FONT: f32 = FONT_SMALL;
-pub const STATUS_ICON: f32 = FONT_STANDARD;
+pub const STATUS_FONT: f32 = FONT;
+/// The bar's icons are drawn from Material Symbols, which no baked table covers, so they keep the
+/// size the bar was drawn around instead of following [`FONT`].
+pub const STATUS_ICON: f32 = 24.0;
 
-/// The size of background app icons in the status bar: sourced from the 24px standard tier.
-pub const STATUS_BG_APP_ICON: f32 = FONT_STANDARD;
+/// The size of background app icons in the status bar: an icon, sized like [`STATUS_ICON`].
+pub const STATUS_BG_APP_ICON: f32 = 24.0;
 
 /// Spacing between multiple background app icons in the status bar.
 pub const STATUS_BG_APP_GAP: f32 = 6.0;
@@ -276,7 +275,8 @@ pub const BATTERY_NUMBER_FONT: f32 = 14.0;
 ///
 /// A bolt and not a green battery: the number inside is already the colour the bar's text is, and a
 /// second meaning for that colour would be a meaning the reading had to share with the charger.
-pub const BATTERY_BOLT_FONT: f32 = FONT_EXTRA_SMALL;
+/// The bolt is an icon from Material Symbols rather than a reading, so it keeps its own size.
+pub const BATTERY_BOLT_FONT: f32 = 18.0;
 pub const BATTERY_BOLT_GAP: f32 = 4.0;
 
 pub const STATUS_GAP: f32 = 14.0;
@@ -307,7 +307,7 @@ pub const WIFI_BARS: u8 = 4;
 /// of a finger rather than of their contents, because the cross on each of them has to be pressed
 /// while the finger is moving.
 pub const RECENTS_MARGIN: f32 = 24.0;
-pub const RECENTS_TITLE_FONT: f32 = FONT_SMALL;
+pub const RECENTS_TITLE_FONT: f32 = FONT;
 pub const RECENTS_CARD_H: f32 = 76.0;
 pub const RECENTS_CARD_GAP: f32 = 12.0;
 pub const RECENTS_CARD_RADIUS: f32 = 18.0;
@@ -315,7 +315,7 @@ pub const RECENTS_PADDING: f32 = 14.0;
 pub const RECENTS_ICON: f32 = 48.0;
 pub const RECENTS_ICON_RADIUS: f32 = 12.0;
 pub const RECENTS_ICON_GLYPH: f32 = 26.0;
-pub const RECENTS_NAME_FONT: f32 = FONT_SMALL;
+pub const RECENTS_NAME_FONT: f32 = FONT;
 /// The cross on a card, and the glyph beside the words that clear all of them at once.
 pub const RECENTS_KILL: f32 = 44.0;
 pub const RECENTS_KILL_GLYPH: f32 = 24.0;

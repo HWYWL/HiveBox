@@ -18,19 +18,18 @@
 //! The colours are [`Rgb`] triples for the same reason: a UI has a colour type and this module
 //! does not want one.
 
-use pomelo_widgets::{FontSizeTier, SystemPreferences};
+use pomelo_widgets::FONT_BASE;
 
-/// The font size tiers obtained from SystemPreferences: [18.0, 20.0, 24.0, 30.0].
-pub const FONT_SIZES: [f32; 4] = SystemPreferences::font_sizes();
-pub const FONT_EXTRA_SMALL: f32 = FontSizeTier::ExtraSmall.base_size(); // 18.0 px (Compact tier)
-pub const FONT_SMALL: f32 = FontSizeTier::Small.base_size();            // 20.0 px (Small tier)
-pub const FONT_STANDARD: f32 = FontSizeTier::Standard.base_size();      // 24.0 px (Standard tier)
-pub const FONT_LARGE: f32 = FontSizeTier::Large.base_size();            // 30.0 px (Large tier)
+/// The font size the interface draws at, and the only one there is: the four-tier scale is gone, and
+/// with it the 18/20/30 px baked glyph tables.
+pub const FONT: f32 = FONT_BASE;
 
-/// The terminal's character cell, sourced from SystemPreferences (no custom font sizes).
-pub const TERM_FONT_SIZE: f32 = FONT_SMALL;
-/// One line cell's fixed height (ascent + descent + gap), matching the standard system tier.
-pub const TERM_LINE_HEIGHT: f32 = FONT_STANDARD;
+/// The terminal's character cell: the one size, because there is nothing to choose between.
+pub const TERM_FONT_SIZE: f32 = FONT;
+/// One line cell's fixed height (ascent + descent + gap): the line box of [`TERM_FONT_SIZE`], on the
+/// same 1.3 ratio the rest of the interface derives a line height from. A cell shorter than its own
+/// line box would cut the tops off the glyphs in it.
+pub const TERM_LINE_HEIGHT: f32 = TERM_FONT_SIZE * 1.3;
 
 /// The default terminal username.
 pub const DEFAULT_USER: &str = "pomelo";

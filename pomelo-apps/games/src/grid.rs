@@ -14,13 +14,29 @@
 
 use crate::random::Random;
 
-/// Which way a slide goes.
+/// Which way a slide goes, or which way a snake is pointed.
+///
+/// The one four-way direction in this app, because there is one: the pad draws four arrows, the
+/// keyboard has four keys, [`crate::tilt`] answers with one of them, and both games are steered by
+/// them. A second type for the snake would be a second vocabulary for the same four words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Up,
     Down,
     Left,
     Right,
+}
+
+impl Direction {
+    /// The one that undoes this one.
+    pub fn opposite(self) -> Self {
+        match self {
+            Self::Up => Self::Down,
+            Self::Down => Self::Up,
+            Self::Left => Self::Right,
+            Self::Right => Self::Left,
+        }
+    }
 }
 
 /// The side of the board. 2048 is played on four by four and the number is nowhere in the rules

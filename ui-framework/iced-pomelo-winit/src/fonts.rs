@@ -53,16 +53,18 @@ use iced_graphics::text::cosmic_text::fontdb::Family;
 /// `pomelo-os` under `assets/fonts/source/`; `fonts/README.md` has the exact command.
 const DEFAULT: &[u8] = include_bytes!("../fonts/dist/SourceHanSansSC-Regular-Subset.otf");
 
-/// The glyphs of [`DEFAULT`] that were rasterised on the build machine, one table per size.
+/// The glyphs of [`DEFAULT`] that were rasterised on the build machine, at the one size the
+/// interface draws at.
 ///
-/// Flash, not RAM: the renderer reads them in place, and a screen drawn at a baked size never
-/// rasterises anything. Which sizes those are, and the format, is in `pomelo-font`'s `dist/MANIFEST.md` — a size
-/// that is not here is rasterised on the device as it always was, so this list is a speed
-/// setting and not a correctness one.
+/// Flash, not RAM: the renderer reads the table in place, and a screen drawn at the baked size never
+/// rasterises anything. The format is in `pomelo-font`'s `dist/MANIFEST.md` — a size that is not here
+/// is rasterised on the device as it always was, so this is a speed setting and not a correctness one.
+///
+/// One table, because there is one size: the four-tier font scale is gone, and the size every label
+/// is drawn at is `FONT_BASE`'s 24 px. The lookup compares the size bit for bit, so a table cut at
+/// any other size would simply never be read.
 #[cfg(feature = "renderer")]
 const BAKED: &[&[u8]] = &[
-    include_bytes!("../fonts/dist/SourceHanSansSC-Regular-Subset-common@18px.bin"),
-    include_bytes!("../fonts/dist/SourceHanSansSC-Regular-Subset-common@20px.bin"),
     include_bytes!("../fonts/dist/SourceHanSansSC-Regular-Subset-common@24px.bin"),
 ];
 

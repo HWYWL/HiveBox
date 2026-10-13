@@ -1,12 +1,12 @@
 //! What the clock measures and colours with.
 //!
-//! Every size here comes out of one number — the font tier the system is set to — for the reason the
+//! Every size here comes out of one number — the base font size, `FONT_BASE` — for the reason the
 //! dial has: a hand's length and the type under it are the same drawing, and a dial that grew while
 //! its date line did not would read as two things stacked rather than one.
 
 use iced::Color;
 
-use pomelo_widgets::preferences::{FontSizeTier, ThemeMode};
+use pomelo_widgets::preferences::{ThemeMode, FONT_BASE};
 
 /// The panel this page is laid out for: the 480 px square the rest of this project designs against.
 ///
@@ -39,7 +39,7 @@ pub const RADIUS: f32 = 12.0;
 /// different controls.
 pub const STEPPER: f32 = 34.0;
 
-/// Everything the page measures with, for one font tier.
+/// Everything the page measures with, from one base font size.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sizes {
     /// The digits of the digital readout, which are the largest thing on the page.
@@ -55,16 +55,16 @@ pub struct Sizes {
 }
 
 impl Sizes {
-    /// The measurements a font tier asks for.
+    /// The measurements the base font size asks for.
     ///
-    /// The multipliers are the whole of the design. The digits are three times the tier's base,
-    /// because a clock read from across a desk is the one thing on this page that is *looked at*
-    /// rather than read, and `88:88` at three times the base is five glyphs of roughly half the base
-    /// each — 360 px of the panel's 480, with the margins it has. The body text is a little under the
-    /// base so that the date and the first alarm fit under the dial, and the tab strip is the base
-    /// itself, because a tab is a thing a finger has to find.
-    pub fn of(tier: FontSizeTier) -> Self {
-        let base = tier.base_size();
+    /// The multipliers are the whole of the design. The base is `FONT_BASE`, and every field is a
+    /// multiple of it. The digits are three times the base, because a clock read from across a desk is
+    /// the one thing on this page that is *looked at* rather than read, and `88:88` at three times the
+    /// base is five glyphs of roughly half the base each — 360 px of the panel's 480, with the margins
+    /// it has. The body text is a little under the base so that the date and the first alarm fit under
+    /// the dial, and the tab strip is the base itself, because a tab is a thing a finger has to find.
+    pub fn new() -> Self {
+        let base = FONT_BASE;
 
         Self {
             digits: base * 3.0,
@@ -162,62 +162,52 @@ pub fn tab_ink(theme: ThemeMode, selected: bool) -> Color {
 mod tests {
     use super::*;
 
-    /// Every tier the system can be set to, which is four rather than the three the doc comment at the
-    /// top of `preferences.rs` used to promise.
-    const TIERS: [FontSizeTier; 4] = [
-        FontSizeTier::ExtraSmall,
-        FontSizeTier::Small,
-        FontSizeTier::Standard,
-        FontSizeTier::Large,
-    ];
-
-    /// The whole point of deriving everything from the tier: the page has to fit the panel at *every*
-    /// tier, and the digits are what would not.
+    /// The readout is the largest thing on the page, and it still has to fit the panel.
     #[test]
-    fn the_digital_readout_fits_the_panel_at_every_tier() {
-        for tier in TIERS {
-            let sizes = Sizes::of(tier);
+    fn the_digital_readout_fits_the_panel() {
+        let sizes = Sizes::new();
 
-            // `88:88` is five glyphs. A digit in this font is a little over half the type size wide and
-            // the colon is narrower, so this is the width with room to spare rather than an exact one.
-            let readout = sizes.digits * 0.62 * 5.0;
+        // `88:88` is five glyphs. A digit in this font is a little over half the type size wide and
+        // the colon is narrower, so this is the width with room to spare rather than an exact one.
+        let readout = sizes.digits * 0.62 * 5.0;
 
-            assert!(
-                readout <= PANEL - 2.0 * MARGIN,
-                "{tier:?}: the readout is {readout} px wide, and the panel has {} px of room",
-                PANEL - 2.0 * MARGIN
-            );
-        }
+        assert!(
+            readout <= PANEL - 2.0 * MARGIN,
+            "the readout is {readout} px wide, and the panel has {} px of room",
+            PANEL - 2.0 * MARGIN
+        );
     }
 
-    /// The tab strip and the ring are the two things that have to fit *around* the digits, and a large
-    /// tier is where they stop.
+    /// The tab strip and the ring are the two things that have to fit *around* the digits.
     #[test]
-    fn the_stack_fits_the_panel_at_every_tier() {
-        for tier in TIERS {
-            let sizes = Sizes::of(tier);
+    fn the_stack_fits_the_panel() {
+        let sizes = Sizes::new();
 
-            let tabs = sizes.tab;
-            let ring = RING_THICKNESS * 2.0 + sizes.digits;
-            let rest = sizes.text * 2.0 + sizes.small;
+        let tabs = sizes.tab;
+        let ring = RING_THICKNESS * 2.0 + sizes.digits;
+        let rest = sizes.text * 2.0 + sizes.small;
 
-            let total = 2.0 * MARGIN + tabs + ring + rest + 3.0 * GAP;
+        let total = 2.0 * MARGIN + tabs + ring + rest + 3.0 * GAP;
 
-            assert!(
-                total <= PANEL,
-                "{tier:?}: the page wants {total} px of a {PANEL} px panel"
-            );
-        }
+        assert!(total <= PANEL, "the page wants {total} px of a {PANEL} px panel");
     }
 
-    /// A size derived from a tier is a size that grows with it, and the dial's own drawing is the one
-    /// place that assumption would be invisible until it was on a screen.
+    /// Every field is its own multiple of the one base size, and the things meant to be small really
+    /// are smaller than the things meant to be big — the dial's own drawing is the one place that
+    /// assumption would be invisible until it was on a screen.
     #[test]
-    fn a_larger_tier_is_a_larger_page() {
-        let small = Sizes::of(FontSizeTier::Small);
-        let large = Sizes::of(FontSizeTier::Large);
+    fn the_sizes_are_the_expected_multiples_of_the_base() {
+        let sizes = Sizes::new();
 
-        assert!(small.digits < large.digits);
-        assert!(small.row < large.row);
+        assert_eq!(sizes.digits, FONT_BASE * 3.0);
+        assert_eq!(sizes.text, FONT_BASE * 0.85);
+        assert_eq!(sizes.small, FONT_BASE * 0.65);
+        assert_eq!(sizes.row, FONT_BASE * 1.3);
+        assert_eq!(sizes.tab, FONT_BASE * 1.35);
+
+        assert!(sizes.small < sizes.text);
+        assert!(sizes.text < sizes.digits);
+        assert!(sizes.row < sizes.digits);
+        assert!(sizes.tab < sizes.digits);
     }
 }

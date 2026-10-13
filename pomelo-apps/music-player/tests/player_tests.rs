@@ -207,7 +207,7 @@ fn with_one_track(player: &mut Player) -> String {
 /// its own.
 #[test]
 fn the_player_opens_on_the_list_with_nothing_playing() {
-    use pomelo_widgets::preferences::{FontSizeTier, Language, SystemPreferences, ThemeMode};
+    use pomelo_widgets::preferences::{Language, SystemPreferences, ThemeMode};
 
     let mut player = player();
     with_one_track(&mut player);
@@ -215,21 +215,13 @@ fn the_player_opens_on_the_list_with_nothing_playing() {
     assert_eq!(player.page(), Page::Library);
     assert_eq!(player.status(), PlaybackStatus::Stopped);
 
-    player.set_preferences(SystemPreferences::new(
-        Language::English,
-        ThemeMode::Dark,
-        FontSizeTier::Standard,
-    ));
+    player.set_preferences(SystemPreferences::new(Language::English, ThemeMode::Dark));
     assert_eq!(player.library_title(), "Music library");
     assert_eq!(player.track_count(), "1 track", "the head counts what it found");
 
     // Worded per language, because "1 首" and "1 tracks" are both the kind of thing that makes a
     // finished screen look like it was left half-done.
-    player.set_preferences(SystemPreferences::new(
-        Language::Chinese,
-        ThemeMode::Dark,
-        FontSizeTier::Standard,
-    ));
+    player.set_preferences(SystemPreferences::new(Language::Chinese, ThemeMode::Dark));
     assert_eq!(player.library_title(), "音乐库");
     assert_eq!(player.track_count(), "1 首");
 }
@@ -499,7 +491,7 @@ fn preferences_roundtrip() {
 /// With no card in the slot the player asks for one, in the language on the screen.
 #[test]
 fn an_empty_slot_asks_for_a_card() {
-    use pomelo_widgets::preferences::{FontSizeTier, Language, SystemPreferences, ThemeMode};
+    use pomelo_widgets::preferences::{Language, SystemPreferences, ThemeMode};
 
     let mut player = Player::new(board_without_card());
 
@@ -511,11 +503,7 @@ fn an_empty_slot_asks_for_a_card() {
     player.refresh_playlist_in(&[]);
     assert_eq!(player.title(), player.empty_notice());
 
-    player.set_preferences(SystemPreferences::new(
-        Language::Chinese,
-        ThemeMode::Dark,
-        FontSizeTier::Standard,
-    ));
+    player.set_preferences(SystemPreferences::new(Language::Chinese, ThemeMode::Dark));
     assert_eq!(player.empty_notice(), "请插入SD卡");
     assert!(
         player.empty_hint().contains("存储卡"),
@@ -523,11 +511,7 @@ fn an_empty_slot_asks_for_a_card() {
         player.empty_hint()
     );
 
-    player.set_preferences(SystemPreferences::new(
-        Language::English,
-        ThemeMode::Dark,
-        FontSizeTier::Standard,
-    ));
+    player.set_preferences(SystemPreferences::new(Language::English, ThemeMode::Dark));
     assert_eq!(player.empty_notice(), "Insert an SD card");
     assert!(
         player.empty_hint().contains("card"),

@@ -16,7 +16,7 @@ iced = { version = "0.14", default-features = false, features = ["thread-pool", 
 # nothing at all from audio. Every number on this page is asked of the board rather than computed here.
 pomelo-hal = { git = "https://github.com/pomelos-on-sale/pomelo-hal.git", rev = "20eaa910f0a05cd68684d6aa868fd78457c51be9" }
 
-# The shared preferences, and the font tier every measurement in `style` is derived from.
+# The shared preferences, and the base font size every measurement in `style` is derived from.
 pomelo-widgets = { git = "https://github.com/pomelos-on-sale/pomelo-widgets.git", rev = "f499da5cc17ef16ced6e6b1e62286bb020837a0b" }
 
 # One glyph a reading.

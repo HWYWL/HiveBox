@@ -1,12 +1,12 @@
 //! What the file manager measures and colours with.
 //!
-//! Every size here comes out of one number — the font tier the system is set to — for the reason the
+//! Every size here comes out of one number — the base font size, `FONT_BASE` — for the reason the
 //! other pages have: a row and the name in it are one drawing, and a row that stayed the same height
 //! while the type grew would clip the name it exists to show.
 
 use iced::Color;
 
-use pomelo_widgets::preferences::{FontSizeTier, ThemeMode};
+use pomelo_widgets::preferences::{ThemeMode, FONT_BASE};
 
 /// The panel this page is laid out for: the 480 px square the rest of this project designs against.
 ///
@@ -23,7 +23,7 @@ pub const GAP: f32 = 6.0;
 /// The corner of everything on this page that has one: the rows, the toolbar and the prompt.
 pub const RADIUS: f32 = 12.0;
 
-/// Everything the page measures with, for one font tier.
+/// Everything the page measures with, from one base font size.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sizes {
     /// The height of one row in the list; tall enough to be a finger's target.
@@ -39,13 +39,13 @@ pub struct Sizes {
 }
 
 impl Sizes {
-    /// The measurements a font tier asks for.
+    /// The measurements the base font size asks for.
     ///
-    /// A row is a little under twice the tier's base — a finger's worth of height rather than a
-    /// line's — and the secondary lines step down from the base so that a screenful of names fits the
-    /// panel without the page having to scroll to say everything.
-    pub fn of(tier: FontSizeTier) -> Self {
-        let base = tier.base_size();
+    /// Every field is a multiple of `FONT_BASE`. A row is a little under twice the base — a finger's
+    /// worth of height rather than a line's — and the secondary lines step down from the base so that
+    /// a screenful of names fits the panel without the page having to scroll to say everything.
+    pub fn new() -> Self {
+        let base = FONT_BASE;
 
         Self {
             row: base * 1.85,
@@ -120,53 +120,46 @@ pub fn danger() -> Color {
 mod tests {
     use super::*;
 
-    /// Every tier the system can be set to.
-    const TIERS: [FontSizeTier; 4] = [
-        FontSizeTier::ExtraSmall,
-        FontSizeTier::Small,
-        FontSizeTier::Standard,
-        FontSizeTier::Large,
-    ];
-
-    /// A row is a finger's target before it is a line of type, at every tier.
+    /// A row is a finger's target before it is a line of type.
     #[test]
     fn a_row_is_taller_than_the_type_in_it() {
-        for tier in TIERS {
-            let sizes = Sizes::of(tier);
+        let sizes = Sizes::new();
 
-            assert!(sizes.row > sizes.text, "{tier:?}: a row has to be bigger than its name");
-            assert!(sizes.row >= 30.0, "{tier:?}: and big enough to hit");
-        }
+        assert!(sizes.row > sizes.text, "a row has to be bigger than its name");
+        assert!(sizes.row >= 30.0, "and big enough to hit");
     }
 
-    /// A size derived from a tier is a size that grows with it.
+    /// Every field is its own multiple of the one base size, and the things meant to be small really
+    /// are smaller than the things meant to be big.
     #[test]
-    fn a_larger_tier_is_a_larger_page() {
-        let small = Sizes::of(FontSizeTier::Small);
-        let large = Sizes::of(FontSizeTier::Large);
+    fn the_sizes_are_the_expected_multiples_of_the_base() {
+        let sizes = Sizes::new();
 
-        assert!(small.row < large.row);
-        assert!(small.text < large.text);
-        assert!(small.small < large.small);
+        assert_eq!(sizes.row, FONT_BASE * 1.85);
+        assert_eq!(sizes.text, FONT_BASE * 0.85);
+        assert_eq!(sizes.small, FONT_BASE * 0.66);
+        assert_eq!(sizes.icon, FONT_BASE * 1.05);
+        assert_eq!(sizes.heading, FONT_BASE * 1.05);
+
+        assert!(sizes.small < sizes.text);
+        assert!(sizes.text < sizes.row);
     }
 
-    /// A name has to fit beside the glyph and the size at the widest tier, or the row clips the one
-    /// thing it is there to show.
+    /// A name has to fit beside the glyph and the size, or the row clips the one thing it is there to
+    /// show.
     #[test]
-    fn a_name_fits_the_panel_at_every_tier() {
-        for tier in TIERS {
-            let sizes = Sizes::of(tier);
+    fn a_name_fits_the_panel() {
+        let sizes = Sizes::new();
 
-            // The glyph, its padding, and the size on the right take roughly a third of the row;
-            // the rest is the name. Twenty-five glyphs is short of the longest names this board
-            // holds, and short is the side to err on.
-            let name = sizes.text * 0.55 * 25.0;
+        // The glyph, its padding, and the size on the right take roughly a third of the row;
+        // the rest is the name. Twenty-five glyphs is short of the longest names this board
+        // holds, and short is the side to err on.
+        let name = sizes.text * 0.55 * 25.0;
 
-            assert!(
-                name <= PANEL - 2.0 * MARGIN,
-                "{tier:?}: a name is {name} px wide, and the panel has {} px of room",
-                PANEL - 2.0 * MARGIN
-            );
-        }
+        assert!(
+            name <= PANEL - 2.0 * MARGIN,
+            "a name is {name} px wide, and the panel has {} px of room",
+            PANEL - 2.0 * MARGIN
+        );
     }
 }

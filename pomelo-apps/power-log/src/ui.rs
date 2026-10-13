@@ -26,7 +26,7 @@ use crate::{format, Message, PowerLog};
 /// The page.
 pub fn view(app: &PowerLog) -> Element<'_, Message> {
     let mode = app.preferences().theme;
-    let sizes = Sizes::of(app.preferences().font_tier);
+    let sizes = Sizes::new();
     let words = Words::of(app.preferences().language);
 
     let mut cards: Vec<Element<'_, Message>> = Vec::new();

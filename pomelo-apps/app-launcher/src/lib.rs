@@ -144,7 +144,7 @@ use wifi_map::WifiMap;
 
 pub use apps::{Entry, CATALOGUE};
 pub use pomelo_material_symbols::Icon;
-pub use pomelo_widgets::{AppIcon, BitmapIcon, FontSizeTier, Language, SystemPreferences, ThemeMode};
+pub use pomelo_widgets::{AppIcon, BitmapIcon, Language, SystemPreferences, ThemeMode, FONT_BASE};
 pub use style::{
     DOT_REST, DOT_UP, LABEL, PER_PAGE, SCREEN, STATUS_BG, STATUS_BG_DARK, STATUS_BG_LIGHT,
     STATUS_HEIGHT, STATUS_INSET, WALLPAPER_DARK, WALLPAPER_LIGHT,
@@ -292,8 +292,8 @@ pub enum Message {
     WifiMap(wifi_map::Message),
     /// The weather page's own: the frame that reads the answer, or a finger asking for another forecast.
     Weather(weather::Message),
-    /// The games app's own: the row that opened a game, the slide that moved a tile, or the way back
-    /// to the list.
+    /// The games app's own: the row that opened a game, the direction that steered it, the way back to
+    /// the list, or the frame a snake stepped on.
     Games(games::Message),
 }
 
@@ -714,13 +714,15 @@ impl Launcher {
         self.weather.as_mut().unwrap()
     }
 
-    /// The games app, which is handed the board for exactly one question and never again: how long it
-    /// has been up, which is the seed the first game is dealt from — see `Games::seed`.
+    /// The games app, which is handed the board for two questions and never again: how long it has
+    /// been up, which is the seed the first game is dealt from — see `Games::seed` — and what the
+    /// accelerometer is reading, which is how a snake is steered by tipping the box.
     ///
-    /// Alone among the apps in this list it asks for nothing and waits for nothing, so it is never
-    /// poked by [`Message::Tick`] and never parks a subscription in [`Launcher::subscription`]: what
-    /// moves on its page is a finger on the pad or an arrow key, and both arrive as a
-    /// [`Message::Games`].
+    /// The one hosted app here with a second page inside it, and therefore the one whose
+    /// subscription means something different on each: the list and 2048 listen for nothing a board
+    /// can send, while a snake steps on the board's own frames and reads a tilt on the same ones.
+    /// That is why it parks a subscription in [`Launcher::subscription`] and is also handed the
+    /// beat — see the [`Message::Tick`] arm — while every other app here needs one or the other.
     pub fn get_or_create_games(&mut self) -> &mut Games {
         if self.games.is_none() {
             let mut app = Games::new(Arc::clone(&self.board));
@@ -1300,6 +1302,15 @@ impl Launcher {
             subs.push(app.subscription().map(Message::Weather));
         }
 
+        // The games app's subscription is asked for only while a snake is open — see
+        // `Games::subscription` — because that is the only thing in it that is not a desktop's arrow
+        // key: a snake moves on its own, and the frames it moves on are this platform's. The other
+        // game subscribes to nothing a board can hear, so a page showing 2048 costs what it always
+        // did. This is the one forwarding here that is not a wait ending: a snake is a clock.
+        if let (Screen::App(GAMES), Some(app)) = (self.screen, &self.games) {
+            subs.push(app.subscription().map(Message::Games));
+        }
+
         Subscription::batch(subs)
     }
 
@@ -1508,10 +1519,19 @@ impl Launcher {
                 // The weather page is asked the seventh way, and its reason is the sixth one again: a
                 // request is a wait, and this is the beat that ends it on a board whose host serves no
                 // frames. One a second is the whole of what the page needs — it draws an answer, and a
-                // press of its own button asks for the next one. The games app is the one app in this
-                // list that is asked nothing at all: nothing on its page moves on its own.
+                // press of its own button asks for the next one.
                 if let (Screen::App(WEATHER), Some(app)) = (self.screen, &mut self.weather) {
                     app.update(weather::Message::Tick(Instant::now()));
+                }
+
+                // The games app is asked the eighth way, and it is the odd one here: it is the only
+                // app this launcher hands a beat to that has a clock of its own. A snake steps about
+                // ten times a second and this beat is once, so the real clock is the frames the app
+                // subscribes to — see [`Launcher::subscription`], which forwards them while it is the
+                // screen. This is the floor under that: on a host that serves no frames at all, a
+                // snake still moves, slowly, rather than sitting still until somebody steers it.
+                if let (Screen::App(GAMES), Some(app)) = (self.screen, &mut self.games) {
+                    app.update(games::Message::Tick(Instant::now()));
                 }
             }
             Message::Resized(size) => {
@@ -2392,13 +2412,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_preferences_are_chinese_dark_standard() {
+    fn default_preferences_are_chinese_and_dark_at_one_font_size() {
         let board = Arc::new(Board::simulated());
         let launcher = Launcher::new(board);
 
         assert_eq!(launcher.preferences().language, Language::Chinese);
         assert_eq!(launcher.preferences().theme, ThemeMode::Dark);
-        assert_eq!(launcher.preferences().font_tier, FontSizeTier::Standard);
+        // One size, and it is the size the shipped baked table was cut at.
+        assert_eq!(launcher.preferences().font_size(), FONT_BASE);
     }
 
     #[test]
@@ -2567,25 +2588,8 @@ mod tests {
         assert_eq!(launcher.music().theme_mode(), ThemeMode::Light);
         assert_eq!(launcher.terminal().theme_mode(), ThemeMode::Light);
 
-        // Cycle font tier via Settings message
-        launcher.update(Message::Settings(settings::Message::CycleFontTier));
-        assert_eq!(launcher.preferences().font_tier, FontSizeTier::Large);
-        assert_eq!(launcher.preferences().font_tier.base_size(), 30.0);
-
-        launcher.update(Message::Settings(settings::Message::CycleFontTier));
-        assert_eq!(launcher.preferences().font_tier, FontSizeTier::ExtraSmall);
-        assert_eq!(launcher.preferences().font_tier.base_size(), 18.0);
-
-        launcher.update(Message::Settings(settings::Message::CycleFontTier));
-        assert_eq!(launcher.preferences().font_tier, FontSizeTier::Small);
-        assert_eq!(launcher.preferences().font_tier.base_size(), 20.0);
-
-        launcher.update(Message::Settings(settings::Message::CycleFontTier));
-        assert_eq!(launcher.preferences().font_tier, FontSizeTier::Standard);
-        assert_eq!(launcher.preferences().font_tier.base_size(), 24.0);
-
         // Set preferences directly on launcher
-        let custom_prefs = SystemPreferences::new(Language::Chinese, ThemeMode::Dark, FontSizeTier::Large);
+        let custom_prefs = SystemPreferences::new(Language::Chinese, ThemeMode::Dark);
         launcher.set_preferences(custom_prefs);
         assert_eq!(launcher.preferences(), custom_prefs);
         assert_eq!(launcher.settings().preferences(), custom_prefs);

@@ -20,7 +20,7 @@ use crate::{Message, WifiMap, Words};
 /// The page.
 pub(crate) fn page(app: &WifiMap) -> Element<'_, Message> {
     let mode = app.preferences.theme;
-    let sizes = Sizes::of(app.preferences.font_tier);
+    let sizes = Sizes::new();
     let words = Words::of(app.preferences.language);
 
     // Nothing to chart: either the radio would not start, or the air is empty. Both are one line in a

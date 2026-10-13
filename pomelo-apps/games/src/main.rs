@@ -1,4 +1,4 @@
-//! `cargo run` — the list of games, and 2048, as a desktop window.
+//! `cargo run` — the list of games, and whichever of them is played, as a desktop window.
 //!
 //! ```text
 //! cargo run                      # from this directory: iced's real `iced_winit`, and a window
@@ -7,13 +7,15 @@
 //! The shortest `main` in the workspace, and the difference is worth saying out loud: there is nothing
 //! to poll and nothing to pump. The Wi-Fi and weather pages are requests, and a request needs a clock —
 //! frames in a window, the launcher's pump on the board — so their demos carry a tick thread and their
-//! apps ask for a subscription. A game asks the board exactly one question, once, when it starts (how
-//! long have you been up, which is how it decides which game to deal — see `Games::seed`), and after
+//! apps ask for a subscription. 2048 asks the board exactly one question, once, when it starts (how
+//! long have you been up, which is how it decides which board to deal — see `Games::seed`), and after
 //! that it is arithmetic on sixteen numbers.
 //!
-//! Arrow keys play. That is the app's own subscription ([`Games::subscription`]) and the only thing in
-//! here that is not a line of setup: on the board there is no keyboard at all, and the pad the page
-//! draws is the way in there.
+//! Snake is the one that does have a clock, and this window already has one: the frames iced hands out.
+//! So the app asks for them ([`Games::subscription`]) and steps the snake on them, and reads the board's
+//! accelerometer on the same frames — the simulator answers flat, so on a desktop the arrows below are
+//! still the only way to steer. Arrow keys play either game; on a board there is no keyboard at all, and
+//! the pad the page draws, and the tilt of the box, are the ways in there.
 
 use std::sync::Arc;
 

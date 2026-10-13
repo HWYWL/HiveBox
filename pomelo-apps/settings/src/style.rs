@@ -52,25 +52,25 @@ pub const NAV_BUTTON_W: f32 = 72.0;
 pub const NAV_BUTTON_H: f32 = 48.0;
 pub const NAV_GLYPH: f32 = 26.0;
 
-/// The size of a title: the large tier, so a page is headed in the size the system preference asks
-/// for rather than in a measurement of the design.
-pub const TITLE_FONT: f32 = FontSizeTier::Large.base_size();
+/// The size of a title: the one size the interface draws at, so a page is headed in the size the
+/// system asks for rather than in a measurement of the design.
+pub const TITLE_FONT: f32 = FONT;
 
 /// Under the last card of a page, so a list does not end flush with the panel's edge.
 pub const BOTTOM_GAP: f32 = 30.0;
 
-use pomelo_widgets::{FontSizeTier, SystemPreferences};
+use pomelo_widgets::FONT_BASE;
 
-/// The font size tiers obtained from SystemPreferences: [18.0, 20.0, 24.0, 30.0].
-pub const FONT_SIZES: [f32; 4] = SystemPreferences::font_sizes();
-pub const FONT_EXTRA_SMALL: f32 = FontSizeTier::ExtraSmall.base_size(); // 18.0 px (Compact tier)
-pub const FONT_SMALL: f32 = FontSizeTier::Small.base_size();            // 20.0 px (Small tier)
-pub const FONT_STANDARD: f32 = FontSizeTier::Standard.base_size();      // 24.0 px (Standard tier)
-pub const FONT_LARGE: f32 = FontSizeTier::Large.base_size();            // 30.0 px (Large tier)
+/// The font size the interface draws at, and the only one there is.
+///
+/// The four-tier scale is gone, and with it the 18/20/30 px baked glyph tables: [`FONT_BASE`] is the
+/// size of the one table that ships. A line that has to sit smaller than another is *derived* from a
+/// page's own measurements; there is no second scale to name.
+pub const FONT: f32 = FONT_BASE;
 
 /// A title drawn on a band rather than in the list: the password prompt's, which is a modal over the
 /// page and so has no list to head.
-pub const NAV_FONT: f32 = FONT_STANDARD;
+pub const NAV_FONT: f32 = FONT;
 
 /// A grouped card.
 pub const CARD_RADIUS: f32 = 20.0;
@@ -90,7 +90,7 @@ pub const ROW_SEPARATOR: f32 = 1.0;
 /// A row of a detail card.
 pub const DETAIL_PADDING_V: f32 = 14.0;
 pub const DETAIL_PADDING_H: f32 = 16.0;
-pub const DETAIL_FONT: f32 = FONT_SMALL;
+pub const DETAIL_FONT: f32 = FONT;
 
 /// A switch row's horizontal room.
 ///
@@ -118,7 +118,9 @@ impl Badge {
     /// A list row's, beside a [`LABEL_FONT`] label.
     pub const ROW: Self = Self {
         side: 28.0,
-        glyph: FONT_SMALL,
+        // An icon, not type: it is drawn from Material Symbols, which no baked table covers, so it
+        // keeps the size its square was drawn around instead of following [`FONT`].
+        glyph: 20.0,
         radius: 6.0,
     };
 
@@ -137,9 +139,9 @@ pub const BADGE_GAP: f32 = 12.0;
 pub const HEAD_PADDING: f32 = 20.0;
 pub const HEAD_GAP: f32 = 16.0;
 
-/// The main list's typography sourced from SystemPreferences tiers.
-pub const LABEL_FONT: f32 = FONT_STANDARD;
-pub const VALUE_FONT: f32 = FONT_SMALL;
+/// The main list's typography: the one size the interface draws at.
+pub const LABEL_FONT: f32 = FONT;
+pub const VALUE_FONT: f32 = FONT;
 pub const VALUE_GAP: f32 = 8.0;
 pub const CHEVRON_FONT: f32 = 28.0;
 
@@ -176,13 +178,12 @@ pub const SUMMARY_GAP: f32 = 16.0;
 
 /// The glyph, the percentage, and the word under one.
 ///
-/// The value is a step above the label and a step below a page title: it is a reading, and a
-/// reading that is the same size as the word naming it has to be read twice. The glyph sits above
-/// the value and is smaller than both, because it is not a reading — it is which reading this is,
-/// and the word under the ring says that too.
-pub const RING_GLYPH: f32 = FONT_SMALL;
-pub const RING_VALUE_FONT: f32 = FONT_STANDARD;
-pub const RING_LABEL_FONT: f32 = FONT_EXTRA_SMALL;
+/// All three are written in the one size the interface has: the percentage used to stand a step
+/// above the word naming it, and that contrast went with the tiers that made it. The glyph is an
+/// icon rather than a reading, so it keeps the size its ring was drawn around.
+pub const RING_GLYPH: f32 = 20.0;
+pub const RING_VALUE_FONT: f32 = FONT;
+pub const RING_LABEL_FONT: f32 = FONT;
 
 /// The gap between a ring's bottom edge and the word under it.
 pub const RING_LABEL_GAP: f32 = 6.0;
@@ -195,10 +196,10 @@ pub const RING_LABEL_GAP: f32 = 6.0;
 /// on one row, which is the one thing a row of cards must not be.
 ///
 /// The number is the card's own two lines, the gap between them and the padding either side:
-/// `SUMMARY_CARD_LABEL_FONT × 1.3 + SUMMARY_CARD_GAP_V + SUMMARY_CARD_VALUE_FONT × 1.3` is 53.4
+/// `SUMMARY_CARD_LABEL_FONT × 1.3 + SUMMARY_CARD_GAP_V + SUMMARY_CARD_VALUE_FONT × 1.3` is 66.4
 /// and [`SUMMARY_CARD_PADDING`] twice is 20 more. Rounded up, because the 1.3 line-box ratio is
 /// this font's and not this file's to know exactly.
-pub const SUMMARY_CARD_H: f32 = 78.0;
+pub const SUMMARY_CARD_H: f32 = 88.0;
 pub const SUMMARY_CARD_GAP: f32 = 12.0;
 pub const SUMMARY_CARD_PADDING: f32 = 10.0;
 /// The glyph in a card's heading, and the gap under that heading.
@@ -206,11 +207,10 @@ pub const SUMMARY_CARD_GLYPH: f32 = 22.0;
 pub const SUMMARY_CARD_GAP_V: f32 = 4.0;
 /// The two lines of a card: its name, and its value.
 ///
-/// The value is a step larger, which is the reference's own contrast and the reason the name gets
-/// the smallest tier this app has: a label as loud as the thing it labels is a card that has to be
-/// read twice.
-pub const SUMMARY_CARD_LABEL_FONT: f32 = FONT_EXTRA_SMALL;
-pub const SUMMARY_CARD_VALUE_FONT: f32 = FONT_SMALL;
+/// Both are written in the one size the interface has; the step the value used to stand above the
+/// name went with the tiers.
+pub const SUMMARY_CARD_LABEL_FONT: f32 = FONT;
+pub const SUMMARY_CARD_VALUE_FONT: f32 = FONT;
 
 /// The flash map's key: the square beside a region's name, and how far the name stands from it.
 ///

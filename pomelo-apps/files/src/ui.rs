@@ -35,7 +35,7 @@ pub(crate) fn theme(mode: ThemeMode) -> Theme {
 /// The page.
 pub(crate) fn view(files: &Files) -> Element<'_, Message> {
     let words = Words::of(files.preferences().language);
-    let sizes = Sizes::of(files.preferences().font_tier);
+    let sizes = Sizes::new();
     let mode = files.preferences().theme;
 
     let mut content = column![

@@ -24,23 +24,22 @@ pub const BUTTON_RADIUS: f32 = 14.0;
 /// The gap between the blocks of the page.
 pub const SECTION_GAP: f32 = 26.0;
 
-use pomelo_widgets::{FontSizeTier, SystemPreferences};
+use pomelo_widgets::FONT_BASE;
 
-/// The font size tiers obtained from SystemPreferences: [18.0, 20.0, 24.0, 30.0].
-#[allow(dead_code)]
-pub const FONT_SIZES: [f32; 4] = SystemPreferences::font_sizes();
-pub const FONT_EXTRA_SMALL: f32 = FontSizeTier::ExtraSmall.base_size(); // 18.0 px (Compact tier)
-pub const FONT_SMALL: f32 = FontSizeTier::Small.base_size(); // 20.0 px (Small tier)
-pub const FONT_STANDARD: f32 = FontSizeTier::Standard.base_size(); // 24.0 px (Standard tier)
-pub const FONT_LARGE: f32 = FontSizeTier::Large.base_size(); // 30.0 px (Large tier)
+/// The font size the interface draws at, and the only one there is.
+///
+/// The four-tier scale is gone, and with it the 18/20/30 px baked glyph tables: [`FONT_BASE`] is the
+/// size of the one table that ships.
+pub const FONT: f32 = FONT_BASE;
 
-/// The type, sourced from SystemPreferences (no custom font size literals).
-pub const TITLE_FONT: f32 = FONT_LARGE; // 30.0 px
-pub const SUBTITLE_FONT: f32 = FONT_EXTRA_SMALL; // 18.0 px
-pub const STATUS_FONT: f32 = FONT_STANDARD; // 24.0 px
-pub const ADDRESS_FONT: f32 = FONT_SMALL; // 20.0 px
-pub const BUTTON_FONT: f32 = FONT_STANDARD; // 24.0 px
-pub const FOOTNOTE_FONT: f32 = FONT_EXTRA_SMALL; // 18.0 px
+/// The type, all of it one size: a title, an address and a footnote are written in it now, where the
+/// tiers used to step them apart.
+pub const TITLE_FONT: f32 = FONT;
+pub const SUBTITLE_FONT: f32 = FONT;
+pub const STATUS_FONT: f32 = FONT;
+pub const ADDRESS_FONT: f32 = FONT;
+pub const BUTTON_FONT: f32 = FONT;
+pub const FOOTNOTE_FONT: f32 = FONT;
 
 use pomelo_widgets::preferences::ThemeMode;
 

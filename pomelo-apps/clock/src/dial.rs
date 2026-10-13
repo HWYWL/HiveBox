@@ -13,7 +13,7 @@
 //! `fill_text` is a `todo!()` in the geometry backend — a canvas here can fill and stroke and cannot
 //! draw text, because doing it properly means handing the rasteriser a font. So the face carries
 //! ticks and hands, and the *numbers* are ordinary `text` elements below it, which is also what keeps
-//! them in the app's own font and its tier preferences.
+//! them in the app's own font.
 
 use iced::advanced::graphics::geometry::Renderer as GeometryRenderer;
 use iced::mouse;

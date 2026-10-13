@@ -1,4 +1,4 @@
-//! The theme page: dark/light mode switch, font size, colour palette and display details.
+//! The theme page: dark/light mode switch, colour palette and display details.
 
 use iced::widget::{container, text, Column, Row, Space};
 use iced::{Alignment, Border, Length};
@@ -15,9 +15,12 @@ pub(crate) fn theme_page<'a>(preferences: SystemPreferences) -> UI<'a> {
     let language = preferences.language;
     let theme = preferences.theme;
 
-    // The two rows that change something are tiles — the same row the main list is built from — and
-    // not a layout of their own: a value beside a label is exactly what a tile is. The chevron is
-    // the one part of it they do not want, because neither of them opens anything.
+    // The row that changes something is a tile — the same row the main list is built from — and not
+    // a layout of its own: a value beside a label is exactly what a tile is. The chevron is the one
+    // part of it it does not want, because it opens nothing.
+    //
+    // There used to be a second tile here, for the font size, and it cycled four tiers. The tiers are
+    // gone: the interface draws at one size, so there is nothing left to point at.
     let controls = Card::new(theme)
         .tile(
             Tile::action(
@@ -31,16 +34,6 @@ pub(crate) fn theme_page<'a>(preferences: SystemPreferences) -> UI<'a> {
                 Message::SetTheme(preferences.theme.other()),
             )
             .secondary(text(preferences.theme.name(language)))
-            .trailing(None),
-        )
-        .tile(
-            Tile::action(
-                Icon::FORMAT_SIZE,
-                style::IconColor::for_section(SettingsSection::SystemInfo),
-                language.text(Key::FontSize),
-                Message::CycleFontTier,
-            )
-            .secondary(text(preferences.font_tier.name(language)))
             .trailing(None),
         )
         .view();

@@ -24,8 +24,8 @@ iced = { version = "0.14", default-features = false, features = ["thread-pool", 
 # From GitHub by revision like its siblings: sibling repositories, and this project builds on its own.
 pomelo-hal = { git = "https://github.com/pomelos-on-sale/pomelo-hal.git", rev = "20eaa910f0a05cd68684d6aa868fd78457c51be9" }
 
-# The shared preferences: the theme, the language, and the font tier every measurement here comes out
-# of.
+# The shared preferences: the theme, the language, and the base font size every measurement here comes
+# out of.
 pomelo-widgets = { git = "https://github.com/pomelos-on-sale/pomelo-widgets.git", rev = "f499da5cc17ef16ced6e6b1e62286bb020837a0b" }
 
 # The icons: the one in the header, the lock on a secured network, and the arrow on the rescan button.

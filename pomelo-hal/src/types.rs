@@ -293,13 +293,30 @@ mod tests {
                 region(FlashRegionKind::System, 0x9000),
                 region(FlashRegionKind::System, 0x6000),
                 region(FlashRegionKind::System, 0x1000),
-                region(FlashRegionKind::Firmware, 0xC0_0000),
-                region(FlashRegionKind::Data, 0x30_0000),
-                region(FlashRegionKind::Unallocated, 0xF_0000),
+                region(FlashRegionKind::Firmware, 0xAF_0000),
+                region(FlashRegionKind::Data, 0x50_0000),
+                // Empty, and still a region: the board's table now reaches the end of its chip.
+                region(FlashRegionKind::Unallocated, 0x0),
             ],
         };
 
-        assert_eq!(layout.allocated_bytes(), 16 * 1024 * 1024 - 0xF_0000);
+        assert_eq!(layout.allocated_bytes(), 16 * 1024 * 1024);
+
+        // And the subtraction is what makes the number derived rather than carried: the same chip with
+        // a quarter of its filesystem handed back to nobody claims exactly that much less.
+        let tailed = FlashLayout {
+            total_bytes: 16 * 1024 * 1024,
+            regions: vec![
+                region(FlashRegionKind::System, 0x9000),
+                region(FlashRegionKind::System, 0x6000),
+                region(FlashRegionKind::System, 0x1000),
+                region(FlashRegionKind::Firmware, 0xAF_0000),
+                region(FlashRegionKind::Data, 0x50_0000 - 0x14_0000),
+                region(FlashRegionKind::Unallocated, 0x14_0000),
+            ],
+        };
+
+        assert_eq!(tailed.allocated_bytes(), 16 * 1024 * 1024 - 0x14_0000);
 
         // The regions are the chip: a map built from them has to add up to it, or the bar the page
         // draws is a bar with a hole in it.

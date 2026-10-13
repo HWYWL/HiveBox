@@ -19,9 +19,7 @@ bake.py — 把矢量字体烘成位图字形表，供 iced-pomelo-winit 在嵌�
     │   └── charset-common.txt              ← 字符集定义
     └── dist/
         ├── SourceHanSansSC-Regular-Subset.otf         ← 子集（进固件）
-        ├── SourceHanSansSC-Regular-Subset-common@14px.bin
-        ├── SourceHanSansSC-Regular-Subset-common@15px.bin
-        ├── SourceHanSansSC-Regular-Subset-common@18px.bin
+        ├── SourceHanSansSC-Regular-Subset-common@24px.bin
         └── MANIFEST.md                                ← 由本脚本生成
 
 # 首次使用：下载源字体
@@ -38,11 +36,14 @@ bake.py — 把矢量字体烘成位图字形表，供 iced-pomelo-winit 在嵌�
 
 # 烘培（子集化之后、或字号变更时需要重烘）
 
-    python3 bake.py                        # 默认字号：18、20、24 px
-    python3 bake.py --sizes 14 15 18 21   # 指定字号
+    python3 bake.py                        # 默认字号：24 px
+    python3 bake.py --sizes 24 32          # 指定字号
 
 字号清单要和设备端实际用到的字号一致：多烘只浪费 flash，少烘只是让那些字号退回在线绘制
 （正确性不受影响）。`dist/MANIFEST.md` 记录当前烘了哪些。
+
+界面只有一个字号（24 px，即 `pomelo-widgets` 的 `FONT_BASE`），所以只烘一档：查表时字号是
+逐位比较的，烘了别的字号也没人读得到。
 
 # 输出格式（PGLY v1，小端）
 
@@ -90,18 +91,15 @@ FONT = ROOT / "dist/SourceHanSansSC-Regular-Subset.otf"
 CHARSET = ROOT / "source/charset-common.txt"
 OUTPUT = ROOT / "dist"
 
-# 要烘的字号。app 里实际出现的字号共 13 档（12/13/14/15/16/17/18/20/22/32/34/38/96），
-# 全烘不可能：满字符集（4008 字）在 96px 一档就要 34 MB，六档加起来 48 MB。
+# 要烘的字号：一个就够。
 #
-# 所以分两层：
-#   * **正文档**烘满字符集 —— 任意中文都可能出现在这些字号上：
-#     14 = 设置/计算器/播放器的次要与数值文本，15 = 启动器标签与状态栏，
-#     18 = 终端正文；
-#   * **大字号档**（20/22/32/34/38/96）只出现在短串上（标题、按键、数字），
-#     按需在线绘制：一屏不过几十个新字形，几十毫秒一次，之后进缓存。
+# 界面把正文字号统一收敛到 24 px（`pomelo-widgets` 的 `FONT_BASE`），四档可调的字号系统已经
+# 删除，所以 18/20 两档不再有人要求。设备端查表时把字号逐位（f32 的位）比较，别的字号命中不了
+# 任何表，就退回在线光栅化（约 1.6 ms/字形）并进 RAM 缓存 —— 慢，但不会画错；反过来，多烘一档
+# 就是白占 flash：满字符集在 24 px 这一档已经要 ~2 MB（每字节约 0.93×字号² 字节）。
 #
-# 以后要加档位，先量体积（每字节约 0.93×字号² 字节）再决定烘哪几档。
-SIZES = [18, 20, 24]
+# 以后要加档位，先量体积，并且确认设备端真的会在这个字号上画字。
+SIZES = [24]
 
 MAGIC = b"PGLY"
 VERSION = 1

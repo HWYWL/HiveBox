@@ -1,4 +1,4 @@
-//! Everything this app draws: the list of games, and a game being played.
+//! Everything this app draws: the list of games, and whichever game is being played.
 //!
 //! # Two screens, drawn by two functions
 //!
@@ -7,12 +7,20 @@
 //! same header: the list's says what the app is, and a game's says which game, how it is going and how
 //! to get back.
 //!
+//! # Two games, one page
+//!
+//! Both games are the same page — [`header`], a board, and [`foot`] — and the board is the only thing
+//! that differs: sixteen tiles with gaps between them, or sixteen cells by sixteen with none. The
+//! caption is the other difference, and it is the game's own line, because the two are played
+//! differently. Everything shared is shared on purpose: a game added here is a board and a line.
+//!
 //! # The board is a fixed square
 //!
-//! [`style::TILE`] and [`style::TILE_GAP`] are constants and not the font tier's business, because a
-//! 2048 board is four tiles by four: on the 480 px panel it is 328 px, and every other measurement on
-//! this page was chosen to fit *around* it. The chrome still scales with the tier, which is why the
-//! arithmetic is checked — see the test in [`crate::style`].
+//! [`style::TILE`] and [`style::TILE_GAP`] are constants and not the base font size's business,
+//! because a 2048 board is four tiles by four: on the 480 px panel it is 328 px, and every other
+//! measurement on this page was chosen to fit *around* it. The chrome still scales with the base
+//! size, which is why the arithmetic is checked — see the test in [`crate::style`]. The snake's board
+//! is the same square — see [`style::SNAKE_CELL`].
 
 use iced::widget::{button, container, row, text, Column, Row, Space};
 use iced::{Alignment, Border, Color, Element, Length, Shadow};
@@ -22,20 +30,21 @@ use pomelo_widgets::preferences::ThemeMode;
 
 use crate::game::TwentyFortyEight;
 use crate::grid::{Direction, Grid, SIDE};
-use crate::style::{self, Sizes};
-use crate::{Game, Games, Message, Page, Words};
+use crate::snake::{self, Snake};
+use crate::style::{self, Part, Sizes};
+use crate::{Game, Games, Message, Page, Played, Words};
 
 /// The page.
 pub(crate) fn page(app: &Games) -> Element<'_, Message> {
     let mode = app.preferences.theme;
-    let sizes = Sizes::of(app.preferences.font_tier);
+    let sizes = Sizes::new();
     let words = Words::of(app.preferences.language);
 
     // The page's own edge. The panel is 480 px square and a desktop window is not: the page keeps its
     // width and the space either side of it is the surface's own — see [`style::PANEL`].
     let body: Element<'_, Message> = match &app.page {
         Page::List => list(&words, sizes, mode),
-        Page::Playing(which, played) => playing(*which, played, &words, sizes, mode),
+        Page::Playing(played) => playing(played, &words, sizes, mode),
     };
 
     container(
@@ -117,7 +126,24 @@ fn game_row<'a>(game: Game, words: &Words, sizes: Sizes, mode: ThemeMode) -> Ele
 }
 
 /// A game being played: which one, how it is going, the board, and the pad under it.
+///
+/// The two games draw the same page with different middles — the same header, the same line and the
+/// same pad, and a board that is sixteen cells of something either way — so the difference is here and
+/// in the two functions below it, and nowhere else.
 fn playing<'a>(
+    played: &Played,
+    words: &Words,
+    sizes: Sizes,
+    mode: ThemeMode,
+) -> Element<'a, Message> {
+    match played {
+        Played::Tiles(game) => tiles_page(played.game(), game, words, sizes, mode),
+        Played::Snake(snake) => snake_page(played.game(), snake, words, sizes, mode),
+    }
+}
+
+/// 2048 being played.
+fn tiles_page<'a>(
     game: Game,
     played: &TwentyFortyEight,
     words: &Words,
@@ -127,22 +153,6 @@ fn playing<'a>(
     // The board's own judgement, read once: three of the four things on this page need it.
     let over = played.is_over();
     let scored = format!("{} {}", words.score, played.score());
-
-    let head = row![
-        // The way back is the header's first control, on the left, where a page's way back is.
-        icon_button(Icon::ARROW_BACK, None, sizes, mode, Message::List),
-        heading(game.icon(), game.name(), &scored, sizes, mode),
-        Space::new().width(Length::Fill),
-        icon_button(
-            Icon::RESTART_ALT,
-            Some(words.restart),
-            sizes,
-            mode,
-            Message::Restart,
-        ),
-    ]
-    .spacing(style::GAP)
-    .align_y(Alignment::Center);
 
     // One line under the board, and it is the same line whichever state the game is in: the caption
     // saying which way the arrows go, or the sentence about a game that is over, or the one about a
@@ -156,19 +166,96 @@ fn playing<'a>(
         (words.slide, style::muted(mode))
     };
 
-    let foot = Column::with_children(vec![
+    Column::with_children(vec![
+        header(game, &scored, words, sizes, mode),
+        tiles(played.grid(), mode),
+        foot(line, colour, !over, sizes, mode),
+    ])
+    .spacing(style::GAP)
+    .width(Length::Fill)
+    .padding(style::MARGIN)
+    .into()
+}
+
+/// Snake being played.
+///
+/// The line under the board is the one difference: a snake is steered by tipping the box as well as
+/// by the arrows, so its caption says both — a page that only named the pad would be leaving out the
+/// way most people will play it.
+fn snake_page<'a>(
+    game: Game,
+    snake: &Snake,
+    words: &Words,
+    sizes: Sizes,
+    mode: ThemeMode,
+) -> Element<'a, Message> {
+    let over = snake.is_over();
+    let scored = format!("{} {}", words.score, snake.score());
+
+    let (line, colour) = if over {
+        (words.hit, style::muted(mode))
+    } else {
+        (words.steer, style::muted(mode))
+    };
+
+    Column::with_children(vec![
+        header(game, &scored, words, sizes, mode),
+        snake_board(snake, mode),
+        foot(line, colour, !over, sizes, mode),
+    ])
+    .spacing(style::GAP)
+    .width(Length::Fill)
+    .padding(style::MARGIN)
+    .into()
+}
+
+/// The header every game's page has: the way back, which game is up and how it is going, and a new
+/// game.
+///
+/// Shared rather than written twice, because it *is* the same header: the way back is a page's, the
+/// restart is a game's, and only the glyph and the name change — which is what [`Game`] is for.
+fn header<'a>(
+    game: Game,
+    under: &str,
+    words: &Words,
+    sizes: Sizes,
+    mode: ThemeMode,
+) -> Element<'a, Message> {
+    row![
+        // The way back is the header's first control, on the left, where a page's way back is.
+        icon_button(Icon::ARROW_BACK, None, sizes, mode, Message::List),
+        heading(game.icon(), game.name(), under, sizes, mode),
+        Space::new().width(Length::Fill),
+        icon_button(
+            Icon::RESTART_ALT,
+            Some(words.restart),
+            sizes,
+            mode,
+            Message::Restart,
+        ),
+    ]
+    .spacing(style::GAP)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+/// The line under the board and the pad under it: the same place, and the same height, whichever
+/// sentence is drawn — which is what keeps the board from moving when the line changes.
+fn foot<'a>(
+    line: &'a str,
+    colour: Color,
+    live: bool,
+    sizes: Sizes,
+    mode: ThemeMode,
+) -> Element<'a, Message> {
+    Column::with_children(vec![
         text(line).size(sizes.small).color(colour).into(),
-        pad(!over, sizes, mode),
+        pad(live, sizes, mode),
     ])
     .spacing(style::GAP / 2.0)
     .width(Length::Fill)
-    .align_x(Alignment::Center);
-
-    Column::with_children(vec![head.into(), tiles(played.grid(), mode), foot.into()])
-        .spacing(style::GAP)
-        .width(Length::Fill)
-        .padding(style::MARGIN)
-        .into()
+    .align_x(Alignment::Center)
+    .into()
 }
 
 /// The board: sixteen cells, four to a row, with the pad's gaps between them.
@@ -243,6 +330,76 @@ fn tile<'a>(value: u32, mode: ThemeMode) -> Element<'a, Message> {
     .into()
 }
 
+/// The snake's board: sixteen cells by sixteen, with no gaps, in the same frame as the other game's.
+///
+/// Every cell is drawn, including the empty ones, because a snake can be in any of them: the board is
+/// not sixteen tiles that moved, it is a grid with a body on it. Which means the board is built here
+/// and not by the rules — [`Snake`] answers where its body, its head and its apple are, and this is
+/// the one place that turns those three answers into 256 cells.
+///
+/// The frame is the other board's, letter for letter: the same `TILE_GAP` of padding and the same
+/// corner, so the two games present the same square whatever is played on it. The cells touch because
+/// a snake's segments have to — a snake drawn with the tiles' gaps would be a dotted line.
+fn snake_board<'a>(snake: &Snake, mode: ThemeMode) -> Element<'a, Message> {
+    // What each of the 256 cells is, in one pass: the body first and then the apple over it, because
+    // the apple is never on the snake and writing it last says so.
+    let mut parts = vec![Part::Empty; snake::CELLS];
+
+    for cell in snake.body() {
+        let part = if cell == snake.head() {
+            Part::Head
+        } else {
+            Part::Body
+        };
+
+        parts[cell.row * snake::SIDE + cell.col] = part;
+    }
+
+    let food = snake.food();
+    parts[food.row * snake::SIDE + food.col] = Part::Apple;
+
+    let rows = (0..snake::SIDE).map(|at| {
+        Row::with_children(
+            (0..snake::SIDE)
+                .map(|along| snake_cell(parts[at * snake::SIDE + along], mode))
+                .collect::<Vec<_>>(),
+        )
+    });
+
+    let board = container(Column::with_children(rows.map(Element::from).collect::<Vec<_>>()))
+        .padding(style::TILE_GAP)
+        .style(move |_theme| container::Style {
+            background: Some(style::board(mode).into()),
+            border: Border {
+                radius: style::RADIUS.into(),
+                ..Border::default()
+            },
+            ..container::Style::default()
+        });
+
+    // A fixed square that takes no part in the column's width, for the reason the tiles are: it stays
+    // a square in a window wider than the panel.
+    row![Space::new().width(Length::Fill), board, Space::new().width(Length::Fill)]
+        .width(Length::Fill)
+        .into()
+}
+
+/// One cell of the snake's board.
+///
+/// No corner and no gap: a cell of a body has to be able to touch the cell next to it, which is the
+/// whole difference between this and [`tile`]. An empty one is the frame's own colour, so the board
+/// reads as one square with something on it rather than as a tray of dark cells.
+fn snake_cell<'a>(part: Part, mode: ThemeMode) -> Element<'a, Message> {
+    container(Space::new())
+        .width(Length::Fixed(style::SNAKE_CELL))
+        .height(Length::Fixed(style::SNAKE_CELL))
+        .style(move |_theme| container::Style {
+            background: Some(style::snake(part, mode).into()),
+            ..container::Style::default()
+        })
+        .into()
+}
+
 /// The pad: the four arrows, in the order left, up, down, right.
 ///
 /// Four buttons in a row rather than a cross with a middle in it, and the order is the one a keyboard
@@ -265,7 +422,7 @@ fn pad<'a>(live: bool, sizes: Sizes, mode: ThemeMode) -> Element<'a, Message> {
         // Nothing to press on a board with no moves left. The arrows are still drawn — taking them
         // away would move the board up the page at the exact moment somebody is looking at it — and
         // the line above them is what says why they do nothing.
-        let press = live.then_some(Message::Slide(direction));
+        let press = live.then_some(Message::Steer(direction));
         let ink = if live {
             style::ink(mode)
         } else {

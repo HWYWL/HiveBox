@@ -95,11 +95,7 @@ fn preferences_travel_with_the_app_and_both_themes_build_a_view() {
     let board = Arc::new(Board::simulated());
     let mut app = WebManager::new(Arc::clone(&board));
 
-    let prefs = SystemPreferences::new(
-        pomelo_widgets::Language::English,
-        ThemeMode::Light,
-        pomelo_widgets::FontSizeTier::Large,
-    );
+    let prefs = SystemPreferences::new(pomelo_widgets::Language::English, ThemeMode::Light);
     app.set_preferences(prefs);
 
     assert_eq!(app.preferences(), prefs);
@@ -115,7 +111,6 @@ fn preferences_travel_with_the_app_and_both_themes_build_a_view() {
     app.set_preferences(SystemPreferences::new(
         pomelo_widgets::Language::Chinese,
         ThemeMode::Dark,
-        pomelo_widgets::FontSizeTier::Standard,
     ));
     drop(app.view());
 }

@@ -23,7 +23,7 @@ use crate::{Message, Status, Weather, Words};
 /// The page.
 pub(crate) fn page(app: &Weather) -> Element<'_, Message> {
     let mode = app.preferences.theme;
-    let sizes = Sizes::of(app.preferences.font_tier);
+    let sizes = Sizes::new();
     let words = Words::of(app.preferences.language);
 
     // One card, whichever of the four states this is: a page is never drawing a forecast and a fault

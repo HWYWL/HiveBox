@@ -1,6 +1,6 @@
 //! What the NAS page measures and colours with.
 //!
-//! Every size comes out of one number — the font tier the system is set to — for the reason a table
+//! Every size comes out of one number — [`FONT_BASE`], the base font size — for the reason a table
 //! has: columns that do not move when the text does are columns whose numbers run into each other. The
 //! colours are the other half, and they are *per metric* rather than per fullness: a ring on a
 //! dashboard is identified by its colour before its label is read, which is how a person tells the CPU
@@ -9,7 +9,7 @@
 
 use iced::Color;
 
-use pomelo_widgets::preferences::{FontSizeTier, ThemeMode};
+use pomelo_widgets::preferences::{FONT_BASE, ThemeMode};
 
 /// The panel this page is laid out for: the 480 px square the rest of this project designs against.
 ///
@@ -39,12 +39,12 @@ pub const SCROLLBAR: f32 = 14.0;
 
 /// The column the form's field labels sit in: `地址`, `账号`, `密码` beside what has been typed.
 ///
-/// Wide enough for the longest of the three at the largest tier this page is laid out for, and fixed
+/// Wide enough for the longest of the three at the base font size this page is laid out for, and fixed
 /// so that the three values start at the same place — a label that sized itself would put the address
 /// and the password at different lefts on the same form.
 pub const FIELD_LABEL: f32 = 64.0;
 
-/// Everything the page measures with, for one font tier.
+/// Everything the page measures with.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sizes {
     /// The table's own text, and the small print under a headline.
@@ -62,9 +62,9 @@ pub struct Sizes {
 }
 
 impl Sizes {
-    /// The measurements a font tier asks for.
-    pub fn of(tier: FontSizeTier) -> Self {
-        let base = tier.base_size();
+    /// The measurements the base font size asks for: [`FONT_BASE`], with each field a multiple of it.
+    pub fn new() -> Self {
+        let base = FONT_BASE;
 
         Self {
             text: base * 0.72,
@@ -198,30 +198,24 @@ impl StatusInk {
 mod tests {
     use super::*;
 
-    /// Every size grows with the tier, and none of them collapses.
+    /// Every size is a multiple of the base font size, and none of them collapses.
     #[test]
-    fn every_measurement_grows_with_the_font_tier() {
-        let tiers = [
-            FontSizeTier::ExtraSmall,
-            FontSizeTier::Small,
-            FontSizeTier::Standard,
-            FontSizeTier::Large,
-        ];
+    fn every_measurement_is_a_multiple_of_the_base() {
+        let size = Sizes::new();
 
-        let sizes: Vec<Sizes> = tiers.iter().copied().map(Sizes::of).collect();
+        assert_eq!(size.text, FONT_BASE * 0.72);
+        assert_eq!(size.small, FONT_BASE * 0.6);
+        assert_eq!(size.headline, FONT_BASE * 1.25);
+        assert_eq!(size.row, FONT_BASE * 1.1);
+        assert_eq!(size.card, FONT_BASE * 3.2);
+        assert_eq!(size.card_gap, FONT_BASE * 0.45);
+        assert_eq!(size.bar, FONT_BASE * 0.28);
 
-        for pair in sizes.windows(2) {
-            let (small, large) = (pair[0], pair[1]);
-            assert!(large.text > small.text, "{small:?} then {large:?}");
-            assert!(large.headline > small.headline);
-            assert!(large.row > small.row);
-            assert!(large.card > large.row);
-        }
-
-        for size in sizes {
-            assert!(size.text >= 10.0, "text is {size:?}");
-            assert!(size.row > size.text, "a row has to be taller than its text");
-            assert!(size.bar > 0.0 && size.bar < size.text);
-        }
+        assert!(size.text >= 10.0, "text is {size:?}");
+        assert!(size.row > size.text, "a row has to be taller than its text");
+        assert!(size.card > size.row);
+        assert!(size.headline > size.text);
+        assert!(size.small < size.text);
+        assert!(size.bar > 0.0 && size.bar < size.text);
     }
 }

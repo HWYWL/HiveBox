@@ -14,7 +14,7 @@ use std::time::Instant;
 use iced::Size;
 use iced_test::Simulator;
 use pomelo_hal::{Board, ScanState};
-use pomelo_widgets::preferences::{FontSizeTier, Language, SystemPreferences, ThemeMode};
+use pomelo_widgets::preferences::{Language, SystemPreferences, ThemeMode};
 
 use crate::channel::{self, CLEAN, FIRST, LAST};
 use crate::{Message, WifiMap, Words};
@@ -80,12 +80,7 @@ fn english() -> (Arc<Board>, WifiMap) {
     let board = board();
     let mut app = WifiMap::new(Arc::clone(&board));
 
-    app.set_preferences(SystemPreferences {
-        language: Language::English,
-        theme: ThemeMode::Dark,
-        font_tier: FontSizeTier::Standard,
-        ..SystemPreferences::default()
-    });
+    app.set_preferences(SystemPreferences::new(Language::English, ThemeMode::Dark));
 
     for _ in 0..3 {
         board.tick();

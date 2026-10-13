@@ -18,8 +18,8 @@ iced = { version = "0.14", default-features = false, features = ["advanced", "th
 # `std::fs`'s, which is the half that always worked.
 pomelo-hal = { git = "https://github.com/pomelos-on-sale/pomelo-hal.git", rev = "20eaa910f0a05cd68684d6aa868fd78457c51be9" }
 
-# The shared preferences: the theme and the language are the system's, and the font tier is what
-# every measurement in `style` is derived from.
+# The shared preferences: the theme and the language are the system's, and the base font size is
+# what every measurement in `style` is derived from.
 pomelo-widgets = { git = "https://github.com/pomelos-on-sale/pomelo-widgets.git", rev = "f499da5cc17ef16ced6e6b1e62286bb020837a0b" }
 
 # The icons: the folder and file glyphs in the list, and the four actions on the toolbar.

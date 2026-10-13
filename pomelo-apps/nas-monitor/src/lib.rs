@@ -504,7 +504,7 @@ impl NasMonitor {
     /// The page.
     pub fn view(&self) -> Element<'_, Message> {
         let theme = self.preferences.theme;
-        let sizes = style::Sizes::of(self.preferences.font_tier);
+        let sizes = style::Sizes::new();
         let ink = style::ink(theme);
         let muted = style::muted(theme);
         let words = Words::of(self.preferences.language);
@@ -1412,7 +1412,7 @@ const DISK_WIDTHS: [Option<f32>; 6] = [
 /// columns are fixed too, so what the identity gets is the panel less everything else. A function
 /// rather than arithmetic inside the view, because the width test has to compute the *same* number:
 /// a cell drawn to one width and checked against another is exactly how the model came to be cut to
-/// sixteen characters — which at the standard tier are 143 px wide against this column's 138 — and
+/// sixteen characters — which at the base font size are 143 px wide against this column's 138 — and
 /// then arrive on the panel hanging off the edge of it.
 fn identity_room(sizes: style::Sizes) -> f32 {
     let fixed: f32 = DISK_WIDTHS
@@ -2320,24 +2320,16 @@ mod tests {
     /// than its column and a total wider than the panel.
     #[test]
     fn the_columns_fit_the_panel_and_their_heads_fit_in_them() {
-        use pomelo_widgets::preferences::FontSizeTier;
-
         // The width estimate, taken from the code the cells are actually *cut* by rather than written
         // out again here — see [`format::width_of`], which is where it lives and why. A test that
         // measured by its own copy of the arithmetic is a test that can pass while the panel clips.
         use crate::format::width_of;
 
-        // The three tiers this table is laid out for, which is not all four of them: at the largest,
-        // eight columns of Chinese-labelled numbers do not fit in 480 px whatever the widths are — the
-        // heads alone take a third of the panel — and a table that pretends otherwise would clip rather
-        // than say so. What the largest tier needs is fewer columns, which is a decision about the page
-        // and not about the arithmetic, so it is not made here.
-        for tier in [
-            FontSizeTier::ExtraSmall,
-            FontSizeTier::Small,
-            FontSizeTier::Standard,
-        ] {
-            let sizes = style::Sizes::of(tier);
+        // The one size this table is laid out for, [`FONT_BASE`]. At the base, eight columns of
+        // Chinese-labelled numbers fit in 480 px: the widths below are the room the panel really has,
+        // and the checks that follow are what keep the columns from clipping.
+        {
+            let sizes = style::Sizes::new();
 
             // Every head, and the widest value under it.
             let widest = ["存储空间 1", "500G", "38°C", "100%", "8.5M/s", "9.8M/s"];
@@ -2353,12 +2345,12 @@ mod tests {
 
                     assert!(
                         width_of(head, sizes.small) <= room,
-                        "{tier:?} {language:?}: 「{head}」 needs {} px of a {room} px column",
+                        "{language:?}: 「{head}」 needs {} px of a {room} px column",
                         width_of(head, sizes.small)
                     );
                     assert!(
                         width_of(widest[index], sizes.text) <= room,
-                        "{tier:?}: {} needs {} px of a {room} px column",
+                        "{} needs {} px of a {room} px column",
                         widest[index],
                         width_of(widest[index], sizes.text)
                     );
@@ -2376,7 +2368,7 @@ mod tests {
 
             assert!(
                 room >= held,
-                "{tier:?}: the identity column is left {room} px for a label that wants {held} px"
+                "the identity column is left {room} px for a label that wants {held} px"
             );
 
             // And the two lines that really go in it — the disk's use above, its name and model below —
@@ -2395,7 +2387,7 @@ mod tests {
 
                 assert!(
                     width_of(&line, size) <= room,
-                    "{tier:?}: 「{line}」 needs {} px of a {room} px identity column",
+                    "「{line}」 needs {} px of a {room} px identity column",
                     width_of(&line, size)
                 );
             }
@@ -2410,7 +2402,7 @@ mod tests {
 
                 assert!(
                     line.contains(" · "),
-                    "{tier:?}: 「{line}」 has the name and none of the model"
+                    "「{line}」 has the name and none of the model"
                 );
             }
 

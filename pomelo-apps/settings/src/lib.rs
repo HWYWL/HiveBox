@@ -77,7 +77,7 @@ use iced::widget::{operation, scrollable};
 use iced::{Element, Subscription, Task, Theme};
 use pomelo_hal::{Board, WifiState};
 
-pub use pomelo_widgets::{FontSizeTier, Language, SystemPreferences, ThemeMode};
+pub use pomelo_widgets::{Language, SystemPreferences, ThemeMode, FONT_BASE};
 pub use i18n::{Key, LanguageExt};
 
 use pages::common::BODY;
@@ -137,8 +137,6 @@ pub enum Message {
     SetLanguage(Language),
     /// Set the appearance theme mode.
     SetTheme(ThemeMode),
-    /// Cycle to the next font size tier.
-    CycleFontTier,
     /// The storage page's "check again": re-probe the card slot, and read what is mounted.
     StorageDetect,
     /// The restart row was pressed. Asks the question; resets nothing.
@@ -217,7 +215,7 @@ pub struct Settings {
     section: SettingsSection,
     is_24h_format: bool,
     battery: Battery,
-    /// The system preferences (language, theme, font size tier).
+    /// The system preferences (language and theme).
     preferences: SystemPreferences,
     /// The board, for the one thing this app does to it rather than reads from it: a restart.
     ///
@@ -329,11 +327,6 @@ impl Settings {
     /// Sets the visual theme mode.
     pub fn set_theme_mode(&mut self, theme: ThemeMode) {
         self.preferences.theme = theme;
-    }
-
-    /// Sets the font size tier.
-    pub fn set_font_tier(&mut self, tier: FontSizeTier) {
-        self.preferences.font_tier = tier;
     }
 
     /// Opens `section`.
@@ -473,7 +466,6 @@ impl Settings {
             Message::Toggle24Hour => self.is_24h_format = !self.is_24h_format,
             Message::SetLanguage(language) => self.set_language(language),
             Message::SetTheme(theme) => self.set_theme_mode(theme),
-            Message::CycleFontTier => self.set_font_tier(self.preferences.font_tier.cycle()),
             Message::StorageDetect => self.storage.detect(),
             // The row asks; the question's two answers are the only things that do or do not.
             Message::Restart => self.restart_prompt = true,

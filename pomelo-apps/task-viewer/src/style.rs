@@ -1,14 +1,14 @@
 //! What the task viewer measures and colours with.
 //!
-//! Every size here comes out of one number — the font tier the system is set to — for the reason a
+//! Every size here comes out of one number — [`FONT_BASE`], the base font size — for the reason a
 //! table has: columns that do not move when the text does are columns whose numbers run into each
-//! other. Row heights and column widths are all derived from `base`, so changing the system's text
-//! size changes the *density* of the table and not whether it lines up.
+//! other. Row heights and column widths are all multiples of `base` (which is `FONT_BASE`), so the
+//! *density* of the table and whether it lines up both come from that one number.
 
 use iced::Color;
 
 use pomelo_hal::TaskState;
-use pomelo_widgets::preferences::{FontSizeTier, ThemeMode};
+use pomelo_widgets::preferences::{FONT_BASE, ThemeMode};
 
 /// The panel this page is laid out for: the 480 px square the rest of this project designs against.
 ///
@@ -33,7 +33,7 @@ pub const ROW_GAP: f32 = 2.0;
 /// The room inside a row, on each side of its text.
 pub const CELL_PAD: f32 = 4.0;
 
-/// Everything the page measures with, for one font tier.
+/// Everything the page measures with, at the base font size [`FONT_BASE`].
 ///
 /// The *columns* of the table are not here: what a column is wide belongs with the column — see
 /// `columns` in the crate root — and it is expressed as a multiple of [`Sizes::text`], which is the
@@ -53,17 +53,17 @@ pub small: f32,
 }
 
 impl Sizes {
-    /// The measurements a font tier asks for.
+    /// The measurements the base font size asks for: [`FONT_BASE`], with each field a multiple of it.
     ///
     /// The multipliers are the whole of the design, and they are what a table needs rather than what a
-    /// list needs: the body text is three quarters of the tier's base so that twelve rows fit where
+    /// list needs: the body text is three quarters of the base so that twelve rows fit where
     /// nine would, and every column is its widest content plus the padding a number wants on both
     /// sides. The meter's bar is a fraction taller than its own text, so that a row of them reads as
     /// bars rather than as underlines; its *label* column is sized for the longest label this page has
     /// ever had to write, which is 外部内存 — four full-width characters, and the reason this is nearly
     /// three quarters of the base rather than half of it.
-    pub fn of(tier: FontSizeTier) -> Self {
-        let base = tier.base_size();
+    pub fn new() -> Self {
+        let base = FONT_BASE;
 
         Self {
             text: base * 0.75,
@@ -143,35 +143,26 @@ pub fn state_ink(state: TaskState, theme: ThemeMode) -> Color {
 mod tests {
     use super::*;
 
-    /// Every size grows with the tier, and none of them collapses.
+    /// Every measurement is the expected multiple of the one base size, and none of them collapses.
     ///
     /// The one thing that could go wrong here is a multiplier small enough to round something away at
-    /// the smallest tier — a table whose numbers overlap is worse than a table that is too small.
+    /// the base size — a table whose numbers overlap is worse than a table that is too small.
     #[test]
-    fn every_measurement_grows_with_the_font_tier() {
-        let tiers = [
-            FontSizeTier::ExtraSmall,
-            FontSizeTier::Small,
-            FontSizeTier::Standard,
-            FontSizeTier::Large,
-        ];
+    fn every_measurement_is_a_multiple_of_the_base_font_size() {
+        let size = Sizes::new();
 
-        let sizes: Vec<Sizes> = tiers.iter().copied().map(Sizes::of).collect();
+        assert_eq!(size.text, FONT_BASE * 0.75);
+        assert_eq!(size.small, FONT_BASE * 0.65);
+        assert_eq!(size.row, FONT_BASE * 1.15);
+        assert_eq!(size.bar, FONT_BASE * 0.6);
+        assert_eq!(size.meter_row, FONT_BASE * 0.95);
+        assert_eq!(size.meter_label, FONT_BASE * 2.9);
 
-        for pair in sizes.windows(2) {
-            let (small, large) = (pair[0], pair[1]);
-            assert!(large.text > small.text, "{small:?} then {large:?}");
-            assert!(large.small > small.small);
-            assert!(large.row > small.row);
-            assert!(large.bar > small.bar);
-            assert!(large.meter_label > small.meter_label);
-        }
-
-        for size in sizes {
-            assert!(size.text >= 10.0, "text is {size:?}");
-            assert!(size.row > size.text, "a row has to be taller than its text");
-            assert!(size.bar > 0.0 && size.meter_row > size.bar);
-        }
+        assert!(size.text >= 10.0, "text is {size:?}");
+        assert!(size.row > size.text, "a row has to be taller than its text");
+        assert!(size.bar > 0.0 && size.meter_row > size.bar);
+        assert!(size.small < size.text, "the small line is smaller than the body");
+        assert!(size.text < size.meter_label, "the label column is the widest");
     }
 
     /// The meters turn amber and then red as a pool fills, and stay green below that.

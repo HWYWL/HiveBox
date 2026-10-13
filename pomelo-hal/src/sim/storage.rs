@@ -8,8 +8,13 @@ use crate::error::HalError;
 use crate::traits::StorageBackend;
 use crate::types::{FlashLayout, FlashRegion, FlashRegionKind, VolumeInfo, VolumeKind};
 
-/// The built-in partition: the 3 MB `internal` partition of `partitions.csv`.
-const INTERNAL_TOTAL: u64 = 3 * 1024 * 1024;
+/// The app partition: the `factory` row of `partitions.csv`, sized for a firmware with the one
+/// baked glyph table (24 px) in it.
+const FACTORY_TOTAL: u32 = 0xAF_0000;
+
+/// The built-in partition: the 5 MB `internal` partition of `partitions.csv`, which is the rest of
+/// the chip after `factory`.
+const INTERNAL_TOTAL: u64 = 5 * 1024 * 1024;
 
 /// What the firmware's own `welcome.txt` takes up, so the bar is not a flat zero.
 const INTERNAL_USED: u64 = 8_192;
@@ -111,6 +116,11 @@ const BOOTLOADER_SIZE: u32 = 0x9000;
 /// app partition is the firmware, a data partition with a filesystem on it is writable, and the rest
 /// is system — see `hal_storage_get_flash` in `board_storage.c`, which asks the same questions of
 /// the real table.
+///
+/// `unallocated` is zero: the table now reaches the end of the chip. It stays in the list because
+/// the device answers the same way — `hal_storage_get_flash` appends that region whether or not
+/// anything is left over — and a page that dropped the row would be drawing a chip the board does
+/// not have.
 fn flash_regions() -> Vec<FlashRegion> {
     let region = |label: &str, kind, size: u32| FlashRegion {
         label: String::from(label),
@@ -122,12 +132,13 @@ fn flash_regions() -> Vec<FlashRegion> {
         region("bootloader", FlashRegionKind::System, BOOTLOADER_SIZE),
         region("nvs", FlashRegionKind::System, 0x6000),
         region("phy_init", FlashRegionKind::System, 0x1000),
-        region("factory", FlashRegionKind::Firmware, 0xC0_0000),
+        region("factory", FlashRegionKind::Firmware, FACTORY_TOTAL),
         region("internal", FlashRegionKind::Data, INTERNAL_TOTAL as u32),
         region(
             "unallocated",
             FlashRegionKind::Unallocated,
-            FLASH_TOTAL - 0xC10000 - INTERNAL_TOTAL as u32,
+            FLASH_TOTAL
+                - (BOOTLOADER_SIZE + 0x6000 + 0x1000 + FACTORY_TOTAL + INTERNAL_TOTAL as u32),
         ),
     ]
 }
@@ -235,12 +246,15 @@ mod tests {
         let sum: u32 = layout.regions.iter().map(|region| region.size).sum();
         assert_eq!(sum, layout.total_bytes, "the regions must be the chip");
 
-        assert_eq!(layout.allocated_bytes(), FLASH_TOTAL - 0xF_0000);
+        // Every byte is claimed now: the app partition shrank when the 18 px and 20 px glyph tables
+        // came out, and the filesystem took what they freed. The `unallocated` region stays in the
+        // list — at zero — because the device appends it whether or not anything is left over.
+        assert_eq!(layout.allocated_bytes(), FLASH_TOTAL);
     }
 
     /// The built-in volume is one region of the chip, and the map says so.
     ///
-    /// This is the mismatch the page exists to show: 3 MB of writable space on a 16 MB chip.
+    /// This is the mismatch the page exists to show: 5 MB of writable space on a 16 MB chip.
     #[test]
     fn the_built_in_volume_is_a_region_of_the_flash() {
         let storage = SimStorage::new();

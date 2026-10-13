@@ -11,8 +11,6 @@ rebake with `python3 bake.py` after changing the charset or the sizes.
 
 | table | size | glyphs | coverage | file | bytes/glyph |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `SourceHanSansSC-Regular-Subset-common@18px.bin` | 18 px | 4012 | 1176.0 KiB | 1223.1 KiB | 300 B |
-| `SourceHanSansSC-Regular-Subset-common@20px.bin` | 20 px | 4012 | 1385.6 KiB | 1432.7 KiB | 354 B |
 | `SourceHanSansSC-Regular-Subset-common@24px.bin` | 24 px | 4012 | 1984.1 KiB | 2031.1 KiB | 506 B |
 
 ## Which sizes are cached, and what happens without one

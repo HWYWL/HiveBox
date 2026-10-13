@@ -724,17 +724,19 @@ mod tests {
     /// that as no share at all and hands the segment the whole bar.
     #[test]
     fn every_segment_of_a_bar_gets_a_share() {
-        // The board's own chip: bootloader, nvs, phy_init, firmware, filesystem, and the tail.
-        let sizes = [0x9000, 0x6000, 0x1000, 0xC0_0000, 0x30_0000, 0xF_0000];
+        // The board's own chip: bootloader, nvs, phy_init, firmware, filesystem, and the tail — which
+        // now holds nothing, and is the case the rule exists for: a region of zero bytes is a region.
+        let sizes = [0x9000, 0x6000, 0x1000, 0xAF_0000, 0x50_0000, 0x0];
 
         let shares = segment_shares(&sizes, 16 * 1024 * 1024);
 
         assert_eq!(shares.len(), sizes.len());
         assert!(shares.iter().all(|share| *share > 0), "{shares:?}");
 
-        // Proportional and in order: the firmware partition is four times the filesystem under it,
-        // and the shares have to say so.
-        assert_eq!(shares[3], 4 * shares[4], "{shares:?}");
+        // Proportional and in order: the firmware partition is the largest region of the chip, and the
+        // filesystem under it is a fifth of it — 5 MB of 16 — and the shares have to say both.
+        assert_eq!(shares[4], 3125, "{shares:?}");
+        assert!(shares[3] > shares[4], "{shares:?}");
 
         // One region is the whole bar whatever the total says, and no regions is not a panic.
         assert_eq!(segment_shares(&[3], 3), vec![10_000]);

@@ -16,7 +16,7 @@ use iced::Size;
 use iced_test::Simulator;
 use pomelo_hal::sim::SimHttp;
 use pomelo_hal::{Board, HttpFault, HttpState};
-use pomelo_widgets::preferences::{FontSizeTier, Language, SystemPreferences, ThemeMode};
+use pomelo_widgets::preferences::{Language, SystemPreferences, ThemeMode};
 
 use crate::api::Condition;
 use crate::style::PANEL;
@@ -154,12 +154,7 @@ fn english() -> (Arc<Board>, Weather) {
     let board = answering();
     let mut app = Weather::new(Arc::clone(&board));
 
-    app.set_preferences(SystemPreferences {
-        language: Language::English,
-        theme: ThemeMode::Dark,
-        font_tier: FontSizeTier::Standard,
-        ..SystemPreferences::default()
-    });
+    app.set_preferences(SystemPreferences::new(Language::English, ThemeMode::Dark));
 
     wait(&board, &mut app);
 
@@ -467,12 +462,7 @@ fn the_page_speaks_the_language_it_is_set_to() -> Result<(), iced_test::Error> {
     let board = answering();
     let mut app = Weather::new(Arc::clone(&board));
 
-    app.set_preferences(SystemPreferences {
-        language: Language::Chinese,
-        theme: ThemeMode::Dark,
-        font_tier: FontSizeTier::Standard,
-        ..SystemPreferences::default()
-    });
+    app.set_preferences(SystemPreferences::new(Language::Chinese, ThemeMode::Dark));
 
     wait(&board, &mut app);
 

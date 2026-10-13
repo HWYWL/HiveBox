@@ -20,15 +20,13 @@ pub const PAGE_PADDING: f32 = 22.0;
 /// keyboard, because the settings app sizes its own band the same way.
 pub use pomelo_widgets::touch_keyboard::band_height as keyboard_height;
 
-pub use shell::{FONT_EXTRA_SMALL, FONT_LARGE, FONT_SIZES, FONT_SMALL, FONT_STANDARD};
-
 /// The terminal's type and line cell, from the shell module that owns them.
 pub const FONT_SIZE: f32 = shell::TERM_FONT_SIZE;
 pub const LINE_HEIGHT: f32 = shell::TERM_LINE_HEIGHT;
 
 /// The active input line's cursor. Sourced from the font size cell.
 pub const CURSOR_WIDTH: f32 = 9.0;
-pub const CURSOR_HEIGHT: f32 = FONT_SMALL - 2.0;
+pub const CURSOR_HEIGHT: f32 = shell::TERM_FONT_SIZE - 2.0;
 /// Downward vertical adjustment for the cursor to align with the font's baseline.
 pub const CURSOR_OFFSET_Y: f32 = 3.0;
 

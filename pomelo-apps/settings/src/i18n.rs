@@ -66,7 +66,6 @@ pub enum Key {
     About,
     Language,
     DarkMode,
-    FontSize,
     // The one row of the list that opens no page: it asks a question, and the answer resets the
     // board. `RestartQuestion` is what the question says under its own title.
     Restart,
@@ -226,7 +225,6 @@ impl Key {
             Self::About => "关于",
             Self::Language => "语言",
             Self::DarkMode => "深色模式",
-            Self::FontSize => "字体大小",
             Self::Restart => "重启",
             Self::RestartQuestion => "设备将立即重新启动。",
             Self::MemoryUsed => "内存占用",
@@ -339,7 +337,6 @@ impl Key {
             Self::About => "About",
             Self::Language => "Language",
             Self::DarkMode => "Dark Mode",
-            Self::FontSize => "Text Size",
             Self::Restart => "Restart",
             Self::RestartQuestion => "The device will restart now.",
             Self::MemoryUsed => "Memory used",
@@ -485,7 +482,7 @@ mod tests {
 
     /// Every key, for the tests above. Kept beside them so a new variant is a compile error here
     /// too.
-    const ALL: [Key; 99] = [
+    const ALL: [Key; 98] = [
         Key::Settings,
         Key::Back,
         Key::Wifi,
@@ -501,7 +498,6 @@ mod tests {
         Key::About,
         Key::Language,
         Key::DarkMode,
-        Key::FontSize,
         Key::Restart,
         Key::RestartQuestion,
         Key::MemoryUsed,

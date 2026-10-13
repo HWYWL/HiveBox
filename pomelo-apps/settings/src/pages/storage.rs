@@ -13,7 +13,7 @@
 //! # The chip above the filesystems
 //!
 //! A page of mounted volumes answers "how much room is left", and on this board that answer is
-//! 3 MB — the built-in partition — on a chip of 16. The other 13 MB are the firmware and the
+//! 5 MB — the built-in partition — on a chip of 16. The other 11 MB are the firmware and the
 //! reservations around it, none of which is a filesystem and none of which a volume can describe.
 //! So the page is headed by the chip instead: one bar over the whole of it ([`flash_card`]), each
 //! region coloured by what it is for, and the volumes drawn below as the one region a person can
@@ -120,7 +120,7 @@ pub(crate) fn storage_page<'a>(preferences: SystemPreferences, storage: &Storage
     let mut parts: Vec<UI<'a>> = Vec::new();
 
     // The chip first: it is the answer that contains the others. The volumes below are regions of
-    // it, and "3 MB of 16" is a comparison no single volume can make about itself.
+    // it, and "5 MB of 16" is a comparison no single volume can make about itself.
     if let Some(flash) = storage.flash() {
         parts.push(flash_card(language, flash, theme));
     }

@@ -1,13 +1,13 @@
 //! What the battery page measures and colours with.
 //!
-//! Every size here comes out of one number — the font tier the system is set to — for the reason the
+//! Every size here comes out of one number — [`FONT_BASE`], the base font size — for the reason the
 //! other pages have: the reading and the curve under it are one drawing, and a curve that stayed the
 //! same height while the number above it grew would read as a decoration rather than as the same
 //! reading spread out over an hour.
 
 use iced::Color;
 
-use pomelo_widgets::preferences::{FontSizeTier, ThemeMode};
+use pomelo_widgets::preferences::{FONT_BASE, ThemeMode};
 
 /// The panel this page is laid out for: the 480 px square the rest of this project designs against.
 ///
@@ -53,7 +53,7 @@ pub const WARM_C: f32 = 40.0;
 /// the closest thing to "how warm is the power system" the hardware can answer.
 pub const HOT_C: f32 = 45.0;
 
-/// Everything the page measures with, for one font tier.
+/// Everything the page measures with.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sizes {
     /// The one number looked at rather than read: the charge.
@@ -67,14 +67,14 @@ pub struct Sizes {
 }
 
 impl Sizes {
-    /// The measurements a font tier asks for.
+    /// The measurements the base font size asks for: [`FONT_BASE`], with each field a multiple of it.
     ///
-    /// The multipliers are the whole of the design. A reading is a little over one and a half times the
-    /// tier's base, because it is the one thing in its card that is read from across a desk; the titles
-    /// and the captions step down from the base so that the cards and their sublines fit the panel
+    /// The multipliers are the whole of the design. A reading is a little over one and a half times
+    /// [`FONT_BASE`], because it is the one thing in its card that is read from across a desk; the titles
+    /// and the captions step down from it so that the cards and their sublines fit the panel
     /// without the page having to scroll to say everything.
-    pub fn of(tier: FontSizeTier) -> Self {
-        let base = tier.base_size();
+    pub fn new() -> Self {
+        let base = FONT_BASE;
 
         Self {
             reading: base * 1.6,
@@ -182,42 +182,31 @@ pub fn heat(celsius: f32) -> Color {
 mod tests {
     use super::*;
 
-    /// Every tier the system can be set to.
-    const TIERS: [FontSizeTier; 4] = [
-        FontSizeTier::ExtraSmall,
-        FontSizeTier::Small,
-        FontSizeTier::Standard,
-        FontSizeTier::Large,
-    ];
-
-    /// The one number that is *read* rather than scanned has to fit the panel at every tier: it is the
-    /// largest thing on the page and the thing a large tier would push off it.
+    /// The one number that is *read* rather than scanned has to fit the panel: it is the largest thing
+    /// on the page and the thing a large font would push off it.
     #[test]
-    fn a_reading_fits_the_panel_at_every_tier() {
-        for tier in TIERS {
-            let sizes = Sizes::of(tier);
+    fn a_reading_fits_the_panel() {
+        let sizes = Sizes::new();
 
-            // The widest reading this page draws is a charge with its sign: `100%`. Five glyphs at a
-            // little over half the type size is the width with room to spare.
-            let reading = sizes.reading * 0.62 * 5.0;
+        // The widest reading this page draws is a charge with its sign: `100%`. Five glyphs at a
+        // little over half the type size is the width with room to spare.
+        let reading = sizes.reading * 0.62 * 5.0;
 
-            assert!(
-                reading <= PANEL - 2.0 * MARGIN,
-                "{tier:?}: a reading is {reading} px wide, and the panel has {} px of room",
-                PANEL - 2.0 * MARGIN
-            );
-        }
+        assert!(
+            reading <= PANEL - 2.0 * MARGIN,
+            "a reading is {reading} px wide, and the panel has {} px of room",
+            PANEL - 2.0 * MARGIN
+        );
     }
 
-    /// A size derived from a tier is a size that grows with it.
+    /// A reading is the largest thing on the page, and the text around it steps down from it.
     #[test]
-    fn a_larger_tier_is_a_larger_page() {
-        let small = Sizes::of(FontSizeTier::Small);
-        let large = Sizes::of(FontSizeTier::Large);
+    fn a_reading_is_the_largest_thing_on_the_page() {
+        let sizes = Sizes::new();
 
-        assert!(small.reading < large.reading);
-        assert!(small.small < large.small);
-        assert!(small.header < large.header);
+        assert!(sizes.reading > sizes.header, "the reading leads the page");
+        assert!(sizes.header > sizes.text);
+        assert!(sizes.text > sizes.small);
     }
 
     /// A nearly-empty cell is red, a middling one amber, and a healthy one green — with the boundaries

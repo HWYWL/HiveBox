@@ -27,7 +27,7 @@ iced = { version = "0.14", default-features = false, features = ["thread-pool", 
 # From GitHub by revision: a sibling repository, and this project builds on its own.
 pomelo-hal = { git = "https://github.com/pomelos-on-sale/pomelo-hal.git", rev = "20eaa910f0a05cd68684d6aa868fd78457c51be9" }
 
-# System preferences (language, theme) and the font tiers they carry.
+# System preferences (language, theme) and the base font size they carry.
 pomelo-widgets = { git = "https://github.com/pomelos-on-sale/pomelo-widgets.git", rev = "f499da5cc17ef16ced6e6b1e62286bb020837a0b" }
 
 # The icons: the state badge on the status card and the foot of the note under the switch. Glyphs

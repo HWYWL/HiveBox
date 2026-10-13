@@ -627,7 +627,7 @@ impl Clock {
     /// The page: whichever tab is up, over the tab strip.
     pub fn view(&self) -> Element<'_, Message> {
         let theme = self.preferences.theme;
-        let sizes = style::Sizes::of(self.preferences.font_tier);
+        let sizes = style::Sizes::new();
 
         let mut page = column![
             container(self.body(sizes, theme))
@@ -1106,8 +1106,6 @@ fn load_alarms() -> Option<Vec<Alarm>> {
 mod tests {
     use super::*;
 
-    use pomelo_widgets::preferences::FontSizeTier;
-
     /// A clock on the simulated board. The alarm list is whatever the desktop has saved, which the
     /// tests below do not depend on: nothing here writes one.
     fn clock() -> Clock {
@@ -1289,29 +1287,16 @@ mod tests {
         assert_eq!(clock.alarms().len(), before);
     }
 
-    /// The page builds at every font tier, which is the whole of what a tier changes: the sizes and the
-    /// text drawn at them. A widget tree that only assembles at one tier is a page somebody sees once.
+    /// The page builds at the one base font size the system draws at: the sizes are chosen from
+    /// `FONT_BASE` and the text drawn at them. A widget tree that only assembles with some preference
+    /// is a page somebody sees once.
     #[test]
-    fn the_page_is_drawn_at_every_font_tier() {
-        let tiers = [
-            FontSizeTier::ExtraSmall,
-            FontSizeTier::Small,
-            FontSizeTier::Standard,
-            FontSizeTier::Large,
-        ];
+    fn the_page_is_drawn_at_the_base_font_size() {
+        let mut clock = clock();
 
-        for font_tier in tiers {
-            let mut clock = clock();
-
-            clock.set_preferences(SystemPreferences {
-                font_tier,
-                ..SystemPreferences::default()
-            });
-
-            for tab in Tab::ALL {
-                clock.update(Message::Tab(tab));
-                let _ = clock.view();
-            }
+        for tab in Tab::ALL {
+            clock.update(Message::Tab(tab));
+            let _ = clock.view();
         }
     }
 }

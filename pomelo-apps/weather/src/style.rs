@@ -1,18 +1,18 @@
 //! What the forecast page measures and colours with.
 //!
-//! Every size comes out of one number — the font tier the system is set to — for the reason the other
+//! Every size comes out of one number — [`FONT_BASE`], the base font size — for the reason the other
 //! pages have: the temperature is *the* thing on this page, and everything else is a caption under it.
 //! A page whose cards kept their size while the numbers in them grew would read as a page of equally
 //! important numbers, which is the one thing a forecast is not.
 
 use iced::Color;
 
-use pomelo_widgets::preferences::{FontSizeTier, ThemeMode};
+use pomelo_widgets::preferences::{FONT_BASE, ThemeMode};
 
 /// The panel this page is laid out for: the 480 px square the rest of this project designs against.
 ///
 /// Only the tests read it, and they read it for one thing: whether a day's row — a label, a glyph, a
-/// name and two temperatures — still fits across the panel at the largest tier.
+/// name and two temperatures — still fits across the panel.
 pub const PANEL: f32 = 480.0;
 
 /// The room between the page and the panel, and between the cards.
@@ -24,7 +24,7 @@ pub const RADIUS: f32 = 12.0;
 
 /// How wide the label at the left of a day's row is.
 ///
-/// Sized for `今天` and for the longest date the page falls back to, `10-16`, at the largest tier:
+/// Sized for `今天` and for the longest date the page falls back to, `10-16`, at the base size:
 /// a gutter that clipped either would clip the only thing saying which day the row is about.
 pub const DAY_LABEL: f32 = 62.0;
 
@@ -34,7 +34,7 @@ pub const DAY_LABEL: f32 = 62.0;
 /// whose temperatures wandered with the weather would be a card nobody could read down.
 pub const DAY_NAME: f32 = 108.0;
 
-/// Everything the page measures with, for one font tier.
+/// Everything the page measures with, at the base font size [`FONT_BASE`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sizes {
     /// The temperature, which is the one number on the page read from across a room.
@@ -50,13 +50,13 @@ pub struct Sizes {
 }
 
 impl Sizes {
-    /// The measurements a font tier asks for.
+    /// The measurements the base font size asks for: [`FONT_BASE`], with each field a multiple of it.
     ///
     /// The multipliers are the whole of the design: the temperature is twice the base because it is the
     /// page, and the rest steps down from the base so that five day rows, their labels and the card
     /// around them fit the panel.
-    pub fn of(tier: FontSizeTier) -> Self {
-        let base = tier.base_size();
+    pub fn new() -> Self {
+        let base = FONT_BASE;
 
         Self {
             reading: base * 2.0,
@@ -132,16 +132,20 @@ pub fn bad() -> Color {
 mod tests {
     use super::*;
 
-    /// Every size a tier asks for grows with the tier, and the temperature stays the biggest thing.
+    /// Every size is the expected multiple of the base, and the temperature stays the biggest thing.
     #[test]
-    fn the_sizes_follow_the_tier() {
-        let small = Sizes::of(FontSizeTier::Small);
-        let large = Sizes::of(FontSizeTier::Large);
+    fn the_sizes_are_multiples_of_the_base_font_size() {
+        let size = Sizes::new();
 
-        assert!(small.reading < large.reading);
-        assert!(small.tiny < small.small, "the smallest step is still a step");
-        assert!(small.reading > small.glyph, "and the reading is the biggest");
-        assert!(small.glyph > small.text);
+        assert_eq!(size.reading, FONT_BASE * 2.0);
+        assert_eq!(size.glyph, FONT_BASE * 1.5);
+        assert_eq!(size.text, FONT_BASE * 0.9);
+        assert_eq!(size.small, FONT_BASE * 0.72);
+        assert_eq!(size.tiny, FONT_BASE * 0.58);
+
+        assert!(size.tiny < size.small, "the smallest step is still a step");
+        assert!(size.reading > size.glyph, "and the reading is the biggest");
+        assert!(size.glyph > size.text);
     }
 
     /// The colours that mean something on this page mean four different things.

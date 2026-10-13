@@ -1,12 +1,12 @@
 //! What the channel page measures and colours with.
 //!
-//! Every size comes out of one number — the font tier the system is set to — for the reason the other
+//! Every size comes out of one number — [`FONT_BASE`], the base font size — for the reason the other
 //! pages have: the chart, the map and the list are one drawing of the same scan, and a chart that kept
 //! its height while the numbers under it grew would read as a decoration rather than as the reading.
 
 use iced::Color;
 
-use pomelo_widgets::preferences::{FontSizeTier, ThemeMode};
+use pomelo_widgets::preferences::{FONT_BASE, ThemeMode};
 
 /// The panel this page is laid out for: the 480 px square the rest of this project designs against.
 ///
@@ -35,15 +35,15 @@ pub const MAP_ROW: f32 = 17.0;
 
 /// How wide the signal map's label column is.
 ///
-/// Sized for the longest label the map has — `-100`, four glyphs — at the largest tier, where the tiny
-/// step is 17 px: a gutter that fitted the three-glyph labels and clipped the fourth would clip exactly
+/// Sized for the longest label the map has — `-100`, four glyphs — at the base size, where the tiny
+/// step is 14 px: a gutter that fitted the three-glyph labels and clipped the fourth would clip exactly
 /// the weakest band, which is the one a person looks at.
 pub const MAP_LABEL: f32 = 40.0;
 
 /// The side of one network's square on the signal map.
 pub const DOT: f32 = 9.0;
 
-/// Everything the page measures with, for one font tier.
+/// Everything the page measures with, at the base font size [`FONT_BASE`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sizes {
     /// The one number that is advice rather than a reading: the channel to use.
@@ -57,13 +57,13 @@ pub struct Sizes {
 }
 
 impl Sizes {
-    /// The measurements a font tier asks for.
+    /// The measurements the base font size asks for: [`FONT_BASE`], with each field a multiple of it.
     ///
     /// The multipliers are the whole of the design. The recommendation is the one thing on the page
-    /// that is read from across a desk; everything else steps down from the tier's base so that a
+    /// that is read from across a desk; everything else steps down from the base so that a
     /// thirteen-column chart and its labels fit the panel without the page having to be wide.
-    pub fn of(tier: FontSizeTier) -> Self {
-        let base = tier.base_size();
+    pub fn new() -> Self {
+        let base = FONT_BASE;
 
         Self {
             reading: base * 1.6,
@@ -190,15 +190,17 @@ mod tests {
         assert_eq!(signal(-95), bad(), "none");
     }
 
-    /// Every size a tier asks for grows with the tier, so that no page is drawn for the wrong reader.
+    /// Every size is the expected multiple of the base, so that no page is drawn for the wrong reader.
     #[test]
-    fn the_sizes_follow_the_tier() {
-        let small = Sizes::of(FontSizeTier::Small);
-        let large = Sizes::of(FontSizeTier::Large);
+    fn the_sizes_are_multiples_of_the_base_font_size() {
+        let size = Sizes::new();
 
-        assert!(small.reading < large.reading);
-        assert!(small.text <= large.text);
-        assert!(small.tiny < small.small, "the smallest step is still a step");
-        assert!(small.reading > small.text, "and the reading is the biggest thing");
+        assert_eq!(size.reading, FONT_BASE * 1.6);
+        assert_eq!(size.text, FONT_BASE * 0.9);
+        assert_eq!(size.small, FONT_BASE * 0.68);
+        assert_eq!(size.tiny, FONT_BASE * 0.58);
+
+        assert!(size.tiny < size.small, "the smallest step is still a step");
+        assert!(size.reading > size.text, "and the reading is the biggest thing");
     }
 }

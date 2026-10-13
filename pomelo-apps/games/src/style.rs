@@ -1,12 +1,12 @@
 //! What the games pages measure and colour with.
 //!
-//! # The one page in this project whose layout is not a font tier
+//! # The one page in this project whose layout is not the base font size
 //!
-//! Every other page scales its sizes from the font tier and lets the cards be as tall as they turn
-//! out. This one cannot: a 2048 board is a square, and a square on a 480 px panel is 328 px whatever
-//! somebody's text size is. So the board's own measurements are constants here, and the *chrome*
-//! around it — the title, the caption, the buttons — comes out of the tier like everything else. The
-//! panel has room for both, which is the arithmetic in [`BOARD`]'s comment.
+//! Every other page scales its sizes from the base font size and lets the cards be as tall as they
+//! turn out. This one cannot: a 2048 board is a square, and a square on a 480 px panel is 328 px
+//! whatever somebody's text size is. So the board's own measurements are constants here, and the
+//! *chrome* around it — the title, the caption, the buttons — comes out of the base size like
+//! everything else. The panel has room for both, which is the arithmetic in [`BOARD`]'s comment.
 //!
 //! # The tiles are not themed
 //!
@@ -17,7 +17,7 @@
 
 use iced::Color;
 
-use pomelo_widgets::preferences::{FontSizeTier, ThemeMode};
+use pomelo_widgets::preferences::{ThemeMode, FONT_BASE};
 
 /// The panel this page is laid out for: the 480 px square the rest of this project designs against.
 pub const PANEL: f32 = 480.0;
@@ -42,6 +42,14 @@ pub const TILE_GAP: f32 = 8.0;
 /// The whole board: four tiles and the three gaps between them.
 pub const BOARD: f32 = TILE * 4.0 + TILE_GAP * 3.0;
 
+/// The side of one cell of the snake's board.
+///
+/// The other game's board is 304 px ([`BOARD`]) and so is this one: sixteen cells of 19 px, which
+/// divides exactly, and no gaps, because a snake is a body rather than a set of tiles and its
+/// segments have to touch. The two games are then the same square on the page, which is what a
+/// person changing games sees: the same board, played a different way.
+pub const SNAKE_CELL: f32 = 19.0;
+
 /// The height of the pad's buttons. Four of them, each as wide as a tile, and their gaps are the
 /// tiles' — so the pad is exactly as wide as the board and each arrow stands under the column or the
 /// row it moves.
@@ -57,7 +65,7 @@ pub const PAD: f32 = 48.0;
 /// board would have to be re-fitted. It is here so that the change starts in one place.
 pub const LINE: f32 = 1.2;
 
-/// Everything the page's chrome measures with, for one font tier.
+/// Everything the page's chrome measures with, from one base font size.
 ///
 /// The board is not in here. See the module's own note: the tiles are the game's size and the text on
 /// this page is the reader's.
@@ -72,9 +80,11 @@ pub struct Sizes {
 }
 
 impl Sizes {
-    /// The measurements a font tier asks for.
-    pub fn of(tier: FontSizeTier) -> Self {
-        let base = tier.base_size();
+    /// The measurements the base font size asks for.
+    ///
+    /// Every field is a multiple of `FONT_BASE`.
+    pub fn new() -> Self {
+        let base = FONT_BASE;
 
         Self {
             title: base * 1.15,
@@ -86,10 +96,11 @@ impl Sizes {
 
 /// How big the number in a tile is drawn.
 ///
-/// Sized from the tile rather than from the font tier, and it is the one piece of text in this project
-/// that is: the number has to fit the cell, and the cell is 76 px because the board is 328 px because
-/// the panel is 480. A tile of `2048` at the size of a tile of `2` would touch both of its walls, so
-/// the number steps down as it gains digits — which is what the real game does, and for this reason.
+/// Sized from the tile rather than from the base font size, and it is the one piece of text in this
+/// project that is: the number has to fit the cell, and the cell is 76 px because the board is 328 px
+/// because the panel is 480. A tile of `2048` at the size of a tile of `2` would touch both of its
+/// walls, so the number steps down as it gains digits — which is what the real game does, and for
+/// this reason.
 pub fn tile_text(value: u32) -> f32 {
     match value {
         0..=99 => TILE * 0.42,
@@ -153,6 +164,36 @@ pub fn won() -> Color {
     Color::from_rgb8(0xED, 0xC2, 0x2E)
 }
 
+/// What is drawn in one cell of the snake's board.
+///
+/// Four things, and the empty one is a thing rather than an absence: the board is drawn as 256 cells
+/// so that the snake can be at any of them, and a cell with nothing in it is the frame's colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Part {
+    Empty,
+    Body,
+    Head,
+    Apple,
+}
+
+/// The colour of one cell of the snake's board.
+///
+/// Unlike [`tile`], and deliberately: 2048 has a palette the game is recognisable by, and a snake has
+/// a body, a head and an apple. So these are the theme's — a green that reads as a body on both
+/// backgrounds, a brighter one for the head so that the front of a long snake is findable, and the
+/// apple in the one colour nothing else on this page is.
+pub fn snake(part: Part, theme: ThemeMode) -> Color {
+    match (part, theme) {
+        (Part::Empty, _) => board(theme),
+        (Part::Body, ThemeMode::Dark) => Color::from_rgb8(0x3D, 0xB0, 0x6B),
+        (Part::Body, ThemeMode::Light) => Color::from_rgb8(0x2E, 0x8B, 0x57),
+        (Part::Head, ThemeMode::Dark) => Color::from_rgb8(0x5E, 0xD9, 0x8B),
+        (Part::Head, ThemeMode::Light) => Color::from_rgb8(0x3F, 0xAE, 0x6E),
+        (Part::Apple, ThemeMode::Dark) => Color::from_rgb8(0xE8, 0x5D, 0x52),
+        (Part::Apple, ThemeMode::Light) => Color::from_rgb8(0xD1, 0x4A, 0x40),
+    }
+}
+
 /// The ink for the things that are read: the title, a game's name, the arrows.
 pub fn ink(theme: ThemeMode) -> Color {
     match theme {
@@ -196,18 +237,18 @@ pub fn pressed() -> Color {
 mod tests {
     use super::*;
 
-    /// The board fits the panel, at the largest font tier, with the pad and both margins.
+    /// The board fits the panel, at the base font size, with the pad and both margins.
     ///
     /// The arithmetic in [`TILE`]'s comment, as a test rather than as a comment, because the way this
     /// breaks is somebody making the tiles a little bigger for a desktop window: on the panel it is
-    /// the difference between a board and a board with its last row cut off. The largest tier is the
-    /// one that matters — the board cannot grow with it, so everything else has to fit around it.
+    /// the difference between a board and a board with its last row cut off. The board cannot grow
+    /// with the text size, so everything else has to fit around it.
     #[test]
     fn the_board_fits_the_panel() {
-        let sizes = Sizes::of(FontSizeTier::Large);
+        let sizes = Sizes::new();
 
         // The header's height is the heading's two lines: a page's title and the line under it. The
-        // buttons beside it are shorter than that at every tier, so they are not what the row measures.
+        // buttons beside it are shorter than that, so they are not what the row measures.
         let header = sizes.title * LINE + 2.0 + sizes.small * LINE;
         let used = MARGIN * 2.0 + header + GAP * 2.0 + BOARD + PAD;
 
@@ -283,5 +324,43 @@ mod tests {
         assert_ne!(ink(theme), board(theme));
         assert_ne!(won(), ink(theme));
         assert_eq!(won(), tile(2048, theme).0, "the game is named for it");
+    }
+
+    /// The snake's board is the same square as the other game's: sixteen cells of one size, exactly.
+    ///
+    /// Sixteen is not divisible by most numbers a person might pick for a cell, which is the whole
+    /// reason this is a test: a cell of 18 px or 20 would be a board a few pixels short of or past the
+    /// other one's, and the page would move when somebody changed games.
+    #[test]
+    fn the_snake_board_is_the_same_square() {
+        let side = crate::snake::SIDE as f32;
+
+        assert_eq!(SNAKE_CELL * side, BOARD);
+        assert_eq!(SNAKE_CELL * side, TILE * 4.0 + TILE_GAP * 3.0);
+    }
+
+    /// The four things a snake's cell can be drawn as are four colours, in both themes.
+    #[test]
+    fn every_part_of_the_snake_is_its_own_colour() {
+        let parts = [Part::Empty, Part::Body, Part::Head, Part::Apple];
+
+        for theme in [ThemeMode::Dark, ThemeMode::Light] {
+            for (at, part) in parts.iter().enumerate() {
+                for other in &parts[at + 1..] {
+                    assert_ne!(
+                        snake(*part, theme),
+                        snake(*other, theme),
+                        "{part:?} and {other:?} are drawn the same"
+                    );
+                }
+            }
+        }
+
+        // An empty cell is the frame it is a hole in, and the head is not the body: those are the two
+        // that would quietly break the page if they were the same colour.
+        for theme in [ThemeMode::Dark, ThemeMode::Light] {
+            assert_eq!(snake(Part::Empty, theme), board(theme));
+            assert_ne!(snake(Part::Head, theme), snake(Part::Body, theme));
+        }
     }
 }

@@ -18,8 +18,8 @@
 //! A canvas in this stack can fill and stroke, and it cannot draw text — `fill_text` is a `todo!()`
 //! in the geometry backend, because doing it properly means handing the rasteriser a font. So the
 //! percentage and its label are ordinary `text` elements stacked over the canvas by
-//! [`crate::pages::summary`], which is also what keeps them in the app's own font and its tier
-//! preferences rather than in a canvas's.
+//! [`crate::pages::summary`], which is also what keeps them in the app's own font rather than in a
+//! canvas's.
 
 use iced::advanced::graphics::geometry::Renderer as GeometryRenderer;
 use iced::mouse;

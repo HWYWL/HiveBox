@@ -232,7 +232,7 @@ impl TaskViewer {
     /// footnote is not.
     pub fn view(&self) -> Element<'_, Message> {
         let theme = self.preferences.theme;
-        let sizes = style::Sizes::of(self.preferences.font_tier);
+        let sizes = style::Sizes::new();
         let ink = style::ink(theme);
         let muted = style::muted(theme);
 
@@ -457,7 +457,7 @@ struct Field {
     /// How wide the column is, in multiples of the body text size — or `None` for the one column that
     /// takes whatever is left, which is the task names and only ever the task names.
     ///
-    /// Multiples rather than pixels, because the whole table scales with the font tier: a column
+    /// Multiples rather than pixels, because the whole table scales with the base font size: a column
     /// measured in pixels would clip its own head the moment the system's text size went up. See
     /// [`style::Sizes::text`].
     width: Option<f32>,
@@ -672,7 +672,7 @@ mod tests {
         );
     }
 
-    /// The table and the meters fit the panel at every font tier, in both languages, with room kept
+    /// The table and the meters fit the panel at the base font size, in both languages, with room kept
     /// clear on the right for the list's scrollbar.
     ///
     /// This is the test the page needed and did not have. Two things went wrong without it: the head row
@@ -682,8 +682,6 @@ mod tests {
     /// cut in half. Both are arithmetic, which is what makes them worth checking by hand.
     #[test]
     fn the_table_and_the_meters_fit_the_panel() {
-        use pomelo_widgets::preferences::FontSizeTier;
-
         /// How wide `text` is, as a column lays it out.
         ///
         /// An estimate, and a deliberately pessimistic one for what it is used on: a full-width character
@@ -696,76 +694,67 @@ mod tests {
                 .sum()
         }
 
-        let tiers = [
-            FontSizeTier::ExtraSmall,
-            FontSizeTier::Small,
-            FontSizeTier::Standard,
-            FontSizeTier::Large,
-        ];
+        let sizes = style::Sizes::new();
 
-        for tier in tiers {
-            let sizes = style::Sizes::of(tier);
+        for language in [Language::Chinese, Language::English] {
+            let columns = columns(language);
 
-            for language in [Language::Chinese, Language::English] {
-                let columns = columns(language);
+            // Every head fits over its own column, and so does the widest value that goes under it.
+            // The values are the same in both languages — a number, a byte count, one character — so
+            // they are the *same* list for both; what changes between the two is the head above them,
+            // and the state column's single character, which is why they are checked per language.
+            let widest = ["main *", "运", "29", "13.5K", "-"];
 
-                // Every head fits over its own column, and so does the widest value that goes under it.
-                // The values are the same in both languages — a number, a byte count, one character — so
-                // they are the *same* list for both; what changes between the two is the head above them,
-                // and the state column's single character, which is why they are checked per language.
-                let widest = ["main *", "运", "29", "13.5K", "-"];
-
-                for (column, widest) in columns.iter().zip(widest) {
-                    let Some(width) = column.width else {
-                        continue;
-                    };
-                    let room = width * sizes.text;
-
-                    assert!(
-                        width_of(column.head, sizes.small) <= room,
-                        "{tier:?} {language:?}: 「{}」 needs {} px of a {room} px column",
-                        column.head,
-                        width_of(column.head, sizes.small)
-                    );
-                    assert!(
-                        width_of(widest, sizes.text) <= room,
-                        "{tier:?}: {widest} needs {} px of a {room} px column",
-                        width_of(widest, sizes.text)
-                    );
-                }
-
-                // And what the fixed columns leave for the names is a name's worth. The scrollbar is
-                // subtracted because it is subtracted on the panel: see [`style::SCROLLBAR`].
-                let fixed: f32 = columns
-                    .iter()
-                    .filter_map(|column| column.width)
-                    .map(|width| width * sizes.text)
-                    .sum();
-                let gaps = style::CELL_PAD * (columns.len() - 1) as f32;
-                let names = style::PANEL - style::MARGIN * 2.0 - style::SCROLLBAR - fixed - gaps;
-
-                // The longest name this board has is `board_pwr_mon` — thirteen characters — and a
-                // lowercase Latin character measures half the body size on the panel. Half, and not the
-                // two thirds above: that figure is for capitals and digits, and using it here would be
-                // this test arguing with a ruler.
-                let longest = 13.0 * 0.5 * sizes.text;
+            for (column, widest) in columns.iter().zip(widest) {
+                let Some(width) = column.width else {
+                    continue;
+                };
+                let room = width * sizes.text;
 
                 assert!(
-                    names >= longest,
-                    "{tier:?} {language:?}: {names} px of name column for a name that takes {longest} px"
+                    width_of(column.head, sizes.small) <= room,
+                    "{language:?}: 「{}」 needs {} px of a {room} px column",
+                    column.head,
+                    width_of(column.head, sizes.small)
+                );
+                assert!(
+                    width_of(widest, sizes.text) <= room,
+                    "{language:?}: {widest} needs {} px of a {room} px column",
+                    width_of(widest, sizes.text)
                 );
             }
 
-            // The meter's label column, which is the one measurement that is not a table column: it has
-            // to hold the longest label the page can write, 外部内存, in the size the labels are set in.
-            for label in ["外部内存", "PSRAM"] {
-                assert!(
-                    width_of(label, sizes.small) <= sizes.meter_label,
-                    "{tier:?}: {label} needs {} px of a {} px label column",
-                    width_of(label, sizes.small),
-                    sizes.meter_label
-                );
-            }
+            // And what the fixed columns leave for the names is a name's worth. The scrollbar is
+            // subtracted because it is subtracted on the panel: see [`style::SCROLLBAR`].
+            let fixed: f32 = columns
+                .iter()
+                .filter_map(|column| column.width)
+                .map(|width| width * sizes.text)
+                .sum();
+            let gaps = style::CELL_PAD * (columns.len() - 1) as f32;
+            let names = style::PANEL - style::MARGIN * 2.0 - style::SCROLLBAR - fixed - gaps;
+
+            // The longest name this board has is `board_pwr_mon` — thirteen characters — and a
+            // lowercase Latin character measures half the body size on the panel. Half, and not the
+            // two thirds above: that figure is for capitals and digits, and using it here would be
+            // this test arguing with a ruler.
+            let longest = 13.0 * 0.5 * sizes.text;
+
+            assert!(
+                names >= longest,
+                "{language:?}: {names} px of name column for a name that takes {longest} px"
+            );
+        }
+
+        // The meter's label column, which is the one measurement that is not a table column: it has
+        // to hold the longest label the page can write, 外部内存, in the size the labels are set in.
+        for label in ["外部内存", "PSRAM"] {
+            assert!(
+                width_of(label, sizes.small) <= sizes.meter_label,
+                "「{label}」 needs {} px of a {} px label column",
+                width_of(label, sizes.small),
+                sizes.meter_label
+            );
         }
     }
 

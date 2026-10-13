@@ -25,7 +25,7 @@ use pomelo_hal::{
 use pomelo_material_symbols::Icon;
 use pomelo_widgets::touch_keyboard::{KeyAction, KeyboardMode};
 
-use settings::{FontSizeTier, Language, Message, Settings, SettingsSection, ThemeMode};
+use settings::{Language, Message, Settings, SettingsSection, ThemeMode};
 
 /// The reads these tests make, in the names they were written with.
 ///
@@ -41,7 +41,6 @@ trait WifiReads {
     fn password_revealed(&self) -> bool;
     fn language(&self) -> Language;
     fn theme_mode(&self) -> ThemeMode;
-    fn font_tier(&self) -> FontSizeTier;
 }
 
 impl WifiReads for Settings {
@@ -75,10 +74,6 @@ impl WifiReads for Settings {
 
     fn theme_mode(&self) -> ThemeMode {
         self.preferences().theme
-    }
-
-    fn font_tier(&self) -> FontSizeTier {
-        self.preferences().font_tier
     }
 }
 
@@ -690,8 +685,8 @@ const STORAGE_PAGE: f32 = 2400.0;
 
 /// The page says where the whole chip went, and not only the part of it a filesystem can use.
 ///
-/// The built-in volume is 3 MB; the board's flash is 16 MB. A page of volumes alone answers "how much
-/// room is left" and never says what the other 13 MB are for, which is the question a person opening
+/// The built-in volume is 5 MB; the board's flash is 16 MB. A page of volumes alone answers "how much
+/// room is left" and never says what the other 11 MB are for, which is the question a person opening
 /// a storage page is asking.
 #[test]
 fn the_storage_page_maps_the_whole_flash_chip() -> Result<(), iced_test::Error> {
@@ -704,9 +699,14 @@ fn the_storage_page_maps_the_whole_flash_chip() -> Result<(), iced_test::Error> 
         .flash()
         .expect("the board's flash is always readable");
 
-    // The chip, from the map's own numbers: 16 MB of NOR, and every byte of it claimed but the tail.
+    // The chip, from the map's own numbers: 16 MB of NOR, and every byte of it claimed — the app
+    // partition gave back what the two dropped glyph tables freed, and the filesystem took all of it.
     assert_eq!(flash.total_bytes, 16 * 1024 * 1024);
-    assert_eq!(flash.allocated_bytes(), 16 * 1024 * 1024 - 0xF_0000);
+    assert_eq!(
+        flash.allocated_bytes(),
+        16 * 1024 * 1024,
+        "the table reaches the end of the chip"
+    );
 
     let mut ui = screen(&settings, STORAGE_PAGE);
 
@@ -1305,26 +1305,13 @@ fn the_theme_can_be_switched() {
 }
 
 #[test]
-fn the_font_tier_can_be_cycled() {
-    let mut settings = english();
-    assert_eq!(settings.font_tier(), FontSizeTier::Standard);
-    assert_eq!(settings.font_tier().base_size(), 24.0);
-
-    settings.update(Message::CycleFontTier);
-    assert_eq!(settings.font_tier(), FontSizeTier::Large);
-    assert_eq!(settings.font_tier().base_size(), 30.0);
-
-    settings.update(Message::CycleFontTier);
-    assert_eq!(settings.font_tier(), FontSizeTier::ExtraSmall);
-    assert_eq!(settings.font_tier().base_size(), 18.0);
-
-    settings.update(Message::CycleFontTier);
-    assert_eq!(settings.font_tier(), FontSizeTier::Small);
-    assert_eq!(settings.font_tier().base_size(), 20.0);
-
-    settings.update(Message::CycleFontTier);
-    assert_eq!(settings.font_tier(), FontSizeTier::Standard);
-    assert_eq!(settings.font_tier().base_size(), 24.0);
+fn the_font_size_is_fixed_and_baked() {
+    // The theme page offered four tiers and cycled them; the tiers are gone, so what is left to check
+    // is the one size everything is drawn at. It has to be the size the shipped baked table was cut
+    // at — `iced-pomelo-winit`'s `fonts.rs` embeds that one table and nothing else — because the
+    // lookup compares the size bit for bit: 24.0 here and 24.0 there, or the table is never read.
+    assert_eq!(pomelo_widgets::FONT_BASE, 24.0);
+    assert_eq!(english().preferences().font_size(), pomelo_widgets::FONT_BASE);
 }
 
 // =============================================================================
@@ -1440,7 +1427,7 @@ fn the_readout_says_what_the_board_says() {
     );
 
     // The storage gauge is the *built-in* volume, not the card: the simulator's card is a 32 GB one
-    // that is 43% full, and its built-in partition holds the firmware's `welcome.txt` in 3 MB —
+    // that is 43% full, and its built-in partition holds the firmware's `welcome.txt` in 5 MB —
     // which is this. A ring showing the card's number here would be the one design decision this
     // asserts the opposite of.
     assert!(
