@@ -39,12 +39,44 @@ CONFIG_FREERTOS_HZ=1000
 # asks instead, gives the same answer for nothing.
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 
+# Run time stats: how much of the counter each task has used, which is the only thing on
+# this board that can tell a working core from an idle one.
+#
+# The trace facility above fills in every column of the task list except this one: without
+# these stats `uxTaskGetSystemState` leaves each task's `ulRunTimeCounter` at zero, and a
+# list that can say *where* a task runs but never *how much* cannot answer the question
+# this board's second core raises — whether anything is on it. `IDLE0` and `IDLE1` are the
+# two rows that answer it: the idle task is what a core runs when nothing else will, so
+# its share of the total *is* that core's spare time, and neither core's count is
+# visible in any other reading here.
+#
+# The price is a counter read on every context switch, and this image switches tasks a
+# few thousand times a second. That is the trade: a measurement knob worth having on
+# while something is being looked at, and the first thing to turn back off when the cost
+# of a context switch is itself what is being looked at.
+#
+# The counter's clock source and width are deliberately left at IDF's defaults. Nothing
+# downstream depends on either: the C side takes both from the field FreeRTOS fills in,
+# and every share is computed against the total that came out of the same read, so a
+# different clock in a later IDF changes the numbers and not the arithmetic.
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+
 # Console over USB-Serial-JTAG for Waveshare AMOLED board
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 
 # Main task stack size (Rust runtime benefits from adequate stack: 64KB)
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=65536
+
+# The core the application runs on.
+#
+# `app_main` never returns: it becomes the iced event loop, and the whole Rust side — the
+# compositor, the rasteriser, the panel handoff — lives inside it for the life of the image.
+# IDF's default for that task is CPU0, which is also where the Wi-Fi and TCP/IP tasks live, so
+# a frame and a packet end up queued for the same core and a network burst lands in the middle
+# of a repaint. Measured on this board the other core is otherwise idle — IDLE1 sits at 99.9%
+# of it — and that is the headroom this claims: the radio keeps CPU0, the panel gets CPU1.
+CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1=y
 
 # Completely disable Brownout Detector to prevent battery voltage ripple reset loops
 # CONFIG_ESP_BROWNOUT_DET is not set

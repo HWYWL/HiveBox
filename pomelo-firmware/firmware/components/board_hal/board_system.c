@@ -194,6 +194,35 @@ esp_err_t hal_system_get_epoch(int64_t *out_epoch)
  * Tasks
  * ------------------------------------------------------------------------- */
 
+#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+/**
+ * @brief The run time counter's own type, asked of the compiler.
+ *
+ * Not spelled out, because its width is not one thing: `ulRunTimeCounter` is a 32-bit
+ * counter in one FreeRTOS and a 64-bit one in another, and IDF's clock source has as
+ * much to say about it as the kernel does. A width written down here would be a second
+ * copy of a decision made somewhere else, and on the day the two disagreed every number
+ * out of this file would be garbage. `__typeof__` is how there is only ever one copy:
+ * of the field FreeRTOS itself fills in.
+ */
+typedef __typeof__(((TaskStatus_t *)0)->ulRunTimeCounter) runtime_counter_t;
+
+/**
+ * @brief A run time counter reading as microseconds.
+ *
+ * The counter counts whatever its clock counts, and IDF's two clock sources count
+ * different things: `esp_timer` counts microseconds, the CPU clock counts cycles. The
+ * conversion is what keeps `hal_system_task_t::run_time_us` named after what it actually
+ * holds under either, and what makes two boards' readings comparable. Both branches are
+ * one division by a build-time constant, which is to say the conversion is free.
+ */
+#if defined(CONFIG_FREERTOS_RUN_TIME_STATS_USING_CPU_CLK)
+#define RUNTIME_COUNTER_TO_US(ticks) ((uint64_t)(ticks) / (uint64_t)CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ)
+#else
+#define RUNTIME_COUNTER_TO_US(ticks) ((uint64_t)(ticks))
+#endif
+#endif /* CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS */
+
 esp_err_t hal_system_get_tasks(hal_system_tasks_t *out)
 {
     if (out == NULL) {
@@ -204,12 +233,26 @@ esp_err_t hal_system_get_tasks(hal_system_tasks_t *out)
 
 #if CONFIG_FREERTOS_USE_TRACE_FACILITY
     /* `uxTaskGetSystemState` is the one read that fills in everything a list wants at
-     * once — name, state, priority, core and stack high-water mark — and it is also the
-     * only one of these reads that costs anything: the scheduler is briefly held while
-     * the task list is walked. That is why a page showing this wants it once a second
-     * and not once a frame. */
+     * once — name, state, priority, core, stack high-water mark and, when this image
+     * keeps them, run times — and it is also the only one of these reads that costs
+     * anything: the scheduler is briefly held while the task list is walked. That is why
+     * a page showing this wants it once a second and not once a frame. */
     TaskStatus_t statuses[HAL_SYSTEM_MAX_TASKS];
-    UBaseType_t   count = uxTaskGetSystemState(statuses, HAL_SYSTEM_MAX_TASKS, NULL);
+
+#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+    /* The counter's total, filled by the call below and passed on to the other side as
+     * one number rather than summed from the array: see the note on
+     * `hal_system_tasks_t::total_run_time_us` for why the two are not the same number. */
+    runtime_counter_t total_run_time = 0;
+    UBaseType_t count = uxTaskGetSystemState(statuses, HAL_SYSTEM_MAX_TASKS, &total_run_time);
+#else
+    /* No stats in this image, so no total is asked for: NULL rather than a counter
+     * nothing would advance, because there is no total to be had. This side cannot say
+     * "there is no count here" — all it can hand over is the zero a caller starts from
+     * anyway — and a count of none reading as none is what the field's note settles. */
+    UBaseType_t count = uxTaskGetSystemState(statuses, HAL_SYSTEM_MAX_TASKS, NULL);
+#endif
+
     TaskHandle_t  self  = xTaskGetCurrentTaskHandle();
 
     if (count > HAL_SYSTEM_MAX_TASKS) {
@@ -245,9 +288,30 @@ esp_err_t hal_system_get_tasks(hal_system_tasks_t *out)
 
         task->stack_free_bytes = (uint32_t)statuses[i].usStackHighWaterMark;
         task->current          = (statuses[i].xHandle == self) ? 1 : 0;
+
+        /* How much of the counter this one has used. The two idle tasks are the rows
+         * that make this worth reading: an idle task runs exactly when its core has
+         * nothing else to run, so `IDLE0`'s and `IDLE1`'s shares of `total_run_time_us`
+         * *are* the two cores' spare time, and no other reading here can say. */
+#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+        task->run_time_us = RUNTIME_COUNTER_TO_US(statuses[i].ulRunTimeCounter);
+#else
+        /* Left at the zero the `memset` gave it, which is the value the field's own note
+         * calls the same one a task that has not run yet reports. */
+        task->run_time_us = 0;
+#endif
     }
 
     out->count = (uint32_t)count;
+
+#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+    out->total_run_time_us = RUNTIME_COUNTER_TO_US(total_run_time);
+#else
+    /* Left at zero, which is the total a reader takes no share of: see the field's note
+     * for the one case where a scheduler reports a real total of zero. */
+    out->total_run_time_us = 0;
+#endif
+
 #else
     /* Built without the trace facility: there is no per-task read to make, and an empty
      * list is the honest answer. A list of made-up tasks would be worse than none. */

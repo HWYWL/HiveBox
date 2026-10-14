@@ -3633,9 +3633,9 @@ static esp_err_t handle_display(httpd_req_t *req)
 /* The screen as a picture.
  *
  * The panel cannot be read back — the CO5300 has no path that returns its GRAM over QSPI — so the
- * picture is the shadow copy the display driver keeps on the way past (see `s_shadow` in
- * board_display.c). What that copy holds is exactly what the panel was last given, which is exactly
- * what is on the screen.
+ * picture is the frame buffer the display driver was last given (see `s_last_pixels` in
+ * board_display.c). That buffer is the whole frame the panel was handed, so it is exactly what is on
+ * the screen, and nothing has to be kept on the way past for this handler to find it ready.
  *
  * BMP and not PNG: twenty-four bits per pixel, bottom-up rows, and no library. It is the one image
  * format whose header is thirty bytes of arithmetic and whose body is the pixels, and a browser shows
@@ -3644,7 +3644,7 @@ static esp_err_t handle_screenshot(httpd_req_t *req)
 {
     if (!hal_display_has_capture()) {
         return send_error(req, "501 Not Implemented", "no_capture",
-                          "no PSRAM for the shadow frame");
+                          "no frame has reached the panel yet");
     }
 
     const int width  = BOARD_DISPLAY_WIDTH;
@@ -3662,7 +3662,7 @@ static esp_err_t handle_screenshot(httpd_req_t *req)
     }
 
     /* Sent in bands rather than as one buffer: the whole image is 691 KB of a page's answer, and
-     * allocating it twice — once as the shadow, once as the conversion — is PSRAM spent on nothing.
+     * allocating it twice — once as the frame, once as the conversion — is PSRAM spent on nothing.
      * Sixty-four rows is 92 KB, which is a chunk httpd is happy to hand to the socket. */
     const size_t rows_per_band = 64;
     const size_t row_bytes     = (size_t)width * 3;

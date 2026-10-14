@@ -81,3 +81,26 @@ target_link_options(${COMPONENT_LIB} INTERFACE
     "-Wl,--wrap=settimeofday"
     "-Wl,--wrap=clock_settime"
 )
+
+# The `[send]` line in `board_display.c` — the one that splits a flush into the byte swap, the DMA
+# wait and whatever is left — is compiled only when the flag that turns on the Rust half's `[phase]`
+# and `[flush]` lines is given, so that a single
+#
+#   idf.py -DPOMELO_RUST_FEATURES=render-debug build flash monitor
+#
+# turns on the whole measurement and a plain build carries none of it. There is one switch because
+# there is one measurement: a `[send]` line without the `[flush]` line it belongs to would be a number
+# with nothing to weigh it against, and a firmware that pays for probes nobody collects is the thing
+# this avoids.
+#
+# Read here and not declared here: `POMELO_RUST_FEATURES` is `rust_main`'s cache variable, and a cache
+# entry made by `-D` exists before any component is processed, which is the only reason this component
+# — configured first, since `rust_main` requires it — can see it at all. Undefined means the flag was
+# not given, and that is a build without the probes rather than an error.
+#
+# Matched as a substring and not with `IN_LIST`: the same string is handed to cargo as one
+# `--features` argument, where commas separate features, so `render-debug,bench` would be a single
+# list element here.
+if(DEFINED POMELO_RUST_FEATURES AND POMELO_RUST_FEATURES MATCHES "(^|,)render-debug($|,)")
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE BOARD_DISPLAY_PROFILE=1)
+endif()

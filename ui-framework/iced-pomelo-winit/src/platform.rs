@@ -185,16 +185,40 @@ fn plan(mut regions: Vec<Region>) -> Vec<Region> {
     planned
 }
 
+/// What one [`flush_damage`] handed to the panel.
+///
+/// Counted after [`plan`] has merged what it could, so this describes the transfers actually made
+/// and not the rectangles the compositor reported as damaged. The two differ by every unchanged
+/// pixel a merge absorbed, which is the gap [`MERGE_SLACK`] bounds — and on this hardware that gap
+/// is worth counting, because a merge trades pixels for transfers and the caller should be able to
+/// weigh what it bought. It is also what makes `[flush]`'s rate meaningful: a number reported
+/// against the unmerged area would be a rate for pixels that were never sent.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Sent {
+    /// How many `hal_display_draw_bitmap` calls the damage became.
+    pub regions: usize,
+    /// The pixels those calls carried.
+    pub pixels: u64,
+}
+
 /// Hands damaged rectangular regions of the frame buffer to the panel via DMA.
 ///
 /// Each planned region is one `hal_display_draw_bitmap`, which the driver slices into vertical
 /// strips and drains before returning. Almost every pixel of a planned region was going to be sent
 /// anyway; the alternative this replaced — the bounding box of *every* region — sent the whole
 /// screen to repaint a clock ticking in the status bar.
-pub fn flush_damage(damage: &[Rectangle], pixels: &[u16]) {
+///
+/// Returns what was sent, for the caller that has to time it.
+pub fn flush_damage(damage: &[Rectangle], pixels: &[u16]) -> Sent {
     let regions: Vec<Region> = damage.iter().filter_map(|rect| Region::of(*rect)).collect();
+    let planned = plan(regions);
 
-    for region in plan(regions) {
+    let sent = Sent {
+        regions: planned.len(),
+        pixels: planned.iter().map(|region| region.area()).sum::<i64>() as u64,
+    };
+
+    for region in planned {
         unsafe {
             hal_display_draw_bitmap(
                 region.x1,
@@ -206,6 +230,8 @@ pub fn flush_damage(damage: &[Rectangle], pixels: &[u16]) {
             );
         }
     }
+
+    sent
 }
 
 /// Yields task execution to FreeRTOS.
@@ -266,12 +292,26 @@ impl Board for Panel {
         wait_touch_event(timeout_ms)
     }
 
+    /// Waits for the v-blank, then hands the damage to the panel, timed as two numbers.
+    ///
+    /// The wait and the transfer are split because they are the two halves a fix could act on and
+    /// they are not interchangeable: the wait is the renderer standing idle against a display that
+    /// is already pacing it, while the transfer is work that has to happen — a PSRAM copy into the
+    /// shadow frame, a byte swap, and the QSPI strips, none of which the renderer's own phase
+    /// split can see. See `iced_pomelo_gfx::profile::panel_write`; the guard is inert unless the
+    /// crate is built with `profile`, so this reads the same in both builds.
     fn flush(&mut self, damage: &[Rectangle], pixels: &[u16]) {
+        let mut write = iced_pomelo_gfx::profile::panel_write();
+
         unsafe {
             hal_display_wait_vsync();
         }
 
-        flush_damage(damage, pixels);
+        write.waited();
+
+        let sent = flush_damage(damage, pixels);
+
+        write.sent(sent.regions, sent.pixels);
     }
 
     fn idle(&mut self) {
@@ -610,5 +650,24 @@ mod tests {
                 y2: 132
             }]
         );
+    }
+
+    #[test]
+    fn what_a_flush_sent_is_counted_after_the_merge() {
+        // `[flush]`'s pixel count and its rate are the transfer's and not the damage's: two touching
+        // tiles go out as one region carrying both their areas, two far corners as two regions
+        // carrying only their own. Measured on the unmerged damage the rate would be a rate for
+        // pixels that were never sent, which is the number that would make a merge look free.
+        //
+        // The draw itself is the stub off the device, so the pixels handed in are never read.
+        let sent = flush_damage(&[at(0.0, 0.0, 20.0), at(20.0, 0.0, 20.0)], &[]);
+
+        assert_eq!(sent.regions, 1, "touching tiles are one transfer");
+        assert_eq!(sent.pixels, 40 * 20, "and it carries both their areas");
+
+        let sent = flush_damage(&[at(0.0, 0.0, 16.0), at(464.0, 464.0, 16.0)], &[]);
+
+        assert_eq!(sent.regions, 2, "two corners stay two transfers");
+        assert_eq!(sent.pixels, 2 * 16 * 16, "and each carries only its own");
     }
 }

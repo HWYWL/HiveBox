@@ -792,6 +792,18 @@ pub struct TaskInfo {
     pub core: Option<u8>,
     /// Whether this is the task the reading was taken from.
     pub current: bool,
+    /// The scheduler's run time counter, accumulated while this task ran.
+    ///
+    /// `None` for a platform that keeps no such clock — the reading is one FreeRTOS only makes when
+    /// it is built to, so "this image does not count" and "no platform here counts" are the same
+    /// answer — and, deliberately, the same `None` for a task that has not run yet: neither is a task
+    /// with a share of the time to report.
+    ///
+    /// A share of *what* is [`TaskReading::share_of`]'s question, which is why the total is not
+    /// carried here. The rows that make this worth reading on a multi-core board are the idle ones: an
+    /// idle task runs exactly when its core has nothing else to run, so the share of a task called
+    /// `IDLE0` or `IDLE1` *is* that core's spare time — and nothing else in this interface can say it.
+    pub run_time: Option<Duration>,
 }
 
 /// What a task is doing.
@@ -810,6 +822,47 @@ pub enum TaskState {
     Suspended,
     /// Gone, or on its way out.
     Deleted,
+}
+
+/// The tasks the scheduler is running, and the counter their run times were measured against.
+///
+/// A list *and* a number rather than a list alone, for the same reason [`MemoryInfo`] carries both of
+/// its own: a share of a total cannot be taken without the total, and a total fetched by a second read
+/// would be a share of a different moment than the list it was drawn beside. Both come out of one walk
+/// of the scheduler's task list, so the two agree by construction.
+///
+/// The total is the scheduler's own and not a sum of the tasks here, which matters more than it looks:
+/// a list is capped at what a fixed array holds, and the tasks that did not fit used time all the same.
+///
+/// `Default` is the reading a caller holds before the board has answered: nothing, and no share of it.
+/// An empty list is a real reading rather than an absent one — a board with no task list to give says
+/// so by sending none — so this is a value to start from and not a state to draw.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TaskReading {
+    /// The tasks, in the order the platform listed them.
+    pub tasks: Vec<TaskInfo>,
+    /// Everything the counter counted since the scheduler started — the whole that
+    /// [`TaskReading::share_of`] takes a part of.
+    ///
+    /// `None` for a platform that keeps no run time stats, which is also the reading for a board whose
+    /// scheduler has not switched tasks yet: the first has no clock, the second has counted nothing,
+    /// and neither is a total to divide by.
+    pub total_run_time: Option<Duration>,
+}
+
+impl TaskReading {
+    /// How much of the board's run time one of these tasks has used, in `0.0..=100.0`.
+    ///
+    /// `None` when either end of the division is missing — a task with no run time, or a reading with
+    /// no total — and never a share drawn from half of the pair. What comes back is a percentage
+    /// rather than a fraction because it is the same arithmetic [`MemoryInfo::used_percent`] is, and
+    /// [`percent`] is where that lives.
+    pub fn share_of(&self, task: &TaskInfo) -> Option<f32> {
+        Some(percent(
+            task.run_time?.as_micros() as u64,
+            self.total_run_time?.as_micros() as u64,
+        ))
+    }
 }
 
 /// The chip the firmware is running on.

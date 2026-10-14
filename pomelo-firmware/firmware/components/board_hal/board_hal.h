@@ -58,17 +58,21 @@ uint8_t hal_display_get_brightness(void);
 /**
  * @brief Whether a screenshot can be taken.
  *
- * Screenshots come from a shadow copy of the frame the panel was last given, which costs half a
- * megabyte of PSRAM. When that allocation failed there is no copy and no screenshot.
+ * True once a frame has reached the panel: a capture is read out of the frame buffer that frame came
+ * in, so before the first flush there is nothing to read.
  */
 bool hal_display_has_capture(void);
 
 /**
  * @brief Copy the screen into `out` as RGB565, top row first, `BOARD_DISPLAY_WIDTH` pixels wide.
  *
+ * Reads the frame buffer the panel was last given, so the copy is paid by the caller instead of by
+ * every frame. That buffer is the one the renderer draws into: called from a thread other than the
+ * one flushing — which is what the HTTP handler does — a frame in progress can be read half-drawn.
+ *
  * @param out    Buffer of at least `BOARD_DISPLAY_WIDTH * BOARD_DISPLAY_HEIGHT` pixels.
  * @param pixels Size of `out` in pixels, checked against the panel geometry.
- * @return ESP_OK, ESP_ERR_INVALID_STATE when there is no shadow frame, or ESP_ERR_INVALID_SIZE.
+ * @return ESP_OK, ESP_ERR_INVALID_STATE when no frame has been sent, or ESP_ERR_INVALID_SIZE.
  */
 esp_err_t hal_display_capture(uint16_t *out, size_t pixels);
 
@@ -688,11 +692,31 @@ typedef struct {
     /* The least stack this task has ever had left, in bytes: the number worth looking at,
      * because the day it reaches zero the task faults. */
     uint32_t stack_free_bytes;
+    /* How much of the scheduler's run time counter this task has used, in microseconds.
+     *
+     * Zero is what an image built without `CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS`
+     * reports for every task, and it is also the honest reading for a task that has not
+     * run yet — the two are one value here on purpose, because neither is a task with a
+     * share of the time to report. `hal_system_tasks_t::total_run_time_us` is what tells
+     * the two apart for a whole reading at once: a total above zero makes every task's
+     * zero a task that has not run, and a total of zero means there is no count behind
+     * any of the rows. */
+    uint64_t run_time_us;
 } hal_system_task_t;
 
 typedef struct {
     uint32_t          count;
     hal_system_task_t tasks[HAL_SYSTEM_MAX_TASKS];
+    /* Every task's `run_time_us` added up: the whole of the counter since the scheduler
+     * started, and the denominator a share of it is taken against. See
+     * `hal_system_task_t::run_time_us`.
+     *
+     * A number beside the list rather than something the other side adds up, and the
+     * difference is not book-keeping: the tasks past `HAL_SYSTEM_MAX_TASKS` are not in
+     * the array, so a total summed from `count` of them is short by whatever they used,
+     * and every percentage taken against it is wrong by that much. This is the
+     * scheduler's own total. */
+    uint64_t total_run_time_us;
 } hal_system_tasks_t;
 
 /**
@@ -712,6 +736,11 @@ typedef struct {
  *
  * An image built without `CONFIG_FREERTOS_USE_TRACE_FACILITY` has no per-task read to
  * make and answers with `count == 0`: an empty list rather than an invented one.
+ *
+ * One built without `CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS` answers with the list all
+ * the same and leaves every `run_time_us` and `total_run_time_us` at zero: the columns
+ * that need the counter are the ones this read cannot answer, and they are worth an
+ * empty reading rather than no reading of the other four.
  */
 esp_err_t hal_system_get_tasks(hal_system_tasks_t *out);
 

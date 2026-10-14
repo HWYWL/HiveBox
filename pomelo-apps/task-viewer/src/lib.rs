@@ -13,12 +13,22 @@
 //! one place where a board about to fall over says so — a task with two hundred bytes of stack left is
 //! a task that faults the day something calls a function deeper.
 //!
-//! Which is why the columns are the ones they are: the *state* (is it making progress?), the
-//! *priority* (who goes next?), the stack left at its worst (is it about to die?) and the core. The
-//! numbers a `top` on a desktop spends half its row on — CPU percent, resident memory, virtual size —
-//! are not here because this platform cannot measure them honestly: per-task run time needs a
-//! run-time-stats clock the port does not keep, and the memory a task holds is not something a
-//! FreeRTOS task records.
+//! Which is why the columns are the ones they are: the *state* (is it making progress?), the share of
+//! the run time counter it has had (how much of the time is it making it in?), the *priority* (who goes
+//! next?), the stack left at its worst (is it about to die?) and the core. The rest of what a `top` on a
+//! desktop spends its row on — resident memory, virtual size — is not here, and that one is a limit of
+//! the platform rather than a choice: the memory a task holds is not something a FreeRTOS task records.
+//!
+//! The share is the one column that is not a fact about the task on its own. It is
+//! [`TaskInfo::run_time`] over the total it arrived with, which is what [`TaskReading`] is for and why
+//! [`SystemBackend::tasks`] answers with a reading rather than a list. On a two-core board it is also
+//! the only column that can say what a core is *not* doing: an idle task runs exactly when its core has
+//! nothing else to run, so the rows called `IDLE0` and `IDLE1` are the two cores' spare time, written
+//! as a percentage.
+//!
+//! A board that keeps no run time counter draws a dash in that column and keeps the rest of the list:
+//! the same reading a core the platform does not report gets, because a board that cannot say so is not
+//! a board that failed.
 //!
 //! # Why the page looks like `htop`, and speaks this interface's language
 //!
@@ -26,8 +36,9 @@
 //! nicer one they have to learn: meters at the top, a table under them. The *shape* is `htop`'s, down to
 //! the row of column heads above the rows.
 //!
-//! Every word on it follows the language the system is set to: the heads (任务 / 状态 / 优先级 / 空闲栈 /
-//! 核心, or `TASK S PRI FREE CORE`), the meter labels (内存 / 外部内存, or `MEM` / `PSRAM`), the header's
+//! Every word on it follows the language the system is set to: the heads (任务 / 状态 / 占用率 /
+//! 优先级 / 空闲栈 / 核心, or `TASK S CPU% PRI FREE CORE`), the meter labels (内存 / 外部内存, or
+//! `MEM` / `PSRAM`), the header's
 //! summary, and the state column, which is one character of whichever language is up — 运 / 阻 / 挂 / 退,
 //! or the four letters `htop` prints for the same four states, `R` / `S` / `T` / `Z`. See [`columns`]
 //! and [`format::state_char`].
@@ -64,7 +75,7 @@ use iced::theme::Palette;
 use iced::widget::{column, container, row, scrollable, text, Column, Row, Space};
 use iced::{Alignment, Color, Element, Length, Padding, Subscription, Theme};
 
-use pomelo_hal::{Board, MemoryInfo, TaskInfo, TaskState};
+use pomelo_hal::{Board, MemoryInfo, TaskInfo, TaskReading, TaskState};
 use pomelo_material_symbols::Icon;
 use pomelo_widgets::preferences::{Language, SystemPreferences, ThemeMode};
 
@@ -103,7 +114,11 @@ pub struct TaskViewer {
 /// showing a moment that never happened.
 #[derive(Debug, Default)]
 struct Reading {
-    tasks: Vec<TaskInfo>,
+    /// The task list *and* the counter its run times are shares of, kept as the one reading they
+    /// arrived as rather than as two fields that could drift apart: the share column takes each row's
+    /// percentage against this total, and a total read separately would be a denominator from another
+    /// moment — which is a percentage of something that never happened.
+    tasks: TaskReading,
     memory: Option<MemoryInfo>,
     psram: Option<MemoryInfo>,
     uptime: Option<Duration>,
@@ -140,9 +155,12 @@ impl TaskViewer {
 
     /// The tasks of the last reading, as the page draws them.
     ///
-    /// Read by the tests and by the host; a page gets them through [`TaskViewer::view`].
+    /// Read by the tests and by the host; a page gets them through [`TaskViewer::view`], which takes
+    /// the shares down the table out of the reading itself. The total the run times are shares of is
+    /// deliberately not part of this: a caller that only wants the rows — and that is every caller of
+    /// this one — should not have to carry a denominator it has no use for.
     pub fn tasks(&self) -> &[TaskInfo] {
-        &self.reading.tasks
+        &self.reading.tasks.tasks
     }
 
     /// Looks at the board again.
@@ -155,8 +173,8 @@ impl TaskViewer {
 
         self.reading = Reading {
             // A board built without the trace facility answers with an empty list rather than an
-            // error, so this keeps that distinction: an empty `Vec` is "no tasks to show", and only a
-            // real error is folded into one.
+            // error, so this keeps that distinction: an empty reading is "no tasks to show", and only
+            // a real error is folded into one.
             tasks: system.tasks().unwrap_or_default(),
             memory: system.memory().ok(),
             psram: system.psram().ok().flatten(),
@@ -262,8 +280,7 @@ impl TaskViewer {
     /// header: everything else in the list is a task *waiting* for something, and a board where that
     /// count has gone to zero is a board that has stopped doing anything while looking perfectly busy.
     fn running(&self) -> usize {
-        self.reading
-            .tasks
+        self.tasks()
             .iter()
             .filter(|task| task.state == TaskState::Running)
             .count()
@@ -277,7 +294,7 @@ impl TaskViewer {
     /// wants at the top of a task list is the size of it, and how much of it is moving.
     fn header(&self, sizes: style::Sizes, ink: Color, muted: Color) -> Element<'_, Message> {
         let language = self.preferences.language;
-        let (tasks, running) = (self.reading.tasks.len(), self.running());
+        let (tasks, running) = (self.tasks().len(), self.running());
 
         let summary = match language {
             Language::Chinese => format!("任务 {tasks} · 运行 {running}"),
@@ -350,14 +367,25 @@ impl TaskViewer {
         muted: Color,
     ) -> Element<'_, Message> {
         let language = self.preferences.language;
+        let reading = &self.reading.tasks;
         let mut rows = Column::new()
             .spacing(style::ROW_GAP)
             .width(Length::Fill);
 
         rows = rows.push(head_row(sizes, language, muted));
 
-        for task in &self.reading.tasks {
-            rows = rows.push(task_row(task, sizes, language, theme, ink, muted));
+        // The rows and the total they are shares of come out of the one reading, so a row is never
+        // drawn as a percentage of a different look at the board than the one that listed it.
+        for task in &reading.tasks {
+            rows = rows.push(task_row(
+                task,
+                reading.share_of(task),
+                sizes,
+                language,
+                theme,
+                ink,
+                muted,
+            ));
         }
 
         // The scrollbar's width is kept clear rather than drawn over, and it is kept clear *here* so that
@@ -446,7 +474,7 @@ fn bar(share: f32, sizes: style::Sizes, theme: ThemeMode) -> Element<'static, Me
 /// column of it, and this is the description one is built from.
 ///
 /// The table is built from these and from nothing else — the head row and every value row are the same
-/// five cells with different words in them — which is what keeps a head over its own column. The first
+/// six cells with different words in them — which is what keeps a head over its own column. The first
 /// version of this page laid the head out on its own, and it drifted on the very first frame: the cell
 /// meant to hold the name column's head was given no width at all, so the heads packed themselves
 /// against the left edge while the rows put their numbers against the right.
@@ -468,19 +496,24 @@ struct Field {
 
 /// The table's columns, in the language the system is set to.
 ///
-/// Five, in the order a reader asks their questions: *what* is it, *is it making progress*, *who runs
-/// next*, *how much stack has it left at its worst*, *where*. A function rather than a constant because
-/// the heads are *text*: the shape of the table is the same in both languages and the words in it are
-/// the reader's. The widths are the same for both, sized for the wider of the two heads.
+/// Six, in the order a reader asks their questions: *what* is it, *is it making progress and how much
+/// of the time has it been making it*, *who runs next*, *how much stack has it left at its worst*,
+/// *where*. A function rather than a constant because the heads are *text*: the shape of the table is
+/// the same in both languages and the words in it are the reader's. The widths are the same for both,
+/// sized for the wider of the two heads.
 ///
 /// What sets a column's floor is its head, whose width is a fact about the language rather than about
-/// the state of the board: three full-width characters for 优先级 and 空闲栈, and `PRI` / `FREE` in four
-/// narrow Latin glyphs — which is why these are chosen against the Chinese heads (see the test that
-/// holds both to their column) and why `S` and not `STATE` is the state column's English head.
-fn columns(language: Language) -> [Field; 5] {
-    let (task, state, priority, stack, core) = match language {
-        Language::Chinese => ("任务", "状态", "优先级", "空闲栈", "核心"),
-        Language::English => ("TASK", "S", "PRI", "FREE", "CORE"),
+/// the state of the board: three full-width characters for 占用率, 优先级 and 空闲栈, and `PRI` / `FREE`
+/// in four narrow Latin glyphs — which is why these are chosen against the Chinese heads (see the test
+/// that holds both to their column) and why `S` and not `STATE` is the state column's English head.
+///
+/// 占用率 is the one column whose *values* set its floor rather than its head: three Chinese characters
+/// leave room for four Latin ones, and a share can be five characters wide — `100.0`, on a board where
+/// the counter has only ever counted one task. No other value on this table reaches five.
+fn columns(language: Language) -> [Field; 6] {
+    let (task, state, share, priority, stack, core) = match language {
+        Language::Chinese => ("任务", "状态", "占用率", "优先级", "空闲栈", "核心"),
+        Language::English => ("TASK", "S", "CPU%", "PRI", "FREE", "CORE"),
     };
 
     [
@@ -493,6 +526,11 @@ fn columns(language: Language) -> [Field; 5] {
             head: state,
             width: Some(1.9),
             align: Alignment::Center,
+        },
+        Field {
+            head: share,
+            width: Some(3.5),
+            align: Alignment::End,
         },
         Field {
             head: priority,
@@ -512,7 +550,7 @@ fn columns(language: Language) -> [Field; 5] {
     ]
 }
 
-/// One row of the table: its five columns, with these values in them.
+/// One row of the table: its six columns, with these values in them.
 ///
 /// The head and the value rows are both made here, which is the whole point of it being a function: a
 /// head laid out separately from the rows under it is a head that can drift, and on this table it did.
@@ -520,8 +558,8 @@ fn columns(language: Language) -> [Field; 5] {
 fn table_row(
     sizes: style::Sizes,
     language: Language,
-    values: [String; 5],
-    colors: [Color; 5],
+    values: [String; 6],
+    colors: [Color; 6],
     size: f32,
 ) -> Element<'static, Message> {
     let columns = columns(language);
@@ -547,13 +585,13 @@ fn table_row(
         .into()
 }
 
-/// The column heads: the same five columns as the rows under them, with the heads' own words in them.
+/// The column heads: the same six columns as the rows under them, with the heads' own words in them.
 fn head_row(sizes: style::Sizes, language: Language, muted: Color) -> Element<'static, Message> {
     table_row(
         sizes,
         language,
         columns(language).map(|column| column.head.to_string()),
-        [muted; 5],
+        [muted; 6],
         sizes.small,
     )
 }
@@ -566,6 +604,7 @@ fn head_row(sizes: style::Sizes, language: Language, muted: Color) -> Element<'s
 /// because the head above it has to sit on the same one.
 fn task_row(
     task: &TaskInfo,
+    share: Option<f32>,
     sizes: style::Sizes,
     language: Language,
     theme: ThemeMode,
@@ -580,6 +619,10 @@ fn task_row(
     };
 
     let core = task.core.map_or_else(|| String::from("-"), |core| core.to_string());
+    // A board that counts no run times draws the dash this table draws for a core it cannot name: the
+    // head over the column still says what it would hold, and what is missing is the board's clock
+    // rather than anything about this task. A share of zero is a share, and is drawn as one.
+    let share = share.map_or_else(|| String::from("-"), format::share_of);
 
     table_row(
         sizes,
@@ -587,6 +630,7 @@ fn task_row(
         [
             name,
             format::state_char(task.state, language).to_string(),
+            share,
             task.priority.to_string(),
             format::stack_of(task.stack_free_bytes),
             core,
@@ -594,6 +638,7 @@ fn task_row(
         [
             ink,
             style::state_ink(task.state, theme),
+            ink,
             ink,
             muted,
             muted,
@@ -700,10 +745,15 @@ mod tests {
             let columns = columns(language);
 
             // Every head fits over its own column, and so does the widest value that goes under it.
-            // The values are the same in both languages — a number, a byte count, one character — so
-            // they are the *same* list for both; what changes between the two is the head above them,
-            // and the state column's single character, which is why they are checked per language.
-            let widest = ["main *", "运", "29", "13.5K", "-"];
+            // The values are the same in both languages — a number, a byte count, one character, and
+            // the dash a board that cannot say draws — so they are the *same* list for both; what
+            // changes between the two is the head above them, and the state column's single character,
+            // which is why they are checked per language.
+            //
+            // The share's widest is five characters and not four: a counter that has only ever counted
+            // one task makes a share of `100.0`, and a column that clipped that would be the column
+            // lying about a board that has only run one thing. See [`columns`].
+            let widest = ["main *", "运", "100.0", "29", "13.5K", "-"];
 
             for (column, widest) in columns.iter().zip(widest) {
                 let Some(width) = column.width else {

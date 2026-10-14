@@ -180,9 +180,13 @@ const DOT_PORTION: u16 = KEY_PORTION;
 /// Return, the original's `key_w * 1.8`.
 const ENTER_PORTION: u16 = 180;
 
-/// The two label sizes. Absolute, like all the type in this repository: a key's label does not
-/// follow the box it is in — the number is what the 480 px design panel ends at, and both are the
-/// sizes the platform bakes glyphs for.
+/// The label sizes. Absolute, like all the type in this repository: a key's label does not follow
+/// the box it is in — the number is what the 480 px design panel ends at.
+///
+/// `CHAR_FONT` is the base size, and the one the platform bakes glyphs for. `SPEC_FONT` and
+/// `ICON_FONT` are not: the lookup compares the size bit for bit, so both rasterise on the device
+/// the first time a key is drawn. The icons miss the table at every size — it is cut from the
+/// default face, and they are another family.
 pub const CHAR_FONT: f32 = 24.0;
 pub const SPEC_FONT: f32 = 16.0;
 pub const ICON_FONT: f32 = 22.0;

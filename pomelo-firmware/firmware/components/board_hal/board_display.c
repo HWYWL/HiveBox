@@ -1,4 +1,5 @@
 #include "board_hal_internal.h"
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include "esp_log.h"
@@ -119,18 +120,27 @@ void hal_display_wait_vsync(void)
 static int s_chunk_strip_width = CHUNK_STRIP_WIDTH_DEFAULT;
 static uint16_t *s_dma_chunk[2] = {NULL, NULL};
 
-/* The shadow frame: the same pixels the panel last received, kept so a page can be shown what the
- * screen is showing.
+/* The last frame the panel was handed, kept so a page can be shown what the screen is showing.
  *
  * The panel is written once and never read back — the CO5300 has no path that returns its GRAM over
- * QSPI — so the only way to have a picture of the screen is to keep one on the way past. Every draw
- * the Rust side makes carries the whole frame buffer and the rectangle of it that changed
- * (`flush_damage` in `platform.rs`), so copying that rectangle out of the frame here reproduces the
- * screen exactly, for the cost of one `memcpy` per flush and half a megabyte of PSRAM.
+ * QSPI — so the only picture of the screen is the frame buffer the Rust side hands to every flush:
+ * `flush_damage` in `platform.rs` sends the *whole* buffer plus the rectangle of it that changed, so
+ * the damaged rectangle is already part of a complete frame and a screenshot can be read straight out
+ * of the source. Keeping that pointer and its stride is the whole of what a capture needs.
  *
- * `NULL` when the allocation failed, which is the one state `hal_display_capture` reports. */
-static uint16_t *s_shadow = NULL;
-static SemaphoreHandle_t s_shadow_lock = NULL;
+ * It is deliberately not copied on the way past. That copy is a full-screen PSRAM round trip sitting
+ * in front of a transfer the panel is waiting for — 20.9 ms of a 44.6 ms full-screen `flush` on this
+ * board, second only to the byte swap — and it was paid on every frame so that an occasional
+ * `/api/screenshot` would find the picture ready. Reading the source where it lies moves that cost to
+ * the request that actually wants it, and leaves the frame path carrying only what has to reach the
+ * panel.
+ *
+ * The pointer belongs to the compositor's surface, and is re-recorded on every flush, so it follows a
+ * surface that is rebuilt; it is written after the stride it belongs to, and read as a pair, so a
+ * capture never pairs a new pointer with a stale stride. `NULL` until the first frame is sent, which
+ * is the one state `hal_display_capture` reports. */
+static const uint16_t *volatile s_last_pixels = NULL;
+static volatile int32_t s_last_stride = 0;
 
 // =============================================================================
 // CO5300 AMOLED Panel Initialization Command Sequence
@@ -153,19 +163,54 @@ static const co5300_lcd_init_cmd_t s_lcd_init_cmds[] = {
     {0x28, (uint8_t[]){0x00}, 0, 0},   // Display OFF until first frame is presented
 };
 
+/* Words loaded before any of them is stored. Tuned against the `[bw]` probe in a `render-debug`
+ * build, which is the only thing that can say whether a given width still has reads to hide: the
+ * kernel is measured against a plain `memcpy` of the same bytes, and the gap between them is what
+ * this number exists to close.
+ *
+ * Eight is worse than four, and measured so — 21.8 MB/s against 38.8. Xtensa has sixteen general
+ * registers and eight words want most of them, so the batch spills to the stack and the extra traffic
+ * costs more than the reads it was hiding. Four is where the register file runs out. */
+#define SWAP_UNROLL 4
+
+/* Swap the two 16-bit halves of each 32-bit word — two RGB565 pixels in one operation. */
+static inline uint32_t bswap_pixel_pairs(uint32_t v)
+{
+    return ((v & 0x00FF00FFu) << 8) | ((v & 0xFF00FF00u) >> 8);
+}
+
 /**
  * @brief High-speed row copy with 32-bit SIMD RGB565 Little-to-Big Endian byte swapping.
- * Processes 2 pixels (4 bytes) per cycle on Xtensa LX7 when word-aligned.
+ *
+ * The swap is four ALU operations on a word whose load costs about sixteen cycles, so what this loop
+ * is really waiting on is the load, and one iteration at a time it waits for every one of them: the
+ * store cannot retire until the load it depends on has landed, which leaves a single read in flight.
+ * Four words are therefore loaded before any of them is stored, which is what fills that gap.
+ *
+ * The measurement that says so is the `[bw]` line in a `render-debug` build, where the same kernel
+ * over the same bytes runs at 31.8 MB/s read in address order against the 57.7 MB/s a plain `memcpy`
+ * of those bytes gets — the difference being exactly this, since the flush's own walk was shown to be
+ * worth only 7% by the `swap-seq` and `swap-strip` pair.
  */
 static inline void copy_row_rgb565_be(const uint16_t *src, uint16_t *dst, int32_t width)
 {
     if (((uintptr_t)src & 3u) == 0 && ((uintptr_t)dst & 3u) == 0) {
         const uint32_t *src32 = (const uint32_t *)src;
         uint32_t *dst32 = (uint32_t *)dst;
-        int32_t words = width / 2;
-        for (int32_t i = 0; i < words; ++i) {
-            uint32_t val = src32[i];
-            dst32[i] = ((val & 0x00FF00FF) << 8) | ((val & 0xFF00FF00) >> 8);
+        const int32_t words = width / 2;
+        int32_t i = 0;
+        for (; i + SWAP_UNROLL <= words; i += SWAP_UNROLL) {
+            const uint32_t a = src32[i];
+            const uint32_t b = src32[i + 1];
+            const uint32_t c = src32[i + 2];
+            const uint32_t d = src32[i + 3];
+            dst32[i] = bswap_pixel_pairs(a);
+            dst32[i + 1] = bswap_pixel_pairs(b);
+            dst32[i + 2] = bswap_pixel_pairs(c);
+            dst32[i + 3] = bswap_pixel_pairs(d);
+        }
+        for (; i < words; ++i) {
+            dst32[i] = bswap_pixel_pairs(src32[i]);
         }
         if (width & 1) {
             dst[width - 1] = __builtin_bswap16(src[width - 1]);
@@ -176,6 +221,97 @@ static inline void copy_row_rgb565_be(const uint16_t *src, uint16_t *dst, int32_
         }
     }
 }
+
+#if BOARD_DISPLAY_PROFILE
+/* One-off, in a measuring build only: is the byte swap slow because PSRAM is slow, or because of the
+ * order the strip walk reads it in?
+ *
+ * The comment on the strip ladder above asserts the former — "bounded by PSRAM access time" — and the
+ * flush probe agrees on the size of the term (18.8 ms for 460 KB, 81 ns/pixel, against the 11.5 ms the
+ * QSPI link needs to carry the same bytes). What neither can say is *why*, and the two answers want
+ * opposite fixes: a bandwidth floor means the swap has to go away entirely, while a pattern penalty
+ * means it only has to be reordered — `swap-strip` below runs the walk the flush runs, `swap-seq`
+ * runs the identical kernel over the identical bytes read in address order, and the gap between the
+ * two is the part of the 18.8 ms that is the traversal rather than the memory.
+ *
+ * The destination is the caller's first strip buffer, reused per strip exactly as the flush reuses it,
+ * so this measures the real thing and allocates nothing for it. */
+static void probe_bandwidth(size_t chunk, void *sram_raw)
+{
+    uint8_t *sram = (uint8_t *)sram_raw;
+    const size_t total = (size_t)BOARD_DISPLAY_WIDTH * BOARD_DISPLAY_HEIGHT * sizeof(uint16_t);
+    uint8_t *ps_src = (uint8_t *)heap_caps_aligned_alloc(64, total, MALLOC_CAP_SPIRAM);
+    uint8_t *ps_dst = (uint8_t *)heap_caps_aligned_alloc(64, total, MALLOC_CAP_SPIRAM);
+
+    if (ps_src == NULL || ps_dst == NULL || sram == NULL || chunk == 0 || chunk > total) {
+        ESP_LOGW(TAG, "[bw] skipped: PSRAM staging did not fit");
+        if (ps_src) free(ps_src);
+        if (ps_dst) free(ps_dst);
+        return;
+    }
+
+    // Back every page before timing, so no first-touch mapping lands inside a measurement.
+    memset(ps_src, 0xA5, total);
+    memset(ps_dst, 0x5A, total);
+    memset(sram, 0, chunk);
+
+    int64_t t;
+
+    // Both sides PSRAM, sequential: the ceiling the rest is read against.
+    t = esp_timer_get_time();
+    for (size_t off = 0; off < total; off += chunk) {
+        memcpy(ps_dst + off, ps_src + off, (total - off < chunk) ? total - off : chunk);
+    }
+    const int64_t t_pp = esp_timer_get_time() - t;
+
+    // PSRAM read on its own.
+    t = esp_timer_get_time();
+    for (size_t off = 0; off < total; off += chunk) {
+        memcpy(sram, ps_src + off, (total - off < chunk) ? total - off : chunk);
+    }
+    const int64_t t_ps = esp_timer_get_time() - t;
+
+    // PSRAM write on its own.
+    t = esp_timer_get_time();
+    for (size_t off = 0; off < total; off += chunk) {
+        memcpy(ps_dst + off, sram, (total - off < chunk) ? total - off : chunk);
+    }
+    const int64_t t_sp = esp_timer_get_time() - t;
+
+    // The same kernel on the same bytes, read in address order.
+    t = esp_timer_get_time();
+    for (size_t off = 0; off < total; off += chunk) {
+        const size_t n = (total - off < chunk) ? total - off : chunk;
+        copy_row_rgb565_be((const uint16_t *)(ps_src + off), (uint16_t *)sram, (int32_t)(n / 2));
+    }
+    const int64_t t_swap_seq = esp_timer_get_time() - t;
+
+    // The walk the flush actually makes: 32-column strips out of a 480-wide surface, so each row is a
+    // 64-byte read a 960-byte stride from the last. Right to left, as the flush scans.
+    t = esp_timer_get_time();
+    for (int32_t x = BOARD_DISPLAY_WIDTH; x > 0; ) {
+        const int32_t cx1 = (x - 32 >= 0) ? (x - 32) : 0;
+        const int32_t w = x - cx1;
+        for (int32_t r = 0; r < BOARD_DISPLAY_HEIGHT; ++r) {
+            const uint16_t *in = (const uint16_t *)ps_src + (size_t)r * BOARD_DISPLAY_WIDTH + (size_t)cx1;
+            copy_row_rgb565_be(in, (uint16_t *)sram, w);
+        }
+        x = cx1;
+    }
+    const int64_t t_swap_strip = esp_timer_get_time() - t;
+
+    printf("[bw] psram->psram %.1f  psram->sram %.1f  sram->psram %.1f  swap-seq %.1f  swap-strip %.1f MB/s  (%u bytes)\n",
+           (double)total / (double)t_pp,
+           (double)total / (double)t_ps,
+           (double)total / (double)t_sp,
+           (double)total / (double)t_swap_seq,
+           (double)total / (double)t_swap_strip,
+           (unsigned)total);
+
+    free(ps_src);
+    free(ps_dst);
+}
+#endif
 
 static IRAM_ATTR bool s_on_color_trans_done(esp_lcd_panel_io_handle_t panel_io,
                                             esp_lcd_panel_io_event_data_t *edata,
@@ -193,6 +329,62 @@ esp_err_t board_display_init(void)
     if (s_panel_handle != NULL) {
         return ESP_OK;
     }
+
+    /* Ping-pong strips of internal DMA SRAM: each is the panel's full height by the strip width, and
+     * there are two so that the byte swap of the next strip overlaps the transfer of the last. At 64
+     * columns that is 2 * 60 KB = 120 KB.
+     *
+     * Allocated first, ahead of the SPI bus and the panel controller, and it is worth knowing that
+     * this buys nothing. Moving it here from the foot of this function — where it used to run, once
+     * the panel was up — took the free DMA heap from 153535 bytes to 158151 and left the largest free
+     * block at exactly 73728 either way. That number is a boundary of the internal heap's own regions
+     * and not the residue of fragmentation, so allocating earlier does not reach past it. Two 60 KB
+     * strips need 122880 contiguous bytes and the second one never lands, which is why this board runs
+     * 32-column strips (15 across the panel) rather than the 64 it asks for first.
+     *
+     * The widths stay a ladder rather than being fixed at 32 because trying costs nothing and a board
+     * with a different internal layout would take the wider rung. The fallback is not the loss it
+     * looks like either: the swap is bounded by PSRAM access time and not by how many columns a call
+     * receives, and measured across rectangles of every size on this board it runs at 71-84 ns per
+     * pixel — the per-call fixed cost a wider strip would amortise is the smaller part of that. */
+    static const int strip_candidates[] = {64, 48, 32};
+    size_t chunk_bytes = 0;
+    for (size_t i = 0; i < sizeof(strip_candidates) / sizeof(strip_candidates[0]); ++i) {
+        const int strip = strip_candidates[i];
+        const size_t bytes = (size_t)BOARD_DISPLAY_HEIGHT * (size_t)strip * sizeof(uint16_t);
+
+        ESP_LOGI(TAG, "DMA strips: trying %d columns (%u bytes each; internal DMA free %u, largest %u).",
+                 strip, (unsigned)bytes,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
+
+        s_dma_chunk[0] = (uint16_t *)heap_caps_aligned_alloc(64, bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+        s_dma_chunk[1] = (uint16_t *)heap_caps_aligned_alloc(64, bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+        if (s_dma_chunk[0] != NULL && s_dma_chunk[1] != NULL) {
+            s_chunk_strip_width = strip;
+            chunk_bytes = bytes;
+            break;
+        }
+
+        // Two of this width did not fit. Hand back whichever one landed and try the next step down.
+        if (s_dma_chunk[0]) { free(s_dma_chunk[0]); s_dma_chunk[0] = NULL; }
+        if (s_dma_chunk[1]) { free(s_dma_chunk[1]); s_dma_chunk[1] = NULL; }
+    }
+
+    if (s_dma_chunk[0] == NULL || s_dma_chunk[1] == NULL) {
+        ESP_LOGE(TAG, "No internal DMA memory for a ping-pong pair; the panel cannot be driven.");
+        return ESP_ERR_NO_MEM;
+    }
+
+    ESP_LOGI(TAG, "DMA ping-pong buffers initialized: %d column strips (%u bytes each).",
+             s_chunk_strip_width, (unsigned)chunk_bytes);
+
+#if BOARD_DISPLAY_PROFILE
+    // Here rather than later because the strip buffer it borrows is allocated and the panel is not yet
+    // drawing into it. Measuring and not acting: the numbers say which of the two fixes the swap
+    // wants, and neither is safe to guess at.
+    probe_bandwidth(chunk_bytes, s_dma_chunk[0]);
+#endif
 
     ESP_LOGI(TAG, "Initializing Waveshare 480x480 AMOLED display at %dMHz QSPI (high drive strength)...",
              BOARD_DISPLAY_QSPI_PCLK_HZ / 1000000);
@@ -287,48 +479,11 @@ esp_err_t board_display_init(void)
 #endif
     s_last_frame_start_us = esp_timer_get_time();
 
-    // Allocate vertical strip Ping-Pong DMA buffers (480 * 64 * 2 = 60KB each) from internal DMA SRAM
-    size_t chunk_bytes = BOARD_DISPLAY_HEIGHT * s_chunk_strip_width * sizeof(uint16_t);
-    s_dma_chunk[0] = (uint16_t *)heap_caps_aligned_alloc(64, chunk_bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    s_dma_chunk[1] = (uint16_t *)heap_caps_aligned_alloc(64, chunk_bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-
-    if (!s_dma_chunk[0] || !s_dma_chunk[1]) {
-        ESP_LOGW(TAG, "Could not allocate 64-col DMA buffers (120KB), falling back to 32 cols...");
-        if (s_dma_chunk[0]) { free(s_dma_chunk[0]); s_dma_chunk[0] = NULL; }
-        if (s_dma_chunk[1]) { free(s_dma_chunk[1]); s_dma_chunk[1] = NULL; }
-        s_chunk_strip_width = 32;
-        chunk_bytes = BOARD_DISPLAY_HEIGHT * s_chunk_strip_width * sizeof(uint16_t);
-        s_dma_chunk[0] = (uint16_t *)heap_caps_aligned_alloc(64, chunk_bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-        s_dma_chunk[1] = (uint16_t *)heap_caps_aligned_alloc(64, chunk_bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    }
-    ESP_LOGI(TAG, "DMA ping-pong buffers initialized: %d column strips (%u bytes each).", s_chunk_strip_width, (unsigned)chunk_bytes);
-
     // Zero-clear entire GRAM to pure black (0x0000) so uninitialized memory is never visible
     memset(s_dma_chunk[0], 0, chunk_bytes);
     for (int32_t x = 0; x < BOARD_DISPLAY_WIDTH; x += s_chunk_strip_width) {
         esp_lcd_panel_draw_bitmap(s_panel_handle, x, 0, x + s_chunk_strip_width, BOARD_DISPLAY_HEIGHT, s_dma_chunk[0]);
         xSemaphoreTake(s_trans_done_sem, portMAX_DELAY);
-    }
-
-    // The shadow frame the screenshot is taken from (see the note by `s_shadow`). PSRAM only: it is
-    // half a megabyte, it is only read when somebody asks for a picture, and the internal heap is
-    // where the DMA strips and the Rust UI live. A board that cannot spare it simply has no
-    // screenshot, which is what a `NULL` here means.
-    if (s_shadow == NULL) {
-        s_shadow = (uint16_t *)heap_caps_malloc(
-            (size_t)BOARD_DISPLAY_WIDTH * BOARD_DISPLAY_HEIGHT * sizeof(uint16_t),
-            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (s_shadow != NULL) {
-            memset(s_shadow, 0, (size_t)BOARD_DISPLAY_WIDTH * BOARD_DISPLAY_HEIGHT * sizeof(uint16_t));
-            ESP_LOGI(TAG, "Shadow frame allocated in PSRAM (%u bytes).",
-                     (unsigned)((size_t)BOARD_DISPLAY_WIDTH * BOARD_DISPLAY_HEIGHT * sizeof(uint16_t)));
-        } else {
-            ESP_LOGW(TAG, "No PSRAM for the shadow frame; /api/screenshot will answer no_capture.");
-        }
-    }
-
-    if (s_shadow_lock == NULL) {
-        s_shadow_lock = xSemaphoreCreateMutex();
     }
 
 /*
@@ -368,6 +523,34 @@ esp_err_t board_display_init(void)
     return ESP_OK;
 }
 
+/* The `[send]` line: one flush split into the passes it is actually made of.
+ *
+ * The Rust side prints a `[flush]` line for the whole of `flush_damage`, which is the v-blank wait
+ * and the transfer together. That line is what made the transfer visible at all, and what it says is
+ * that a full-screen frame spends ~44 ms in it against the 11.5 ms the QSPI link needs to carry the
+ * 460 KB — so two thirds of the transfer is not the transfer. What it cannot say is *which* of the
+ * passes inside this function owns that third, and the answer this probe first produced was the byte
+ * swap: `copy_row_rgb565_be` moving the rectangle through PSRAM, which is most of the 44 ms, ahead of
+ * a transfer that is then left with almost nothing to wait for.
+ *
+ * So this splits that gap into the passes it can — the byte swap into the DMA strips, the wait for a
+ * strip to drain, and whatever is left over, which is `esp_lcd_panel_draw_bitmap`'s own work on the
+ * calling thread; a total that is much larger than the sum is a finding in itself.
+ *
+ * `shadow` is kept as a field so that this log can be read against the ones taken before the shadow
+ * frame was removed, and it prints 0.00 in every build now. The pass it timed was a full-screen PSRAM
+ * round trip in front of every flush — 20.92 ms of the 44.62 ms line above — paid on every frame so
+ * that an occasional `/api/screenshot` would find a picture ready. A capture now reads the frame
+ * buffer the flush was handed (see `s_last_pixels`), so that cost sits on the request instead of the
+ * frame. Read `swap` next: it is the same kind of PSRAM pass and the largest term that remains.
+ *
+ * The probe is off unless the build asks for it: see the `BOARD_DISPLAY_PROFILE` in
+ * `board_hal/CMakeLists.txt`, which is `render-debug` on the Rust side too. It is measurement
+ * scaffolding and not a feature. */
+#ifndef BOARD_DISPLAY_PROFILE
+#define BOARD_DISPLAY_PROFILE 0
+#endif
+
 void hal_display_draw_bitmap(int32_t x1, int32_t y1, int32_t x2, int32_t y2, const uint16_t *pixels,
                               int32_t stride)
 {
@@ -395,14 +578,17 @@ void hal_display_draw_bitmap(int32_t x1, int32_t y1, int32_t x2, int32_t y2, con
         return;
     }
 
-    // Fold this rectangle into the shadow frame before it goes out. Done first, and on the calling
-    // thread, so the picture is current even while the DMA underneath is still catching up.
-    if (s_shadow != NULL) {
-        for (int32_t row = 0; row < height; row++) {
-            memcpy(s_shadow + (size_t)(y1 + row) * BOARD_DISPLAY_WIDTH + x1,
-                   pixels + (size_t)(y1 + row) * stride + x1, (size_t)width * sizeof(uint16_t));
-        }
-    }
+#if BOARD_DISPLAY_PROFILE
+    // Started after the early returns so the total covers exactly the work below, and read against
+    // the same microsecond clock `hal_display_wait_vsync` paces frames with. Three probes per call:
+    // this is a handful of readings against tens of milliseconds, and the numbers it produces are the
+    // ones that decide what to change.
+    const int64_t probe_start_us = esp_timer_get_time();
+    int64_t shadow_us = 0;
+    int64_t swap_us = 0;
+    int64_t dma_us = 0;
+    int32_t strips = 0;
+#endif
 
     // Only auto-synchronize if no frame pacing timestamp was recorded at all
     if (s_last_frame_start_us == 0) {
@@ -421,15 +607,28 @@ void hal_display_draw_bitmap(int32_t x1, int32_t y1, int32_t x2, int32_t y2, con
         int32_t strip_w = cur_x2 - cur_x1;
 
         // Byte-swap into the ping-pong chunk buffer
+#if BOARD_DISPLAY_PROFILE
+        const int64_t probe_t0 = esp_timer_get_time();
+#endif
         for (int32_t r = 0; r < height; ++r) {
             const uint16_t *in = pixels + (size_t)(y1 + r) * (size_t)stride + (size_t)cur_x1;
             uint16_t *out = s_dma_chunk[buf_idx] + (size_t)r * (size_t)strip_w;
             copy_row_rgb565_be(in, out, strip_w);
         }
+#if BOARD_DISPLAY_PROFILE
+        swap_us += esp_timer_get_time() - probe_t0;
+        strips++;
+#endif
 
         // Wait for previous DMA transaction to complete before queuing new one
         if (dma_pending) {
+#if BOARD_DISPLAY_PROFILE
+            const int64_t probe_w0 = esp_timer_get_time();
+#endif
             xSemaphoreTake(s_trans_done_sem, portMAX_DELAY);
+#if BOARD_DISPLAY_PROFILE
+            dma_us += esp_timer_get_time() - probe_w0;
+#endif
             dma_pending = false;
         }
 
@@ -443,8 +642,65 @@ void hal_display_draw_bitmap(int32_t x1, int32_t y1, int32_t x2, int32_t y2, con
 
     // Wait for the final chunk's DMA transfer to finish
     if (dma_pending) {
+#if BOARD_DISPLAY_PROFILE
+        const int64_t probe_w0 = esp_timer_get_time();
+#endif
         xSemaphoreTake(s_trans_done_sem, portMAX_DELAY);
+#if BOARD_DISPLAY_PROFILE
+        dma_us += esp_timer_get_time() - probe_w0;
+#endif
     }
+
+#if BOARD_DISPLAY_PROFILE
+    {
+        const int64_t send_us = esp_timer_get_time() - probe_start_us;
+        int64_t other_us = send_us - (shadow_us + swap_us + dma_us);
+
+        // Never printed below zero: the three probes are separate readings of a microsecond clock, so
+        // their sum can land a few microseconds past the total that contains them, and a negative
+        // remainder would read as one of the measurements having gone backwards.
+        if (other_us < 0) {
+            other_us = 0;
+        }
+
+        const double px = (double)width * (double)height;
+
+        /* One line per call, so one per region the Rust side planned — and on almost every frame that
+         * is one region, which is what makes these four terms the `send` of that frame's `[flush]`
+         * line, less the loop over regions around them.
+         *
+         * `dma` is time *blocked*, not time transferred: the swap of the next strip is done before the
+         * previous strip's transfer is waited on, so the two overlap by design and only what the
+         * overlap could not hide shows up here. Adding the three together is therefore sound rather
+         * than double-counting.
+         *
+         * `MB/s` counts the pixels this call carried against its whole total, so it is a floor on the
+         * wire and not the wire: a full-screen call is 11.5 ms of QSPI at the link's 80 MHz. */
+        printf("[send] shadow %.2f  swap %.2f  dma %.2f  other %.2f  total %.2fms  px %d  strips %d  %.1f MB/s\n",
+               (double)shadow_us / 1000.0,
+               (double)swap_us / 1000.0,
+               (double)dma_us / 1000.0,
+               (double)other_us / 1000.0,
+               (double)send_us / 1000.0,
+               (int)(width * height),
+               (int)strips,
+               send_us > 0 ? px * 2.0 / ((double)send_us / 1000000.0) / 1000000.0 : 0.0);
+
+        // Flushed here and not left to the console's own buffering, so that the line lands before the
+        // `[flush]` line the Rust side prints for the same frame a moment later: it is `printf`'s
+        // buffer against a plain write to stdout on the other side of the FFI, and reordering the two
+        // would make this line look like it belonged to the frame after the one it explains.
+        fflush(stdout);
+    }
+#endif
+
+    // What the panel was just given, for a capture to read later. Recorded once the last strip has
+    // drained rather than before the loop, so a screenshot sees a frame the panel has already taken
+    // and not one still being assembled. Stride first and pointer second: a capture that runs between
+    // the two stores takes the pointer of the previous frame with the width of this one, and the width
+    // is the panel's in every frame the compositor can produce.
+    s_last_stride = stride;
+    s_last_pixels = pixels;
 
     // Turn on display and full brightness seamlessly once the first valid frame is written
     if (!s_display_active) {
@@ -489,7 +745,9 @@ bool hal_display_is_powered(void)
 
 bool hal_display_has_capture(void)
 {
-    return s_shadow != NULL;
+    // A frame has to have reached the panel before there is anything to read: until the first flush
+    // there is no frame buffer to point at, which is the one way a capture can be unavailable now.
+    return s_last_pixels != NULL;
 }
 
 esp_err_t hal_display_capture(uint16_t *out, size_t pixels)
@@ -497,19 +755,26 @@ esp_err_t hal_display_capture(uint16_t *out, size_t pixels)
     if (out == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (s_shadow == NULL) {
-        return ESP_ERR_INVALID_STATE;
-    }
     if (pixels < (size_t)BOARD_DISPLAY_WIDTH * BOARD_DISPLAY_HEIGHT) {
         return ESP_ERR_INVALID_SIZE;
     }
-    if (s_shadow_lock != NULL) {
-        xSemaphoreTake(s_shadow_lock, portMAX_DELAY);
+
+    // Read as the pair the flush wrote them in, so the pointer is never paired with a stale stride.
+    const uint16_t *src = s_last_pixels;
+    const int32_t stride = s_last_stride;
+    if (src == NULL || stride < BOARD_DISPLAY_WIDTH) {
+        return ESP_ERR_INVALID_STATE;
     }
-    memcpy(out, s_shadow, (size_t)BOARD_DISPLAY_WIDTH * BOARD_DISPLAY_HEIGHT * sizeof(uint16_t));
-    if (s_shadow_lock != NULL) {
-        xSemaphoreGive(s_shadow_lock);
+
+    /* Row by row, because the frame buffer is a stride wide and `out` is not. This is the whole cost
+     * of a capture now: one pass over the screen, on the request that wanted the picture, instead of
+     * one on every frame in case one might. */
+    for (int32_t row = 0; row < BOARD_DISPLAY_HEIGHT; ++row) {
+        memcpy(out + (size_t)row * BOARD_DISPLAY_WIDTH,
+               src + (size_t)row * (size_t)stride,
+               (size_t)BOARD_DISPLAY_WIDTH * sizeof(uint16_t));
     }
+
     return ESP_OK;
 }
 

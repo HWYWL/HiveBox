@@ -3,7 +3,7 @@
 use std::time::{Duration, SystemTime};
 
 use crate::error::HalError;
-use crate::types::{ChipInfo, FirmwareInfo, MemoryInfo, TaskInfo};
+use crate::types::{ChipInfo, FirmwareInfo, MemoryInfo, TaskReading};
 
 /// The board's own account of itself: the chip, the firmware on it, and the three readings that
 /// move while it runs.
@@ -42,7 +42,7 @@ pub trait SystemBackend: Send + Sync {
     /// The heap.
     fn memory(&self) -> Result<MemoryInfo, HalError>;
 
-    /// The tasks the board's scheduler is running.
+    /// The tasks the board's scheduler is running, and the run time counter they are measured against.
     ///
     /// A reading, like everything else here, and the one a page is most likely to want again a second
     /// later: what a task list is *for* is watching it change.
@@ -50,7 +50,17 @@ pub trait SystemBackend: Send + Sync {
     /// Ordered as the platform lists them rather than sorted here. A platform that knows a better
     /// order — the scheduler's own — should not have it thrown away, and sorting is the page's
     /// business.
-    fn tasks(&self) -> Result<Vec<TaskInfo>, HalError>;
+    ///
+    /// A [`TaskReading`] and not a bare list, because a task's run time is only ever read as a share of
+    /// the whole, and the whole is the counter that was read *beside* the list. Asked for by a second
+    /// call it would be a total from another moment, and a percentage of two moments is a percentage of
+    /// something that never happened — the same reason [`MemoryInfo`] carries both of its own numbers
+    /// rather than letting a caller count the heap.
+    ///
+    /// The run times are absent on a board that keeps no such clock, which is an ordinary image built
+    /// without the run time stats rather than a failure of this read: the list is still the list, and
+    /// a page drawing one still has a page to draw.
+    fn tasks(&self) -> Result<TaskReading, HalError>;
 
     /// The external RAM, when the board has any.
     ///

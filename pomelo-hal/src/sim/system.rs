@@ -4,7 +4,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::error::HalError;
 use crate::traits::SystemBackend;
-use crate::types::{ChipInfo, FirmwareInfo, MemoryInfo, TaskInfo, TaskState};
+use crate::types::{ChipInfo, FirmwareInfo, MemoryInfo, TaskInfo, TaskReading, TaskState};
 
 /// The board a desktop process pretends to be.
 ///
@@ -95,18 +95,28 @@ impl SystemBackend for SimSystem {
     ///
     /// (A real high-water mark only ever shrinks. Wobbling it is the simulator's business and not a
     /// claim about the board: see the note at the top of this file.)
-    fn tasks(&self) -> Result<Vec<TaskInfo>, HalError> {
-        /// What the board runs: `(name, priority, core, least stack free in bytes, waiting?)`.
-        const TASKS: [(&str, u8, u8, u32, bool); 9] = [
-            ("main", 1, 0, 2_048, false),
-            ("pomelo-ui", 5, 1, 1_024, false),
-            ("esp_timer", 22, 0, 3_072, true),
-            ("ipc0", 24, 0, 512, false),
-            ("ipc1", 24, 1, 512, false),
-            ("wifi", 23, 0, 4_096, true),
-            ("Tmr Svc", 1, 0, 1_536, false),
-            ("IDLE0", 0, 0, 256, true),
-            ("IDLE1", 0, 1, 256, true),
+    ///
+    /// The run times are shares of this simulation's own uptime, and they grow because it does. On the
+    /// board they come out of a counter that is counting the same clock the uptime read is, which is
+    /// why the two agree here rather than being made up twice.
+    fn tasks(&self) -> Result<TaskReading, HalError> {
+        // What the board runs: `(name, priority, core, least stack free in bytes, waiting?, weight)`.
+        //
+        // The weight is the task's share of the counter, in hundredths, and the nine of them are meant
+        // to add up to a whole one: a share is only a share of the sum, so a share that did not would
+        // make this reading a different size than the uptime beside it. Which task gets which is the
+        // simulator's business and not a claim about this firmware — the two idle ones are equal on
+        // purpose, so that nothing here reads as a finding about where the board's time goes.
+        const TASKS: [(&str, u8, u8, u32, bool, u32); 9] = [
+            ("main", 1, 0, 2_048, false, 12),
+            ("pomelo-ui", 5, 1, 1_024, false, 33),
+            ("esp_timer", 22, 0, 3_072, true, 2),
+            ("ipc0", 24, 0, 512, false, 1),
+            ("ipc1", 24, 1, 512, false, 1),
+            ("wifi", 23, 0, 4_096, true, 5),
+            ("Tmr Svc", 1, 0, 1_536, false, 2),
+            ("IDLE0", 0, 0, 256, true, 22),
+            ("IDLE1", 0, 1, 256, true, 22),
         ];
 
         /// How far a stack reading swings, either way, and one whole swing, in seconds.
@@ -115,34 +125,45 @@ impl SystemBackend for SimSystem {
         /// How long a task spends waiting, out of a cycle of its own.
         const WAIT_PERIOD_SECS: f32 = 4.0;
 
-        let elapsed = self.start.elapsed().as_secs_f32();
+        let uptime = self.start.elapsed();
+        let elapsed = uptime.as_secs_f32();
         let phase = elapsed / PERIOD_SECS * std::f32::consts::TAU;
 
-        Ok(TASKS
-            .iter()
-            .enumerate()
-            .map(|(index, &(name, priority, core, free, waits))| {
-                // Each task swings out of step with the others and waits on a cycle of its own, so a
-                // page drawing one number — or one state — for all of them can be caught doing it.
-                let swing = SWING_BYTES as f32 * (0.5 + 0.5 * (phase + index as f32).sin());
-                let waiting = waits
-                    && (elapsed / WAIT_PERIOD_SECS + index as f32).fract() < 0.5;
+        // The counter every row below is a share of. Summed from the table rather than written down
+        // beside it: two numbers that have to agree eventually will not.
+        let total = uptime.as_micros() as u64;
+        let weights: u64 = TASKS.iter().map(|&(.., weight)| u64::from(weight)).sum();
 
-                TaskInfo {
-                    name: String::from(name),
-                    state: if waiting {
-                        TaskState::Blocked
-                    } else {
-                        TaskState::Running
-                    },
-                    priority,
-                    stack_free_bytes: free + swing as u32,
-                    core: Some(core),
-                    // The one this reading was taken from: the task the panel is drawn by.
-                    current: index == 1,
-                }
-            })
-            .collect())
+        Ok(TaskReading {
+            tasks: TASKS
+                .iter()
+                .enumerate()
+                .map(|(index, &(name, priority, core, free, waits, weight))| {
+                    // Each task swings out of step with the others and waits on a cycle of its own, so
+                    // a page drawing one number — or one state — for all of them can be caught doing
+                    // it.
+                    let swing = SWING_BYTES as f32 * (0.5 + 0.5 * (phase + index as f32).sin());
+                    let waiting = waits
+                        && (elapsed / WAIT_PERIOD_SECS + index as f32).fract() < 0.5;
+
+                    TaskInfo {
+                        name: String::from(name),
+                        state: if waiting {
+                            TaskState::Blocked
+                        } else {
+                            TaskState::Running
+                        },
+                        priority,
+                        stack_free_bytes: free + swing as u32,
+                        core: Some(core),
+                        // The one this reading was taken from: the task the panel is drawn by.
+                        current: index == 1,
+                        run_time: Some(Duration::from_micros(total * u64::from(weight) / weights)),
+                    }
+                })
+                .collect(),
+            total_run_time: Some(uptime),
+        })
     }
 
     /// The 8 MB of PSRAM beside the internal heap, which is the pool the framebuffer and the log ring
@@ -230,7 +251,8 @@ mod tests {
     #[test]
     fn the_task_list_names_what_a_board_runs() {
         let system = SimSystem::new();
-        let tasks = system.tasks().expect("the simulator always answers");
+        let reading = system.tasks().expect("the simulator always answers");
+        let tasks = &reading.tasks;
 
         assert!(tasks.len() >= 4, "{tasks:?}");
         assert!(
@@ -254,5 +276,38 @@ mod tests {
         let psram = system.psram().unwrap().expect("this board has PSRAM");
         assert!(psram.free_bytes < psram.total_bytes, "{psram:?}");
         assert!(psram.used_percent() > 0.0);
+    }
+
+    /// Each task's run time is a share of a total the reading carries beside it, and the shares add up.
+    ///
+    /// The relation is what makes the numbers usable and what a panel cannot show: a percentage is only
+    /// a percentage of the total it was taken against, so a list whose shares did not sum to the whole
+    /// would be a list disagreeing with the clock it came from. Which task gets which share is the
+    /// simulator's business; that they are shares of one counter is not.
+    #[test]
+    fn the_task_run_times_are_shares_of_the_total_beside_them() {
+        let system = SimSystem::new();
+
+        // Let the counter count. At the microseconds it takes to build the list every weight in the
+        // table floors to zero, and a share of a total of zero is not a small share — it is no share
+        // at all, which would make this test one that asserts nothing.
+        std::thread::sleep(Duration::from_millis(10));
+
+        let reading = system.tasks().expect("the simulator always answers");
+        let total = reading.total_run_time.expect("the simulator counts run time");
+        assert!(total >= Duration::from_millis(10), "{total:?}");
+
+        let summed: Duration = reading.tasks.iter().filter_map(|task| task.run_time).sum();
+        assert!(summed <= total, "{summed:?} out of {total:?}");
+
+        let shares: f32 = reading
+            .tasks
+            .iter()
+            .filter_map(|task| reading.share_of(task))
+            .sum();
+        assert!(
+            (shares - 100.0).abs() <= 1.0,
+            "the shares add up to {shares}, and a share that is not of the whole is not a share"
+        );
     }
 }

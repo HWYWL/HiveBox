@@ -18,6 +18,16 @@
 //! a second time is 3× cheaper) and pays only the blits after that. Rasterising, the blit, the
 //! `clear` and the panel write are all per-glyph or per-pixel costs, which is what scales with the
 //! hardware; the raw "paint" number in the firmware's own log cannot say which of them it is.
+//!
+//! # The half the split cannot see
+//!
+//! A frame does not end where those phases do. The renderer hands its damage over and the host then
+//! waits for a v-blank and pushes the pixels into the panel — a PSRAM copy into the shadow frame, a
+//! byte swap into the DMA strips, and a QSPI transfer of each strip, all of it on the calling
+//! thread. None of that is a [`Phase`]: the phases are the renderer's and end at the hand-off, which
+//! is exactly why [`Frame::total`] stops there. [`panel_write`] is the other half, printed as a
+//! `[flush]` line directly after the `[phase]` line of the same frame, so that "the phases are
+//! cheap and the frame is not" becomes a number instead of a suspicion.
 
 use std::time::Duration;
 
@@ -217,6 +227,135 @@ pub fn report() {
             frame.rasterised,
             frame.total().as_secs_f64() * 1000.0
         );
+    }
+}
+
+/// Times the panel's half of the frame: the wait in front of it, and the transfer into it.
+///
+/// The two are kept apart because they are different problems. The wait is the frame being paced —
+/// a v-blank the renderer could have spent drawing the next frame in, which is what overlapping
+/// them would buy. The transfer is work that has to happen: every damaged pixel is copied into the
+/// shadow frame, byte-swapped into the DMA strips and pushed over QSPI, and all of it is inside
+/// `flush_damage`, where [`Frame::total`] cannot see it.
+///
+/// The caller marks each half as it passes:
+///
+/// ```ignore
+/// let mut write = iced_pomelo_gfx::profile::panel_write();
+///
+/// unsafe { hal_display_wait_vsync() };
+/// write.waited();
+///
+/// let sent = flush_damage(damage, pixels);
+/// write.sent(sent.regions, sent.pixels);
+/// ```
+///
+/// Dropping the guard prints the line, which is why there is no `report` to match [`report`]: a
+/// frame's counters are taken by `[phase]` *before* the panel is touched, so these numbers do not
+/// exist yet at that point and cannot join it. The pixel count and the rate beside it are what make
+/// the transfer a number rather than a duration — a slow flush that is moving a whole screen and one
+/// that is moving a status bar want opposite fixes, and only these tell them apart.
+///
+/// The rate covers the whole transfer and not the QSPI traffic alone, so read it as a floor on the
+/// wire and not as the wire: the shadow copy and the byte swap happen inside that interval, and a
+/// full-screen frame is 11.5 ms of transfer at the link's 40 MB/s, so a rate well under that is not
+/// evidence of a slow panel. It is the evidence that the copy in front of it is worth splitting out.
+#[must_use = "the guard is what times the write; dropping it immediately reports nothing"]
+pub fn panel_write() -> PanelWrite {
+    PanelWrite::new()
+}
+
+/// One panel write being timed, or nothing at all when the crate is built without `profile`.
+#[derive(Debug)]
+pub struct PanelWrite {
+    #[cfg(feature = "profile")]
+    started: std::time::Instant,
+    /// When the v-blank came back: the end of the wait and the start of the transfer.
+    #[cfg(feature = "profile")]
+    marked: std::time::Instant,
+    #[cfg(feature = "profile")]
+    waited: Duration,
+    #[cfg(feature = "profile")]
+    transferred: Duration,
+    /// The transfers sent and the pixels they carried, or `None` if the frame never went out.
+    #[cfg(feature = "profile")]
+    counts: Option<(usize, u64)>,
+}
+
+impl PanelWrite {
+    fn new() -> Self {
+        #[cfg(feature = "profile")]
+        {
+            let now = std::time::Instant::now();
+
+            Self {
+                started: now,
+                marked: now,
+                waited: Duration::ZERO,
+                transferred: Duration::ZERO,
+                counts: None,
+            }
+        }
+
+        #[cfg(not(feature = "profile"))]
+        {
+            Self {}
+        }
+    }
+
+    /// Marks the frame paced: the v-blank it was held for has come back.
+    pub fn waited(&mut self) {
+        #[cfg(feature = "profile")]
+        {
+            self.waited = self.started.elapsed();
+            self.marked = std::time::Instant::now();
+        }
+    }
+
+    /// Marks the frame handed over: how many transfers it became, and how many pixels they carried.
+    ///
+    /// Both are counted after the damage has been merged, so they describe the transfers actually
+    /// made rather than the rectangles the compositor reported.
+    pub fn sent(&mut self, regions: usize, pixels: u64) {
+        #[cfg(feature = "profile")]
+        {
+            self.transferred = self.marked.elapsed();
+            self.counts = Some((regions, pixels));
+        }
+
+        #[cfg(not(feature = "profile"))]
+        let _ = (regions, pixels);
+    }
+}
+
+impl Drop for PanelWrite {
+    fn drop(&mut self) {
+        #[cfg(feature = "profile")]
+        {
+            // No counts means the frame never reached the panel. That is not a slow frame but a
+            // frame that did not happen, and a line of zeros would only be noise between the ones
+            // that did.
+            let Some((regions, pixels)) = self.counts else {
+                return;
+            };
+
+            let millis = |spent: Duration| spent.as_secs_f64() * 1000.0;
+            let seconds = self.transferred.as_secs_f64();
+            let rate = if seconds > 0.0 {
+                pixels as f64 * 2.0 / seconds / 1_000_000.0
+            } else {
+                0.0
+            };
+
+            println!(
+                "[flush] wait {:.2}  send {:.2}  total {:.2}ms  px {}  regions {}  {rate:.1} MB/s",
+                millis(self.waited),
+                millis(self.transferred),
+                millis(self.waited + self.transferred),
+                pixels,
+                regions
+            );
+        }
     }
 }
 

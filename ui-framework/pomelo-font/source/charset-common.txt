@@ -4,3 +4,7 @@
 # every character in this file ends up in the subset, this line included.
 渲
 浏
+
+# Not drawn anywhere yet: U+96F2, the traditional form of U+4E91. One glyph, and one glyph is about
+# 506 B in the 24 px table.
+雲

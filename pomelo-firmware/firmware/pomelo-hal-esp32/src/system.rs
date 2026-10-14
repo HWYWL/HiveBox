@@ -27,7 +27,7 @@ use std::mem::MaybeUninit;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pomelo_hal::{
-    ChipInfo, FirmwareInfo, HalError, MemoryInfo, SystemBackend, TaskInfo, TaskState,
+    ChipInfo, FirmwareInfo, HalError, MemoryInfo, SystemBackend, TaskInfo, TaskReading, TaskState,
 };
 
 mod ffi {
@@ -88,6 +88,12 @@ mod ffi {
         pub core: u8,
         pub current: u8,
         pub stack_free_bytes: u32,
+        /// Microseconds of the scheduler's run time counter, or zero for an image that keeps none.
+        ///
+        /// At the end of the struct like its C twin, and for the same reason: a 64-bit field in the
+        /// middle of one is a field that moves every one after it, and the two languages have to
+        /// agree about where they are.
+        pub run_time_us: u64,
     }
 
     /// Mirrors `hal_system_tasks_t`.
@@ -99,6 +105,8 @@ mod ffi {
     pub struct HalSystemTasks {
         pub count: u32,
         pub tasks: [HalSystemTask; MAX_TASKS],
+        /// Mirrors `hal_system_tasks_t::total_run_time_us`.
+        pub total_run_time_us: u64,
     }
 
     extern "C" {
@@ -125,6 +133,21 @@ fn c_buf_to_string(buf: &[c_char]) -> String {
     let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, len) };
     String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// The run time the C side counted, and whether it counted any at all.
+///
+/// Both the total and every task's reading come across as zero when an image is built without the run
+/// time stats, and a task that has not been given the CPU yet reports the same zero. The two are told
+/// apart here, once for a whole reading, and by the total: a single task at zero is an ordinary row in
+/// a list that counts, while a total of zero means there is no clock behind any of the rows. That is
+/// the reason the total is asked for at all — see the note on the C side's `hal_system_tasks_t`.
+///
+/// `None` is also the answer for a board whose scheduler has not switched a task yet, which the C side
+/// reports as the same zero. A total of nothing has no share to take either way, so the two need not
+/// be told apart; the reading says "no run time reported", which is true of both.
+fn run_times(total_micros: u64) -> Option<Duration> {
+    (total_micros > 0).then(|| Duration::from_micros(total_micros))
 }
 
 /// `hal_system_task_t::state` as the enum it stands for.
@@ -245,11 +268,14 @@ impl SystemBackend for EspSystem {
 
     /// The tasks the scheduler is running, read out of `uxTaskGetSystemState`.
     ///
-    /// An empty `Vec` is a board with nothing to say — an image built without the trace facility —
+    /// An empty list is a board with nothing to say — an image built without the trace facility —
     /// rather than a failure: the C side answers `ESP_OK` with a count of zero for exactly that case,
     /// and a page drawing "no tasks" is drawing the truth about such an image. The core comes across
     /// as `0xff` for "either, or not reported", which is the one value a real core number cannot be.
-    fn tasks(&self) -> Result<Vec<TaskInfo>, HalError> {
+    ///
+    /// The run times come across as zero on a board that counts none of them, which is one value for
+    /// both halves of the reading, and [`run_times`] is what turns the pair into the one answer.
+    fn tasks(&self) -> Result<TaskReading, HalError> {
         let mut raw = MaybeUninit::<ffi::HalSystemTasks>::uninit();
 
         let code = unsafe { ffi::hal_system_get_tasks(raw.as_mut_ptr()) };
@@ -261,18 +287,27 @@ impl SystemBackend for EspSystem {
         // The count is the C side's, and this is what keeps a count larger than the array — which
         // cannot happen from this C code and could from another — from walking off the end of it.
         let count = (raw.count as usize).min(ffi::MAX_TASKS);
+        // Read once, before the rows, because whether there is a clock at all is a property of the
+        // reading and not of any one row in it.
+        let clock = run_times(raw.total_run_time_us);
 
-        Ok(raw.tasks[..count]
-            .iter()
-            .map(|task| TaskInfo {
-                name: c_buf_to_string(&task.name),
-                state: task_state(task.state),
-                priority: task.priority,
-                stack_free_bytes: task.stack_free_bytes,
-                core: (task.core < 2).then_some(task.core),
-                current: task.current != 0,
-            })
-            .collect())
+        Ok(TaskReading {
+            tasks: raw.tasks[..count]
+                .iter()
+                .map(|task| TaskInfo {
+                    name: c_buf_to_string(&task.name),
+                    state: task_state(task.state),
+                    priority: task.priority,
+                    stack_free_bytes: task.stack_free_bytes,
+                    core: (task.core < 2).then_some(task.core),
+                    current: task.current != 0,
+                    // A zero here is a task that has not run — the whole reading is known to be
+                    // counting, so the value means what it says.
+                    run_time: clock.map(|_| Duration::from_micros(task.run_time_us)),
+                })
+                .collect(),
+            total_run_time: clock,
+        })
     }
 
     /// The external RAM, which this board has: the pool the framebuffer and the log ring come out of.

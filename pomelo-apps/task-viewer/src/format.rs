@@ -1,4 +1,4 @@
-//! The three bits of arithmetic a list like this is made of, kept out of the widgets.
+//! The four bits of arithmetic a list like this is made of, kept out of the widgets.
 //!
 //! Nothing here reads a board or draws anything: every function takes a number and returns a string,
 //! which is what makes them testable without a panel — and what makes the one thing that must not
@@ -57,6 +57,20 @@ pub fn clock_of(uptime: Duration) -> String {
     let (hours, minutes, seconds) = (seconds / 3600, (seconds / 60) % 60, seconds % 60);
 
     format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
+/// A task's share of the board's run time counter, as a percentage to one decimal.
+///
+/// One decimal and not none, because the shares at the bottom of the range are the ones worth seeing: a
+/// task at `0.4` per cent of the counter is a task that did something, and rounding it to `0` would file
+/// it with the tasks that have not run. Which is also why nothing here spells "no reading at all": a
+/// share of zero is a reading, and the dash that answers a board with no run time counter is the
+/// caller's to draw.
+///
+/// No `%` on the number itself — the unit belongs in the column's head, where it is written once, and
+/// not on nine rows that would each be a character wider for saying the same thing.
+pub fn share_of(percent: f32) -> String {
+    format!("{percent:.1}")
 }
 
 #[cfg(test)]
@@ -133,5 +147,23 @@ mod tests {
             "30:01:01",
             "a board that has been up for a day says so rather than wrapping"
         );
+    }
+
+    /// A share is one decimal wide, and a share of nothing is not the absence of a reading.
+    ///
+    /// The zero is the case worth pinning: a task that has run for no measurable time draws `0.0`, and
+    /// the dash that answers "this board counts no run times at all" is drawn by the caller. A function
+    /// that spelled those two the same way would put two different readings of the board on the page as
+    /// one. The last case is the other end: the widest thing the column has to hold.
+    #[test]
+    fn a_share_is_one_decimal() {
+        assert_eq!(
+            share_of(0.0),
+            "0.0",
+            "a task that has run is not a task with no counter"
+        );
+        assert_eq!(share_of(0.4), "0.4");
+        assert_eq!(share_of(12.34), "12.3");
+        assert_eq!(share_of(99.96), "100.0");
     }
 }
