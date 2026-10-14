@@ -19,6 +19,15 @@ license = "GPL-3.0-only"
 # iced's software renderer, and the board's root turns that off and supplies its own.
 iced = { version = "0.14", default-features = false, features = ["thread-pool", "x11", "wayland"] }
 
+# The board, and through it the machine at the other end of the wire — the same dependency the
+# NAS monitor has, and for the same reason. The terminal's *own* shell needs no board: what needs
+# one is a session on somebody else's machine, and a session is opened through `NasBackend` like
+# every other look at it — an SSH client is behind that trait and stays behind it.
+#
+# From GitHub by revision like its siblings: sibling repositories, and this project builds on its
+# own.
+pomelo-hal = { git = "https://github.com/pomelos-on-sale/pomelo-hal.git", rev = "20eaa910f0a05cd68684d6aa868fd78457c51be9" }
+
 # The shared widgets — today the on-screen keyboard, which the settings app draws too, one key
 # table for both. It carries no renderer of its own, so `desktop` below is the only switch here.
 # From GitHub by revision: a sibling repository, and this project builds on its own.

@@ -173,8 +173,13 @@ pub enum Message {
     ConfirmDelete,
     /// The confirmation's no, and the way out of a question nobody meant to ask.
     CancelDelete,
-    /// The monitoring page's edit button: the form, filled in with the machine it is on.
-    Edit,
+    /// The monitoring page's terminal button: a shell on the machine this page is about.
+    ///
+    /// Handled by *nothing here* — see the arm in [`NasMonitor::update`]. Opening an app is the
+    /// launcher's business and this page is a widget inside it, so all the tap can do is say that
+    /// somebody asked, and the launcher is what hears it. A standalone monitor (`nas-monitor`'s own
+    /// `main`) has no launcher to hear it, which is why the entry does nothing at all there.
+    Terminal,
     /// A finger on one of the form's fields.
     Focus(Field),
     /// A key of the form's keyboard.
@@ -457,12 +462,10 @@ impl NasMonitor {
                 }
             }
             Message::CancelDelete => self.confirming = None,
-            Message::Edit => {
-                if let Some(watched) = self.watched.clone() {
-                    self.form = Form::of(&watched);
-                    self.screen = Screen::Form;
-                }
-            }
+            // The terminal entry: the page asks and the launcher opens. See [`Message::Terminal`] for
+            // why the act is not here — a page cannot change which app is on screen — and for what a
+            // standalone monitor does instead, which is nothing at all.
+            Message::Terminal => {}
             Message::Focus(field) => self.form.focus = field,
             Message::Key(action) => {
                 // The keyboard's return key saves, like the button under it — and saving is the app's,
@@ -709,13 +712,16 @@ impl NasMonitor {
             );
         }
 
-        // The two halves on the left and the way to correct this machine on the right: editing is not a
-        // half of the page, it is a thing a person does *to* the machine the page is about.
+        // The two halves on the left and the one thing a person does *to* the machine the page is about
+        // on the right: a shell on it. Not a half of the page, which is why it sits past the fill rather
+        // than with the tabs. Correcting the machine used to be here as well, as a bare pencil — it is
+        // the list row's now, where it can be reached without opening a session with a machine whose
+        // credentials may be the very thing that is wrong. See [`Message::EditDevice`].
         let tabs = Row::with_children(vec![
             self.tab_button(Tab::Overview, words.overview, sizes, theme, ink, muted),
             self.tab_button(Tab::Disks, words.disks, sizes, theme, ink, muted),
             Space::new().width(Length::Fill).into(),
-            icon_button(Message::Edit, Icon::EDIT, sizes, ink, muted),
+            terminal_button(Message::Terminal, words.terminal, sizes, theme, ink),
         ])
         .spacing(style::CELL_PAD)
         .align_y(Alignment::Center);
@@ -1706,10 +1712,14 @@ fn bar(share: f32, accent: Color, sizes: style::Sizes, theme: ThemeMode) -> Elem
     .into()
 }
 
-/// A bare glyph on a button: the actions in a header that are not readings — back, edit, reveal.
+/// A bare glyph on a button: the actions in a header that are not readings — back, reveal.
 ///
 /// Drawn muted and turning ink under the finger, which is the pair of colours every other muted thing
 /// on the page uses, and with no fill at all: a header has no room for a second shape on it.
+///
+/// A pencil was in that list until the monitoring page's header lost its own: correcting a machine is
+/// the list row's, where it can be reached without a session. See [`Message::EditDevice`], and
+/// [`terminal_button`], which is what the header kept.
 fn icon_button(
     message: Message,
     icon: Icon,
@@ -1731,6 +1741,59 @@ fn icon_button(
             ink
         } else {
             muted
+        },
+        ..button::Style::default()
+    })
+    .into()
+}
+
+/// The monitoring page's one action: a shell on the machine the header is about, as a glyph *and* a
+/// word.
+///
+/// A word, because the two tabs beside it are words: a glyph alone on that row would be a third thing
+/// whose meaning has to be guessed at, and it is the one thing there nobody can guess from the page
+/// they are looking at. Not *only* the word either, or it would read as a third tab — a half of the
+/// page rather than something done to the machine.
+///
+/// Sized with the tabs' own numbers, so the row is one height whichever shape each button holds, and
+/// pressed the way they are: the fill becomes [`style::track`] under the finger. What it rests on is
+/// [`style::card`] rather than that track, and the surface it sits on is why — the row's chips rest on
+/// a card, where a card-coloured one would be nothing at all, and this button rests on the page, where
+/// a card is what a shape looks like. See [`row_action`] for the same trade made the other way round.
+fn terminal_button(
+    message: Message,
+    label: &str,
+    sizes: style::Sizes,
+    theme: ThemeMode,
+    ink: Color,
+) -> Element<'static, Message> {
+    button(
+        Row::with_children(vec![
+            text(Icon::TERMINAL.glyph())
+                .font(pomelo_material_symbols::font())
+                .size(sizes.small)
+                .color(ink)
+                .into(),
+            Space::new().width(Length::Fixed(style::CELL_PAD)).into(),
+            text(label.to_string()).size(sizes.small).color(ink).into(),
+        ])
+        .align_y(Alignment::Center),
+    )
+    .padding([style::CELL_PAD * 0.6, style::CELL_PAD * 2.0])
+    .on_press(message)
+    .style(move |_theme, status| button::Style {
+        background: Some(
+            if matches!(status, button::Status::Pressed) {
+                style::track(theme)
+            } else {
+                style::card(theme)
+            }
+            .into(),
+        ),
+        text_color: ink,
+        border: Border {
+            radius: (sizes.small * 0.8).into(),
+            ..Border::default()
         },
         ..button::Style::default()
     })
@@ -2021,6 +2084,10 @@ struct Words {
     connecting: &'static str,
     overview: &'static str,
     disks: &'static str,
+    /// The word on the button beside those two tabs: a shell on the machine the page is about. See
+    /// [`terminal_button`], which is where it is drawn, and [`Message::Terminal`], which is what pressing
+    /// it says.
+    terminal: &'static str,
     heads: [&'static str; 6],
     /// What to call the machine before one has been named — the header's fallback, for a board nobody
     /// has pointed at anything yet. The credentials' host is what goes there once there are any.
@@ -2071,6 +2138,7 @@ impl Words {
                 connecting: "正在连接…",
                 overview: "概览",
                 disks: "硬盘",
+                terminal: "终端",
                 heads: ["硬盘", "容量", "温度", "繁忙", "读取", "写入"],
                 server: "服务器",
                 unconfigured: "还没有配置服务器：这台板子还不知道要看哪一台",
@@ -2115,6 +2183,7 @@ impl Words {
                 connecting: "connecting…",
                 overview: "Overview",
                 disks: "Disks",
+                terminal: "Terminal",
                 heads: ["DISK", "SIZE", "TEMP", "BUSY", "READ", "WRITE"],
                 server: "Server",
                 unconfigured: "No server configured: this board has not been told which one to watch",
@@ -2447,8 +2516,7 @@ mod tests {
     fn the_form_corrects_and_deletes() {
         let mut monitor = monitor();
 
-        monitor.update(Message::Open(0));
-        monitor.update(Message::Edit);
+        monitor.update(Message::EditDevice(0));
 
         assert_eq!(monitor.screen(), Screen::Form);
         assert_eq!(monitor.form.host, "192.168.1.10", "filled in with what is there");
@@ -2467,9 +2535,10 @@ mod tests {
         assert_eq!(monitor.devices().len(), 1, "corrected, not added a second time");
         assert_eq!(monitor.devices()[0].password, "n");
 
-        // And the same machine, dropped.
+        // And the same machine, dropped — through the form, which is the list's other way into it. Opened
+        // first, so that what the delete takes away is a machine this page was actually on.
         monitor.update(Message::Open(0));
-        monitor.update(Message::Edit);
+        monitor.update(Message::EditDevice(0));
         monitor.update(Message::Delete);
 
         assert_eq!(monitor.screen(), Screen::List);
@@ -2498,12 +2567,12 @@ mod tests {
     ///
     /// Which is the reason the pencil is on the row at all. Correcting a machine is what somebody does
     /// when its credentials are wrong — a password changed on the box, an account renamed — and opening a
-    /// session with it is the one thing wrong credentials will not allow. While the only pencil was the
-    /// one in the monitoring page's header, that meant opening the machine, which meant a session, which
-    /// meant it could not be done.
+    /// session with it is the one thing wrong credentials will not allow. While there was a pencil in the
+    /// monitoring page's header as well, that one meant opening the machine, which meant a session, which
+    /// meant it could not be done; the header's is gone and this is the only one left.
     ///
-    /// Two machines, and the page on the second, so that the header's pencil would open a *different* one
-    /// and the row's has to be read from the row.
+    /// Two machines, and the page on the second: the row's pencil has to open the *first* one, which is
+    /// not the machine the page is on.
     #[test]
     fn a_rows_pencil_opens_the_form_on_that_row() {
         let mut monitor = monitor_of_two_machines();
@@ -2610,7 +2679,7 @@ mod tests {
         // The first machine goes the long way round, through the form, which pulls the second row up into
         // the place the question was asked in.
         monitor.update(Message::Open(0));
-        monitor.update(Message::Edit);
+        monitor.update(Message::EditDevice(0));
         monitor.update(Message::Delete);
 
         assert_eq!(monitor.devices().len(), 1);
@@ -2829,6 +2898,29 @@ mod tests {
 
         monitor.update(Message::Show(Tab::Disks));
         assert_eq!(monitor.tab(), Tab::Disks);
+        let _ = monitor.view();
+    }
+
+    /// The terminal entry is the page *asking*, and nothing the page does: which app is on screen is the
+    /// launcher's business — see [`Message::Terminal`] — so the tap leaves the page exactly as it was.
+    /// What it does leave behind is the answer the launcher reaches in for: the machine the header is
+    /// about. A standalone monitor, with no launcher above it, is where the tap really does nothing.
+    #[test]
+    fn the_terminal_entry_leaves_the_page_alone_and_leaves_the_machine_for_the_launcher() {
+        let mut monitor = monitor();
+        monitor.update(Message::Open(0));
+        monitor.update(Message::Show(Tab::Disks));
+
+        monitor.update(Message::Terminal);
+
+        assert_eq!(monitor.screen(), Screen::Monitor, "the page did not move");
+        assert_eq!(monitor.tab(), Tab::Disks, "nor did its half of it");
+        assert_eq!(
+            monitor.watched().map(|device| device.host.as_str()),
+            Some("192.168.1.10"),
+            "and the machine it is about is what the launcher opens a session on"
+        );
+        // The header carries the entry, which is drawn from this page's own view with no launcher in it.
         let _ = monitor.view();
     }
 }

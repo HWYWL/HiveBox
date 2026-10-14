@@ -57,8 +57,8 @@ pub use traits::{
 pub use types::{
     ApInfo, AudioMeta, ChipInfo, FirmwareInfo, FlashLayout, FlashRegion, FlashRegionKind, HttpFault,
     HttpResponse, HttpState, InputAction, MemoryInfo, NasCpu, NasDisk, NasFault, NasNetwork,
-    NasReading, NasStatus, ScanState, SystemEvent, TaskInfo, TaskReading, TaskState, Vec3,
-    VolumeInfo, VolumeKind, WebStatus, WifiState, WifiStatus, signal_bars,
+    NasReading, NasShell, NasShellStatus, NasStatus, ScanState, SystemEvent, TaskInfo, TaskReading,
+    TaskState, Vec3, VolumeInfo, VolumeKind, WebStatus, WifiState, WifiStatus, signal_bars,
 };
 pub use wifi_credentials::WifiCredentials;
 
@@ -73,8 +73,9 @@ pub mod prelude {
     pub use crate::types::{
         ApInfo, AudioMeta, ChipInfo, FirmwareInfo, FlashLayout, FlashRegion, FlashRegionKind,
         HttpFault, HttpResponse, HttpState, InputAction, MemoryInfo, NasCpu, NasDisk, NasFault,
-        NasNetwork, NasReading, NasStatus, ScanState, SystemEvent, TaskInfo, TaskReading, TaskState,
-        Vec3, VolumeInfo, VolumeKind, WebStatus, WifiState, WifiStatus, signal_bars,
+        NasNetwork, NasReading, NasShell, NasShellStatus, NasStatus, ScanState, SystemEvent, TaskInfo,
+        TaskReading, TaskState, Vec3, VolumeInfo, VolumeKind, WebStatus, WifiState, WifiStatus,
+        signal_bars,
     };
     pub use crate::music_settings::MusicSettings;
     pub use crate::nas_credentials::NasCredentials;

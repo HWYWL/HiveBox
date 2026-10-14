@@ -3243,6 +3243,7 @@ version = "0.1.0"
 dependencies = [
  "iced",
  "iced_test",
+ "pomelo-hal",
  "pomelo-widgets",
 ]
 

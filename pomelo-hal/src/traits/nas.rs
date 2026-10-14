@@ -2,7 +2,7 @@
 
 use crate::error::HalError;
 use crate::nas_credentials::NasCredentials;
-use crate::types::NasReading;
+use crate::types::{NasReading, NasShell};
 
 /// Watching another computer's numbers from this one.
 ///
@@ -39,6 +39,25 @@ use crate::types::NasReading;
 /// scrape of a metrics daemon on the NAS; it is now an SSH login to a box that is already running one.
 /// Both are answers to "ask that machine for its numbers", and an app written against either would
 /// have had to be rewritten for the other. An app written against `NasBackend` is not.
+///
+/// # A terminal is the other kind of session
+///
+/// A look ([`NasBackend::refresh`]) opens a connection, runs one command and closes it again — *every
+/// time*, on purpose. A session kept between looks would have to survive the NAS rebooting, the router
+/// dropping a connection it considers idle, and the server's own `ClientAliveInterval`; all three are
+/// silent failures, and what they would surface as is an empty panel on somebody's desk.
+///
+/// A terminal cannot work that way. `cd /volume1` typed once has to still be in effect for the next
+/// line, and a login paid for on every keystroke is not a terminal — so
+/// [`NasBackend::shell_open`] keeps one, and pays the price the look refuses: it has to be watched for
+/// the day it dies, and [`NasShellStatus::Lost`][crate::types::NasShellStatus::Lost] is where a session
+/// that has died says so out loud.
+///
+/// The two are separate connections rather than one shared session, and that is deliberate: a page
+/// watching a machine's numbers should carry on doing it while somebody types in a terminal beside it,
+/// and neither should be able to break the other. A backend that can only afford one at a time is a
+/// backend whose terminal is a feature of its monitor, which is a smaller thing than this trait
+/// describes.
 pub trait NasBackend: Send + Sync {
     /// Every machine this board has been told about, in the order it was told about them.
     ///
@@ -126,5 +145,70 @@ pub trait NasBackend: Send + Sync {
     /// looks at one machine at a time and checks all of them.
     fn answering(&self, _host: &str) -> Option<bool> {
         None
+    }
+
+    /// Opens an interactive session on `host`: a shell at the other end, behind a pseudo-terminal,
+    /// that [`NasBackend::shell_write`] types into and [`NasBackend::shell_take`] reads back.
+    ///
+    /// `columns` and `rows` are the *screen's* size in characters, and they are the caller's to state
+    /// because the caller is what knows: a pseudo-terminal is how a program at the other end asks
+    /// whether it is talking to a person and how wide the answers should be, so a terminal that got
+    /// this wrong would be sent lines that do not fit the panel drawing them. A backend that cannot
+    /// honour a size should pass it on as far as it reaches rather than guessing.
+    ///
+    /// Like [`NasBackend::refresh`], this only *asks*: a login is a key exchange and a shell's first
+    /// prompt, and a frame cannot wait for either. What the session is doing is
+    /// [`NasShell::status`][crate::types::NasShell::status], read with [`NasBackend::shell_take`] —
+    /// [`NasShellStatus::Opening`][crate::types::NasShellStatus::Opening] until it is up, and
+    /// [`NasShellStatus::Ready`][crate::types::NasShellStatus::Ready] once it is.
+    ///
+    /// Opening a session while one is open replaces it, on that host or on another: there is one
+    /// terminal and therefore one session, and a second [`NasBackend::shell_open`] is somebody pointing
+    /// the terminal at a different machine rather than asking for two.
+    ///
+    /// Returns the platform's error only for the things it can tell at once — a host the board has
+    /// never been told about is [`HalError::InvalidArg`]. Whether the machine *answers* is not one of
+    /// them: that arrives as a status, like everything else here.
+    fn shell_open(&mut self, _host: &str, _columns: u16, _rows: u16) -> Result<(), HalError> {
+        Err(HalError::NotSupported)
+    }
+
+    /// Types `bytes` into the open session.
+    ///
+    /// Bytes and not a line, because that is what a keyboard makes: the `\r` that ends a command is one
+    /// of them, the `\x03` that interrupts one is another, and the three bytes an arrow key is made of
+    /// are three more. A call that could only take whole lines could send none of those, and a terminal
+    /// that cannot interrupt a command that will not stop is not one anybody can use.
+    ///
+    /// Nothing is echoed here. A pseudo-terminal echoes what is typed at *its* end, so what comes back
+    /// is ordinary output and arrives through [`NasBackend::shell_take`] like everything else — which is
+    /// what keeps a session's echo and a session's output in one order rather than two.
+    ///
+    /// Never blocks: the bytes are queued for the backend's own thread to put on the wire, and the
+    /// whole reason the queue exists is that the thread is in the middle of a read.
+    fn shell_write(&mut self, _bytes: &[u8]) -> Result<(), HalError> {
+        Err(HalError::NotSupported)
+    }
+
+    /// Everything the session has said since the last call, and where it stands.
+    ///
+    /// Cheap, snapshot-like, and safe to call every frame. It *takes*, and the name says so: what comes
+    /// back is what has arrived since the last call, so two calls in one frame give the bytes to one of
+    /// them and an empty answer to the other, rather than the same bytes twice.
+    ///
+    /// A backend with no session answers [`NasShellStatus::Closed`][crate::types::NasShellStatus::Closed]
+    /// and nothing to read, which is what a terminal that has not asked for one should be told.
+    fn shell_take(&mut self) -> NasShell {
+        NasShell::default()
+    }
+
+    /// Hangs the session up, if there is one. Nothing open is `Ok(())`.
+    ///
+    /// The state after this is [`NasShellStatus::Closed`][crate::types::NasShellStatus::Closed] and not
+    /// [`NasShellStatus::Lost`][crate::types::NasShellStatus::Lost]: a session somebody ended is not a
+    /// session that went wrong, and a terminal that drew the two the same way would leave its own clean
+    /// exit looking like a fault.
+    fn shell_close(&mut self) -> Result<(), HalError> {
+        Ok(())
     }
 }

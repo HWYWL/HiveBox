@@ -6,6 +6,8 @@
 //! has no colour
 //! type of its own.
 
+use std::time::Duration;
+
 use crate::shell;
 use crate::shell::Rgb;
 use iced::Color;
@@ -24,11 +26,19 @@ pub use pomelo_widgets::touch_keyboard::band_height as keyboard_height;
 pub const FONT_SIZE: f32 = shell::TERM_FONT_SIZE;
 pub const LINE_HEIGHT: f32 = shell::TERM_LINE_HEIGHT;
 
-/// The active input line's cursor. Sourced from the font size cell.
-pub const CURSOR_WIDTH: f32 = 9.0;
+/// The active input line's cursor: a bar the width of a stem, which is the shape a caret has
+/// everywhere else on a machine that is typed into.
+pub const CURSOR_WIDTH: f32 = 2.0;
 pub const CURSOR_HEIGHT: f32 = shell::TERM_FONT_SIZE - 2.0;
 /// Downward vertical adjustment for the cursor to align with the font's baseline.
 pub const CURSOR_OFFSET_Y: f32 = 3.0;
+
+/// Half of the cursor's blink: the bar is drawn for this long, left out for as long again, and the
+/// app starts over — see [`Terminal::blink`](crate::Terminal::blink).
+///
+/// The half iced's own text cursor blinks at, so a page that has both of them on it does not blink
+/// two different ways.
+pub const CURSOR_BLINK: Duration = Duration::from_millis(500);
 
 /// Measures a string, in logical pixels.
 ///
@@ -113,6 +123,25 @@ pub fn command_text_for(theme: ThemeMode) -> Color {
         Color::from_rgb8(31, 35, 40)
     } else {
         color(shell::VS_COMMAND_TEXT)
+    }
+}
+
+/// The quiet words of a session's status line.
+///
+/// The prompt's punctuation grey, named for what it is doing here rather than for what it sits next to:
+/// a login in flight and a session somebody has left are things to *read* rather than things to act on,
+/// and they have to be legible without competing with the page above them.
+pub fn muted_for(theme: ThemeMode) -> Color {
+    prompt_punct_for(theme)
+}
+
+/// A fault, which is the one status line that is not quiet: something is wrong and there is a thing to
+/// do about it, which is what the red is for.
+pub fn error_for(theme: ThemeMode) -> Color {
+    if theme.is_light() {
+        Color::from_rgb8(207, 34, 46)
+    } else {
+        color(shell::VS_ERROR)
     }
 }
 

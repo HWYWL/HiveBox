@@ -2496,6 +2496,7 @@ name = "terminal"
 version = "0.1.0"
 dependencies = [
  "iced",
+ "pomelo-hal",
  "pomelo-widgets",
 ]
 

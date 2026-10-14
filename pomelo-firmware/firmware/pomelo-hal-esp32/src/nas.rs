@@ -74,11 +74,11 @@ use pomelo_hal::error::HalError;
 use pomelo_hal::nas_credentials::{self, NasCredentials};
 use pomelo_hal::nas_sample::{round_uptime, split_pair, COMMAND, COMMAND_TWICE, Sampler};
 use pomelo_hal::traits::NasBackend;
-use pomelo_hal::types::{NasFault, NasReading, NasStatus};
+use pomelo_hal::types::{NasFault, NasReading, NasShell, NasShellStatus, NasStatus};
 
 use sunset::event::{CheckHostkey, CliEvent, Event};
 use sunset::sshwire::{SSHEncode, SSHSink, WireResult};
-use sunset::{ChanData, ChanHandle, Runner};
+use sunset::{ChanData, ChanHandle, Pty, Runner};
 
 mod ffi {
     use core::ffi::{c_char, c_int};
@@ -238,6 +238,14 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
 /// is not a set of machines being knocked on every second.
 const CHECK_INTERVAL: Duration = Duration::from_secs(10);
 
+/// The terminal type this board asks a session's machine for.
+///
+/// What a program at the other end reads to decide how much it may say: a pager asks for a screen's
+/// worth, a colourful `ls` asks whether it may use colour at all. `xterm-256color` is one of the two
+/// answers nearly everything understands, and [`crate::nas`]'s screen interpreter already draws the
+/// colours it implies.
+const SHELL_TERM: &str = "xterm-256color";
+
 /// What the worker knows about the machine it is watching: which one it was, when it last looked, and
 /// whether that machine has had the two looks a rate needs.
 ///
@@ -314,6 +322,23 @@ pub struct EspNas {
     pointed_at: Option<NasCredentials>,
     /// The worker and the little state the two sides of the thread share.
     shared: Arc<Shared>,
+    /// The terminal's session, if one has ever been asked for: its own worker, and the state the two
+    /// sides of *that* thread share.
+    ///
+    /// A thread of its own and not the look's, because the trait insists the two connections not get in
+    /// each other's way: a look can spend [`LOOK_DEADLINE`] on a machine that has stopped answering, and
+    /// a terminal sharing that thread would be frozen for the whole of it — with the shell at the other
+    /// end still reading, and somebody at this one waiting to see what they typed. Spawned the first
+    /// time a session is opened rather than at boot, because its stack is 32 KB of PSRAM and a board
+    /// nobody has opened a terminal on should not be paying for one.
+    shell: Option<Arc<ShellShared>>,
+    /// Which machine the terminal is pointed at, kept here rather than asked of the worker.
+    ///
+    /// The worker has the same host inside the session it is running, but it owns it and the app-side
+    /// must not have to wait on the worker to answer "is the terminal on the machine being forgotten?" —
+    /// see [`NasBackend::forget`]. `None` is a terminal with no session: before the first open, and
+    /// after a [`NasBackend::shell_close`].
+    shell_host: Option<String>,
 }
 
 /// The state [`EspNas`] and its worker thread share.
@@ -369,6 +394,76 @@ struct Inner {
     forgotten: bool,
 }
 
+// ---------------------------------------------------------------------------------------------
+// The terminal's session: a second connection, and a second thread to keep it.
+// ---------------------------------------------------------------------------------------------
+
+/// The state [`EspNas`] and its terminal worker share.
+///
+/// The same shape as [`Shared`] and for the same reason: the two sides are a UI thread that may never
+/// block and a worker whose whole job is to, so everything they agree on is behind one mutex and one
+/// condvar that says when there is something new to look at.
+struct ShellShared {
+    inner: Mutex<ShellInner>,
+    /// Signalled whenever the app-side has something for the worker: a session to open, bytes to type,
+    /// or a session to hang up.
+    wake: Condvar,
+}
+
+#[derive(Default)]
+struct ShellInner {
+    /// A session to open, handed over by [`NasBackend::shell_open`] and taken by the worker.
+    ///
+    /// One slot rather than one per machine, because there is one terminal: a *second* open replaces
+    /// whatever session is up — the trait says so — and a worker that finds this set while a session is
+    /// running tears that one down and starts this one instead.
+    opening: Option<ShellRequest>,
+    /// Bytes typed and not yet on the wire. Queued rather than written by the caller because the
+    /// caller is a UI thread that must not block, and because a byte typed while the login is still
+    /// coming up has nowhere to go yet but is still in order.
+    outgoing: Vec<u8>,
+    /// What the session has said and nobody has taken yet, in the order it arrived.
+    ///
+    /// Bytes and not text: a multi-byte character can be split across two reads, and it is
+    /// [`crate::nas`]'s screen that joins them — see `pomelo_apps::terminal::screen`.
+    output: Vec<u8>,
+    /// Where the session stands, as the worker last knew it.
+    status: NasShellStatus,
+    /// The app asked the session to be hung up. The worker closes the channel and stops; the status is
+    /// already [`NasShellStatus::Closed`][pomelo_hal::types::NasShellStatus::Closed], because hanging up
+    /// is this board's own act and not something it has to wait on the machine to confirm.
+    closing: bool,
+    /// The session was hung up by [`NasBackend::shell_close`] and not merely ended. It is the difference
+    /// between a terminal somebody left and one whose shell exited: typing at the first is a mistake the
+    /// backend reports, and at the second it is a key with nowhere to go.
+    hung_up: bool,
+    /// The worker should stop. Never set in practice; the thread lives as long as the board.
+    stop: bool,
+}
+
+/// A session to open: which machine, how to log in, and the screen's size.
+struct ShellRequest {
+    /// The machine and its account, copied out of the devices file.
+    credentials: NasCredentials,
+    /// The screen's size in characters, as the terminal drawing it stated — a pseudo-terminal is how a
+    /// program at the other end asks how wide its answers should be.
+    columns: u16,
+    rows: u16,
+}
+
+/// Why a session loop came back.
+///
+/// Two reasons and not one, because a session replaced by a *newer* open must not write a status: the
+/// newer open has already set [`NasShellStatus::Opening`], and a worker finishing the old one writing
+/// `Closed` over it would have the terminal draw "gone" for a session on its way up.
+enum Ended {
+    /// The session is over, and this is where it stands: a clean [`NasShellStatus::Closed`] or a
+    /// [`NasShellStatus::Lost`] with the fault that ended it.
+    Final(NasShellStatus),
+    /// A newer [`NasBackend::shell_open`] arrived. The outer loop has it; nothing here is written.
+    Replaced,
+}
+
 impl EspNas {
     /// The backend, pointed at whatever NAS was written down.
     ///
@@ -409,6 +504,10 @@ impl EspNas {
             last: Mutex::new(NasReading::default()),
             pointed_at: None,
             shared,
+            // No terminal worker yet: it is spawned the first time somebody opens a session — see the
+            // field's own note on why its 32 KB of PSRAM are not spent at boot.
+            shell: None,
+            shell_host: None,
         };
 
         // From boot the board watches the first machine in the list. Which one is *not* written down —
@@ -486,6 +585,107 @@ impl EspNas {
         }
 
         self.pointed_at = None;
+    }
+
+    /// Points the terminal at `credentials` and asks for a session of the given size.
+    ///
+    /// The worker is spawned on the first call and kept afterwards: a terminal opened, left and opened
+    /// again is one thread doing two sessions rather than two threads, and the second session is not a
+    /// login thread born behind a first one still winding down.
+    fn open_shell(
+        &mut self,
+        credentials: &NasCredentials,
+        columns: u16,
+        rows: u16,
+    ) -> Result<(), HalError> {
+        let shell = match self.shell.as_ref() {
+            Some(shell) => Arc::clone(shell),
+            None => {
+                let shell = Arc::new(ShellShared {
+                    inner: Mutex::new(ShellInner::default()),
+                    wake: Condvar::new(),
+                });
+
+                // The same PSRAM-stack dance as the look worker's, and for the same reason: the key
+                // exchange runs on this thread and the internal heap has no room for its stack. See
+                // [`pthread::ask_for_psram_stack`].
+                let worker = Arc::clone(&shell);
+                let known_hosts = Arc::clone(&self.shared);
+                let borrowed = pthread::ask_for_psram_stack();
+                let spawned = thread::Builder::new()
+                    .name(String::from("nas-shell"))
+                    .stack_size(WORKER_STACK)
+                    .spawn(move || run_shell_worker(worker, known_hosts));
+                borrowed.restore();
+
+                if let Err(error) = spawned {
+                    // Told at once rather than as a status, because there is no session to report on:
+                    // the terminal draws an unreachable machine, which is the honest reading of a board
+                    // whose image cannot hold one more thread.
+                    eprintln!("[nas] the shell worker could not be started: {error}");
+                    return Err(HalError::NotSupported);
+                }
+
+                shell
+            }
+        };
+        // Kept for the next session: one thread, however many terminals are opened on it and left.
+        self.shell = Some(Arc::clone(&shell));
+
+        // Handed over and answered at once: whether the machine comes up is the *status*, a look later,
+        // the same way [`NasBackend::refresh`] asks for a reading rather than waiting for one.
+        let mut inner = shell
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner.opening = Some(ShellRequest {
+            credentials: credentials.clone(),
+            columns,
+            rows,
+        });
+        inner.hung_up = false;
+        inner.closing = false;
+        inner.output.clear();
+        inner.outgoing.clear();
+        inner.status = NasShellStatus::Opening;
+        drop(inner);
+
+        self.shell_host = Some(credentials.host.clone());
+
+        shell.wake.notify_all();
+
+        Ok(())
+    }
+
+    /// Hangs the terminal's session up, if there is one.
+    ///
+    /// The status is set here and not left for the worker, because hanging up is this board's own act:
+    /// there is nothing to wait on a machine for, and a terminal that kept drawing a live prompt until
+    /// the socket had finished closing would be drawing something that is not true.
+    fn close_shell(&mut self) {
+        // Said before the borrow below, and said even when there is no worker: a terminal with no
+        // session is on no machine, which is the same `None` as one just hung up.
+        self.shell_host = None;
+
+        let Some(shell) = &self.shell else {
+            return;
+        };
+
+        let mut inner = shell
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // A session still coming up is called off with the one that is up: `opening` is taken so that a
+        // worker about to start it does not, and the status says closed rather than opening.
+        inner.opening = None;
+        inner.outgoing.clear();
+        inner.output.clear();
+        inner.closing = true;
+        inner.hung_up = true;
+        inner.status = NasShellStatus::Closed;
+        drop(inner);
+
+        shell.wake.notify_all();
     }
 }
 
@@ -634,6 +834,349 @@ fn run_worker(shared: Arc<Shared>) {
             // A failed look keeps no output: whatever the last good look said is still the least
             // wrong thing the panel can draw, and `reading` reports the fault beside it.
             Err(fault) => inner.fault = fault,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The terminal's worker thread: wait for a session, run it, report what became of it.
+// ---------------------------------------------------------------------------------------------
+
+/// Runs sessions, one after another, on the terminal's own connection.
+///
+/// One thread for the life of the board, and one session at a time on it: a terminal is one page with
+/// one prompt on it, so a second session is somebody pointing it somewhere else rather than two. What
+/// it does *not* do is block the look worker, which is the whole reason it exists — see
+/// [`EspNas`]'s `shell` field.
+fn run_shell_worker(shared: Arc<ShellShared>, known_hosts: Arc<Shared>) {
+    // Two packet buffers, allocated once and reused, exactly as the look worker's: a session can run
+    // for hours and the heap is not to be churned.
+    let mut inbuf = vec![0u8; SSH_MAX_PACKET];
+    let mut outbuf = vec![0u8; SSH_MAX_PACKET];
+
+    loop {
+        // Wait for a session to be asked for, or a poll interval to pass. The timeout is only so that
+        // the loop comes round to look for its stop flag; nothing starts a session but a request.
+        let opening = {
+            let guard = shared
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let (mut guard, _) = shared
+                .wake
+                .wait_timeout(guard, POLL_INTERVAL)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if guard.stop {
+                return;
+            }
+            guard.opening.take()
+        };
+
+        let Some(request) = opening else {
+            continue;
+        };
+
+        match run_shell_session(&request, &mut inbuf, &mut outbuf, &shared, &known_hosts) {
+            // The session was replaced by a newer open, which has already set the status and cleared
+            // the page: writing either from here would be the old session drawing on the new one's.
+            Ended::Replaced => {}
+            Ended::Final(status) => {
+                let mut inner = shared
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                // Unless the app hung it up, in which case the status is already the one it asked for
+                // and the worker's reading of a socket it just closed is not worth contradicting.
+                if !inner.hung_up {
+                    inner.status = status;
+                }
+            }
+        }
+    }
+}
+
+/// The pseudo-terminal to ask a session's machine for.
+///
+/// The size in *characters*, because that is what the protocol carries and what a program at the other
+/// end lays its output out in; there is no pixel size to give on a character-cell terminal, and zero is
+/// what the protocol means by "not known". No modes either: the defaults are the ones that make a shell
+/// behave like a shell, and a mode this board cannot honour is a promise to the machine it would break.
+fn terminal_of(columns: u16, rows: u16) -> Pty {
+    Pty {
+        term: SHELL_TERM.try_into().unwrap_or_default(),
+        cols: u32::from(columns),
+        rows: u32::from(rows),
+        width: 0,
+        height: 0,
+        modes: Default::default(),
+    }
+}
+
+/// One terminal session, from opening the socket to the last byte either way.
+///
+/// The shape of [`look`]'s loop with two differences that matter. There is no deadline: a look is a
+/// bounded question and a terminal is meant to sit there for as long as somebody is typing at it. And
+/// there is a second direction — what was typed goes out on the same channel the output arrives on, so
+/// each pass both reads the socket and writes the queue.
+///
+/// Returns why it came back; the caller is what turns that into a status. It never touches
+/// [`NasShellStatus::Opening`]: that is the app's, set when it asked, and set to
+/// [`NasShellStatus::Ready`] here once the machine's shell is up at the other end.
+fn run_shell_session(
+    request: &ShellRequest,
+    inbuf: &mut [u8],
+    outbuf: &mut [u8],
+    shell: &ShellShared,
+    known_hosts: &Shared,
+) -> Ended {
+    if !has_network() {
+        return Ended::Final(NasShellStatus::Lost(NasFault::NoNetwork));
+    }
+
+    let Some(address) = resolve(&request.credentials.host, request.credentials.port) else {
+        return Ended::Final(NasShellStatus::Lost(NasFault::Unreachable));
+    };
+
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) else {
+        // The machine that is off, or the address that is not there — the same fault a look gets, and
+        // the one a terminal draws as a session it could not raise.
+        return Ended::Final(NasShellStatus::Lost(NasFault::Unreachable));
+    };
+    let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(CONNECT_TIMEOUT));
+
+    let mut runner = Runner::new_client(inbuf, outbuf);
+
+    // The lock, taken the patient way: a panic elsewhere must not turn a live session into a dead
+    // terminal, the same reasoning as the look worker's.
+    macro_rules! inner {
+        () => {
+            shell
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        };
+    }
+
+    let mut channel: Option<ChanHandle> = None;
+    let mut open_session = false;
+    // Set when the *socket* has gone quiet (a zero-length read), which the protocol reports as a
+    // channel EOF just as it does a shell exiting. It is what tells the two apart at the end.
+    let mut transport_closed = false;
+
+    // Typed bytes a full window refused, kept here rather than in the shared queue so that what was
+    // typed first is what goes out first across passes.
+    let mut unsent: Vec<u8> = Vec::new();
+
+    let mut from_socket = [0u8; SOCKET_CHUNK];
+    let mut channel_data = [0u8; SOCKET_CHUNK];
+    let mut unread: Vec<u8> = Vec::new();
+
+    loop {
+        // Whatever the app has asked for since the last pass, before this thread blocks on a read.
+        {
+            let inner = inner!();
+            if inner.opening.is_some() {
+                return Ended::Replaced;
+            }
+            if inner.stop || inner.closing {
+                return Ended::Final(NasShellStatus::Closed);
+            }
+        }
+
+        // What was typed goes out *before* the blocking read below, so a line sent on Return is not
+        // held behind a socket that is waiting for the machine to say something.
+        if let Some(handle) = &channel {
+            let typed = {
+                let mut inner = inner!();
+                let mut typed = std::mem::take(&mut unsent);
+                typed.append(&mut inner.outgoing);
+                typed
+            };
+
+            let mut sent = 0;
+            while sent < typed.len() {
+                match runner.write_channel(handle, ChanData::Normal, &typed[sent..]) {
+                    Ok(0) => break,
+                    Ok(length) => sent += length,
+                    // The channel is gone. Read as a goodbye rather than a fault: the machine's shell
+                    // has ended, and a terminal typing into a channel nobody reads is worse than one
+                    // that says so.
+                    Err(_) => return Ended::Final(NasShellStatus::Closed),
+                }
+            }
+            unsent = typed[sent..].to_vec();
+        }
+
+        // Send whatever the protocol has queued. The same pair of calls as [`look`], for the reason
+        // written there: [`Runner::output`] is broken in sunset 0.6.0 and this is the pair its own
+        // examples use.
+        while runner.is_output_pending() {
+            let length = {
+                let queued = runner.output_buf();
+                if queued.is_empty() {
+                    break;
+                }
+                if stream.write_all(queued).is_err() {
+                    return Ended::Final(NasShellStatus::Lost(NasFault::Unreachable));
+                }
+                queued.len()
+            };
+            runner.consume_output(length);
+        }
+
+        // Feed the socket into the protocol, then hand back anything it would not take.
+        if runner.is_input_ready() {
+            let mut fed = 0;
+            while fed < unread.len() && runner.is_input_ready() {
+                match runner.input(&unread[fed..]) {
+                    Ok(0) => break,
+                    Ok(length) => fed += length,
+                    Err(_) => return Ended::Final(NasShellStatus::Lost(NasFault::Protocol)),
+                }
+            }
+            unread.drain(..fed);
+
+            if unread.is_empty() {
+                match stream.read(&mut from_socket) {
+                    Ok(0) => {
+                        // The machine has stopped talking. The protocol will call this a channel EOF;
+                        // `transport_closed` is what stops that being read as a shell exiting.
+                        transport_closed = true;
+                        runner.close_input();
+                    }
+                    Ok(length) => {
+                        let mut taken = 0;
+                        while taken < length && runner.is_input_ready() {
+                            match runner.input(&from_socket[taken..length]) {
+                                Ok(0) => break,
+                                Ok(n) => taken += n,
+                                Err(_) => return Ended::Final(NasShellStatus::Lost(NasFault::Protocol)),
+                            }
+                        }
+                        if taken < length {
+                            unread.extend_from_slice(&from_socket[taken..length]);
+                        }
+                    }
+                    // A quiet socket is not an idle one: the shell waits on a person, and the person
+                    // waits on the shell. Both timeouts are the protocol's own keep-alive business.
+                    Err(error) if is_would_block(&error) => {}
+                    Err(_) => return Ended::Final(NasShellStatus::Lost(NasFault::Unreachable)),
+                }
+            }
+        } else {
+            thread::sleep(Duration::from_millis(2));
+        }
+
+        // Handle everything the protocol has to say.
+        loop {
+            let event = match runner.progress() {
+                Ok(event) => event,
+                Err(_) => return Ended::Final(NasShellStatus::Lost(NasFault::Protocol)),
+            };
+
+            match event {
+                Event::None => break,
+                Event::Progressed => {}
+                Event::Serv(_) => return Ended::Final(NasShellStatus::Lost(NasFault::Protocol)),
+                Event::Cli(event) => match event {
+                    CliEvent::Hostkey(hostkey) => {
+                        match check_hostkey(&hostkey, &request.credentials, known_hosts) {
+                            Ok(()) => {
+                                if hostkey.accept().is_err() {
+                                    return Ended::Final(NasShellStatus::Lost(NasFault::Protocol));
+                                }
+                            }
+                            Err(fault) => {
+                                let _ = hostkey.reject();
+                                return Ended::Final(NasShellStatus::Lost(fault_of(fault)));
+                            }
+                        }
+                    }
+                    CliEvent::Username(request_) => {
+                        if request_.username(&request.credentials.user).is_err() {
+                            return Ended::Final(NasShellStatus::Lost(NasFault::Protocol));
+                        }
+                    }
+                    CliEvent::Password(request_) => {
+                        if request_.password(&request.credentials.password).is_err() {
+                            return Ended::Final(NasShellStatus::Lost(NasFault::Authentication));
+                        }
+                    }
+                    // No key, so nothing to offer and nothing to sign with: the account this board
+                    // signs in as is a password one, and a server that insists still has `keyboard-interactive`
+                    // to fall back on.
+                    CliEvent::Pubkey(request_) => {
+                        let _ = request_.skip();
+                    }
+                    CliEvent::AgentSign(request_) => {
+                        let _ = request_.skip();
+                    }
+                    CliEvent::Banner(_) => {}
+                    CliEvent::Authenticated => open_session = true,
+                    CliEvent::SessionOpened(mut opener) => {
+                        // A pseudo-terminal first, then a shell *on* it: the order the protocol
+                        // requires, and the pair that says there is a person here — which is what makes
+                        // the machine print a prompt and keep the connection, rather than run one
+                        // command and hang up.
+                        if opener.pty(terminal_of(request.columns, request.rows)).is_err() {
+                            return Ended::Final(NasShellStatus::Lost(NasFault::Protocol));
+                        }
+                        if opener.shell().is_err() {
+                            return Ended::Final(NasShellStatus::Lost(NasFault::Protocol));
+                        }
+
+                        // The session is up: the channel is confirmed and the shell asked for.
+                        // Everything from here is the machine's prompt and whatever is typed at it.
+                        let mut inner = inner!();
+                        // Not if somebody has since pointed the terminal elsewhere — see [`Ended`].
+                        if inner.opening.is_none() && !inner.closing {
+                            inner.status = NasShellStatus::Ready;
+                        }
+                    }
+                    // The shell exited with a status. The channel's own EOF follows and is where the
+                    // session is ended, so there is nothing to do with the code here.
+                    CliEvent::SessionExit(_) => {}
+                    CliEvent::Defunct => return Ended::Final(NasShellStatus::Lost(NasFault::Protocol)),
+                    CliEvent::PollAgain => {}
+                },
+            }
+        }
+
+        if open_session {
+            open_session = false;
+            match runner.open_client_session() {
+                Ok(handle) => channel = Some(handle),
+                Err(_) => return Ended::Final(NasShellStatus::Lost(NasFault::Protocol)),
+            }
+        }
+
+        // What the machine has said. `ChannelEOF` is the shell exiting, and that is a clean goodbye: a
+        // person typing `exit`, or a shell whose job is done, is not a fault. A channel EOF with the
+        // transport already closed is not that — the machine went away mid-session — and is a fault.
+        if let Some(handle) = &channel {
+            let mut said: Vec<u8> = Vec::new();
+            let gone = loop {
+                match runner.read_channel(handle, ChanData::Normal, &mut channel_data) {
+                    Ok(0) => break false,
+                    Ok(length) => said.extend_from_slice(&channel_data[..length]),
+                    Err(sunset::Error::ChannelEOF) => break true,
+                    Err(_) => return Ended::Final(NasShellStatus::Lost(NasFault::Protocol)),
+                }
+            };
+
+            if !said.is_empty() {
+                let mut inner = inner!();
+                inner.output.extend_from_slice(&said);
+            }
+
+            if gone {
+                return Ended::Final(if transport_closed {
+                    NasShellStatus::Lost(NasFault::Unreachable)
+                } else {
+                    NasShellStatus::Closed
+                });
+            }
         }
     }
 }
@@ -1206,6 +1749,79 @@ impl NasBackend for EspNas {
             self.unselect();
         }
 
+        // And the terminal, if it was on that machine: a session logged into a machine the list no
+        // longer has is one nobody can find again. The look and the session are otherwise kept apart —
+        // see the trait's note on why they are two connections — so re-pointing the look at another
+        // machine leaves the session alone, and only *dropping* the machine it is on ends it.
+        if self.shell_host.as_deref() == Some(host) {
+            self.close_shell();
+        }
+
+        Ok(())
+    }
+
+    fn shell_open(&mut self, host: &str, columns: u16, rows: u16) -> Result<(), HalError> {
+        // A session is opened on a machine this board has been *told* about, the way a look is: a host
+        // in no file is a mistake in the caller rather than a machine that is down. Read here, on the
+        // app's thread, which is the one whose stack can reach the flash — the worker's is in PSRAM.
+        let Some(credentials) = read_devices()
+            .into_iter()
+            .find(|device| device.host == host)
+        else {
+            return Err(HalError::InvalidArg);
+        };
+
+        self.open_shell(&credentials, columns, rows)
+    }
+
+    fn shell_write(&mut self, bytes: &[u8]) -> Result<(), HalError> {
+        let Some(shell) = &self.shell else {
+            // No session has ever been opened on this board, so there is nothing to type at.
+            return Err(HalError::NotInitialized);
+        };
+
+        let mut inner = shell
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // Typing at a session somebody hung up is a mistake in the caller, and reported as one — the
+        // same rule the sim keeps. A *shell* that exited on its own is the other case: the keystroke
+        // has nowhere to go, but nothing about it is the caller's fault.
+        if inner.hung_up {
+            return Err(HalError::NotInitialized);
+        }
+
+        inner.outgoing.extend_from_slice(bytes);
+        drop(inner);
+
+        shell.wake.notify_all();
+
+        Ok(())
+    }
+
+    fn shell_take(&mut self) -> NasShell {
+        let Some(shell) = &self.shell else {
+            return NasShell::default();
+        };
+
+        let mut inner = shell
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        NasShell {
+            status: inner.status,
+            // Taken rather than copied: the terminal keeps its own screen and this is only what has
+            // arrived since the last time it looked.
+            output: std::mem::take(&mut inner.output),
+        }
+    }
+
+    fn shell_close(&mut self) -> Result<(), HalError> {
+        // Closing a session that is not there is somebody leaving a page they had already left: it
+        // undoes [`close_shell`][EspNas::close_shell]'s own work rather than failing at it.
+        self.close_shell();
         Ok(())
     }
 

@@ -5,7 +5,12 @@ use std::time::Duration;
 use crate::error::HalError;
 use crate::nas_credentials::NasCredentials;
 use crate::traits::NasBackend;
-use crate::types::{MemoryInfo, NasCpu, NasDisk, NasFault, NasNetwork, NasReading, NasStatus};
+use crate::types::{
+    MemoryInfo, NasCpu, NasDisk, NasFault, NasNetwork, NasReading, NasShell, NasShellStatus,
+    NasStatus,
+};
+
+use super::nas_shell::SimShell;
 
 /// What a look at the simulator's NAS does when it is asked for one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +44,25 @@ pub struct SimNas {
     /// should show a machine doing something rather than a photograph.
     looks: u64,
     reading: NasReading,
+    /// The terminal's session, if somebody has opened one. Beside the reading rather than inside it:
+    /// the two are different connections to the same machine on purpose — see the trait's note on why —
+    /// so that a page watching the numbers keeps watching them while somebody types.
+    shell: Option<SimSession>,
+}
+
+/// The simulated machine's interactive session: a terminal's other end.
+///
+/// A wrapper and not the shell itself, because the shell is the machine's and the *status* is the
+/// backend's to report — and because a session that never logged in has no shell to report at all.
+/// Which is what [`NasShellStatus::Lost`] is here for: there is no wire on this side to spend a second
+/// on a login, so this backend is never in [`NasShellStatus::Opening`] by the time anybody looks, and a
+/// machine that is off goes straight to the state it would have reached a second later.
+struct SimSession {
+    /// Where it stands.
+    status: NasShellStatus,
+    /// The shell at the other end, once there is one. `None` for a session that never logged in — a
+    /// machine that is switched off, which fails at the login rather than after it.
+    shell: Option<SimShell>,
 }
 
 /// The host key the simulated server offers. Obviously not a real one, and that is the point: a
@@ -66,6 +90,7 @@ impl SimNas {
             answer: Answer::Data,
             looks: 0,
             reading: NasReading::default(),
+            shell: None,
         }
     }
 
@@ -91,6 +116,10 @@ impl SimNas {
         self.watching = device;
         self.looks = 0;
         self.reading = NasReading::default();
+
+        // And the terminal's session with it, for the reason the reading goes: a shell logged into a
+        // machine that this board is no longer watching is a shell nobody asked for.
+        self.shell = None;
 
         self.reading.status = if self.watching.is_some() {
             NasStatus::Connecting
@@ -310,6 +339,96 @@ impl NasBackend for SimNas {
             .iter()
             .any(|device| device.host == host)
             .then_some(self.reachable)
+    }
+
+    fn shell_open(&mut self, host: &str, _columns: u16, _rows: u16) -> Result<(), HalError> {
+        // A session is opened on a machine this board has been *told* about, the way a look is: a host
+        // in no file is not a machine that is down, it is a mistake in the caller, and the two want
+        // different screens.
+        let Some(credentials) = self
+            .devices
+            .iter()
+            .find(|device| device.host == host)
+            .cloned()
+        else {
+            return Err(HalError::InvalidArg);
+        };
+
+        // A machine that is off fails at the *login* rather than at the asking, which is where a real
+        // one fails it too: opening the session is the request, and whether it comes up is the status.
+        self.shell = Some(SimSession {
+            status: if self.reachable {
+                NasShellStatus::Opening
+            } else {
+                NasShellStatus::Lost(NasFault::Unreachable)
+            },
+            shell: self
+                .reachable
+                .then(|| SimShell::new(&credentials.user, &credentials.host)),
+        });
+
+        Ok(())
+    }
+
+    fn shell_write(&mut self, bytes: &[u8]) -> Result<(), HalError> {
+        let Some(session) = self.shell.as_mut() else {
+            return Err(HalError::NotInitialized);
+        };
+
+        // Whatever is typed goes to the shell, even while the login is still being reported as going
+        // on: a session being opened is a shell reading its own input from the moment it is up, and the
+        // bytes were typed in order. Which is why there is nothing to queue here — the shell exists
+        // already, and what waits is the report.
+        if let Some(shell) = session.shell.as_mut() {
+            shell.write(bytes);
+        }
+
+        Ok(())
+    }
+
+    fn shell_take(&mut self) -> NasShell {
+        let Some(session) = self.shell.as_mut() else {
+            return NasShell::default();
+        };
+
+        // A simulated login takes no time at all: there is no wire here to take it over, so the look
+        // *after* the ask is the one that finds the shell up. `Opening` is therefore a state this
+        // backend passes through rather than one a caller sees — the device's is the one that spends a
+        // second in it, and a terminal drawing "logging in" is drawing that one.
+        if session.status == NasShellStatus::Opening {
+            session.status = NasShellStatus::Ready;
+        }
+
+        let Some(shell) = session.shell.as_mut() else {
+            return NasShell {
+                status: session.status,
+                output: Vec::new(),
+            };
+        };
+
+        let output = shell.take();
+        let goodbye = shell.ended();
+
+        // A shell that said goodbye is a session that is over, and over *cleanly*: `exit` is not a
+        // fault, and the trait asks for a session somebody ended not to be drawn as one that went
+        // wrong.
+        if goodbye {
+            session.shell = None;
+            session.status = NasShellStatus::Closed;
+        }
+
+        NasShell {
+            status: session.status,
+            output,
+        }
+    }
+
+    fn shell_close(&mut self) -> Result<(), HalError> {
+        // Nothing open is nothing to do: closing a session that is not there is somebody leaving a page
+        // they had already left, which is not an error in anything.
+        self.shell = None;
+
+        Ok(())
     }
 }
 
@@ -572,5 +691,133 @@ mod tests {
         assert_eq!(nas.devices()[0].host, "192.168.1.11");
         assert!(nas.watching().is_none());
         assert_eq!(nas.reading().status, NasStatus::Unconfigured);
+    }
+
+    /// A board watching a NAS, with a terminal logged into it and the welcome already read.
+    fn logged_in() -> SimNas {
+        let mut nas = watching();
+        nas.shell_open("192.168.1.10", 60, 20).unwrap();
+        nas.shell_take();
+
+        nas
+    }
+
+    /// What the session has said since the last call, as text — what a screen would be drawing.
+    fn said(nas: &mut SimNas) -> String {
+        String::from_utf8_lossy(&nas.shell_take().output).into_owned()
+    }
+
+    /// A session is opened on a machine this board has been told about, and a host it has never heard of
+    /// is a mistake in the caller rather than a machine that is down.
+    #[test]
+    fn a_session_is_opened_on_a_machine_the_board_knows() {
+        let mut nas = watching();
+
+        assert_eq!(
+            nas.shell_open("10.0.0.9", 60, 20),
+            Err(HalError::InvalidArg),
+            "a host in no file is not a host that is off"
+        );
+        assert_eq!(nas.shell_take().status, NasShellStatus::Closed);
+
+        nas.shell_open("192.168.1.10", 60, 20).unwrap();
+
+        let first = nas.shell_take();
+        assert_eq!(first.status, NasShellStatus::Ready);
+        assert!(
+            String::from_utf8_lossy(&first.output).contains("$ "),
+            "and the shell has already drawn its prompt: {first:?}"
+        );
+    }
+
+    /// The reason a session exists rather than a command per keystroke: what it was told stays told.
+    #[test]
+    fn a_session_stays_where_it_was_left() {
+        let mut nas = logged_in();
+
+        nas.shell_write(b"cd /volume2\r").unwrap();
+        assert!(said(&mut nas).contains("/volume2$"));
+
+        nas.shell_write(b"pwd\r").unwrap();
+        assert!(said(&mut nas).contains("/volume2"));
+    }
+
+    /// A machine that is off fails the *login*, which is what the terminal has to draw — and not the
+    /// asking, which is answered at once.
+    #[test]
+    fn a_machine_that_is_off_loses_its_session() {
+        let mut nas = SimNas::unreachable();
+        nas.remember(&credentials("hunter2")).unwrap();
+
+        nas.shell_open("192.168.1.10", 60, 20).unwrap();
+
+        assert_eq!(
+            nas.shell_take().status,
+            NasShellStatus::Lost(NasFault::Unreachable)
+        );
+    }
+
+    /// A shell that was asked to leave ends the session, and *cleanly*: `exit` is not a fault, and the
+    /// terminal must not draw its own way out as one.
+    #[test]
+    fn a_shell_that_hangs_up_ends_the_session() {
+        let mut nas = logged_in();
+
+        nas.shell_write(b"exit\r").unwrap();
+
+        let goodbye = nas.shell_take();
+        assert!(String::from_utf8_lossy(&goodbye.output).contains("logout"));
+        assert_eq!(goodbye.status, NasShellStatus::Closed);
+        assert_eq!(
+            nas.shell_take().status,
+            NasShellStatus::Closed,
+            "and it stays ended rather than coming back"
+        );
+    }
+
+    /// Closing a session is not a fault, and closing one that is not there is not an error either.
+    #[test]
+    fn closing_a_session_is_not_a_failure() {
+        let mut nas = logged_in();
+
+        nas.shell_close().unwrap();
+
+        assert_eq!(nas.shell_take().status, NasShellStatus::Closed);
+        assert_eq!(
+            nas.shell_write(b"pwd\r"),
+            Err(HalError::NotInitialized),
+            "and there is nothing left to type at"
+        );
+        assert!(nas.shell_close().is_ok(), "and closing it again is fine");
+    }
+
+    /// A session goes when the machine being watched does, for the reason the reading does.
+    #[test]
+    fn a_session_goes_when_the_machine_does() {
+        let mut nas = logged_in();
+
+        nas.forget("192.168.1.10").unwrap();
+
+        assert_eq!(nas.shell_take().status, NasShellStatus::Closed);
+    }
+
+    /// The two connections are separate on purpose: a terminal is open on a machine and the page
+    /// watching its numbers keeps watching them, in both directions.
+    #[test]
+    fn a_terminal_and_a_look_do_not_get_in_each_others_way() {
+        let mut nas = logged_in();
+
+        nas.shell_write(b"cd /volume2\r").unwrap();
+        nas.refresh().unwrap();
+        nas.refresh().unwrap();
+
+        assert_eq!(nas.reading().status, NasStatus::Online);
+        assert_eq!(nas.reading().disks.len(), 3, "the numbers carried on arriving");
+
+        nas.shell_write(b"pwd\r").unwrap();
+        assert!(
+            said(&mut nas).contains("/volume2"),
+            "and the shell is still where it was"
+        );
     }
 }

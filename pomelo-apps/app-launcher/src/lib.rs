@@ -580,12 +580,44 @@ impl Launcher {
 
     pub fn get_or_create_terminal(&mut self) -> &mut Terminal {
         if self.terminal.is_none() {
-            let mut app = Terminal::new();
+            // The board is handed over here and nowhere else: the terminal is hosted by the launcher, so
+            // this is the point at which it can be given the same board the monitor reaches machines
+            // through. `terminal`'s own window is the case with none, and shows only the local shell —
+            // see [`Terminal::with_board`].
+            let mut app = Terminal::new().with_board(Arc::clone(&self.board));
             app.set_preferences(self.preferences);
             app.update(terminal::Message::Resized(self.size));
             self.terminal = Some(app);
         }
         self.terminal.as_mut().unwrap()
+    }
+
+    /// Somebody tapped the terminal entry on the monitoring page: open the terminal onto the machine
+    /// that page is about, and bring it to the front.
+    ///
+    /// The one place a hosted app's message turns into *the launcher opening an app*, and the reason
+    /// [`nas_monitor::Message::Terminal`] is caught rather than passed on: which app is on screen is the
+    /// launcher's business and no page inside it can decide it. The machine is asked of the monitor
+    /// rather than carried in the message, because "which machine is this page about" is one answer and
+    /// the monitor already gives it — see [`NasMonitor::watched`].
+    fn open_terminal_on_watched(&mut self) -> Task<Message> {
+        // A monitor with no machine on screen has no machine to open a shell on. Nothing to do and
+        // nothing to say: the entry only exists on a header that is drawn with a machine on it.
+        let Some(device) = self.get_or_create_nas_monitor().watched().cloned() else {
+            return Task::none();
+        };
+
+        // Connected before the screen changes, so the terminal's first frame is already the session
+        // rather than a local prompt it is on its way out of — see [`Terminal::connect`]. A board that
+        // cannot raise the session says so on the terminal's own page, in the terminal's own words.
+        self.get_or_create_terminal().connect(&device);
+
+        // And in front, through the same door a tile tap uses, so the switcher's order, the status
+        // bar's row of icons and the size hand-off are maintained by the one piece of code that
+        // maintains them rather than by a second copy of it here. Asked directly and not handed back as
+        // a message, because a message would make the switch something a running loop has to come round
+        // to: the terminal would be connected for a frame before it was on screen.
+        self.update(Message::Open(TERMINAL))
     }
 
     /// The web manager is the one app here whose state outlives the app: the server it switches is
@@ -1547,6 +1579,13 @@ impl Launcher {
             Message::Terminal(message) => self.get_or_create_terminal().update(message),
             Message::WebManager(message) => self.get_or_create_web_manager().update(message),
             Message::TaskViewer(message) => self.get_or_create_task_viewer().update(message),
+            // The monitor's terminal entry, asked *before* the forwarding arm below, exactly as the
+            // player's and the settings app's backs are: the one message from a hosted app that is not
+            // that app's to handle, because it is about which app is on screen. See
+            // [`Launcher::open_terminal_on_watched`].
+            Message::NasMonitor(nas_monitor::Message::Terminal) => {
+                return self.open_terminal_on_watched();
+            }
             Message::NasMonitor(message) => self.get_or_create_nas_monitor().update(message),
             Message::Clock(message) => self.get_or_create_clock().update(message),
             Message::Overview(message) => self.get_or_create_overview().update(message),
@@ -3536,6 +3575,70 @@ mod tests {
         assert!(
             launcher.games().playing(),
             "and the games app is the one that handled it"
+        );
+    }
+
+    /// The monitoring page's terminal entry is the one message from a hosted app that the launcher
+    /// acts on rather than passing on. The page asks and the launcher answers: *its* terminal, opened
+    /// on the machine the page is about, with the session already asked for by the time the screen
+    /// changes — so the terminal's first frame is the session rather than a local prompt.
+    #[test]
+    fn the_monitors_terminal_entry_opens_the_terminal_on_that_machine() {
+        let board = Arc::new(Board::simulated());
+        board
+            .nas()
+            .remember(&pomelo_hal::NasCredentials {
+                host: String::from("nas.local"),
+                port: 22,
+                user: String::from("alice"),
+                password: String::from("hunter2"),
+                interval_secs: 5,
+                host_key: None,
+            })
+            .expect("the machine is taken");
+
+        let mut launcher = Launcher::new(Arc::clone(&board));
+
+        // A header — and so an entry on it — exists only with a machine on the page.
+        launcher.update(Message::Open(NAS_MONITOR));
+        launcher.update(Message::NasMonitor(nas_monitor::Message::Open(0)));
+
+        launcher.update(Message::NasMonitor(nas_monitor::Message::Terminal));
+
+        assert_eq!(
+            launcher.screen,
+            Screen::App(TERMINAL),
+            "the entry brings the terminal to the front"
+        );
+
+        let session = launcher
+            .get_or_create_terminal()
+            .session()
+            .expect("and a session was asked for before the screen changed");
+        assert_eq!(session.host(), "nas.local");
+        assert!(
+            session.is_live(),
+            "on the machine the page was showing, which the sim answers"
+        );
+    }
+
+    /// The same entry on a monitor with no machine on the page: there is nothing to open a session on,
+    /// so nothing happens and nothing panics. The header the entry sits on is not even drawn.
+    #[test]
+    fn the_monitors_terminal_entry_does_nothing_without_a_machine() {
+        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
+
+        launcher.update(Message::Open(NAS_MONITOR));
+        launcher.update(Message::NasMonitor(nas_monitor::Message::Terminal));
+
+        assert_eq!(
+            launcher.screen,
+            Screen::App(NAS_MONITOR),
+            "the page stays where it is"
+        );
+        assert!(
+            launcher.terminal.is_none(),
+            "and no terminal was built for a machine that is not there"
         );
     }
 }

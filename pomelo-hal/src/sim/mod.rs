@@ -14,6 +14,7 @@ mod imu;
 mod input;
 mod mic;
 mod nas;
+mod nas_shell;
 mod power;
 mod storage;
 mod system;

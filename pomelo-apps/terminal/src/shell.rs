@@ -59,6 +59,10 @@ pub const VS_PROMPT_DIR: Rgb = rgb(86, 156, 214); // #569CD6 ANSI bright blue (d
 pub const VS_PROMPT_PUNCT: Rgb = rgb(133, 133, 133); // #858585 colon / separator
 pub const VS_PROMPT_SYM: Rgb = rgb(204, 204, 204); // #CCCCCC prompt symbol ($)
 pub const VS_COMMAND_TEXT: Rgb = rgb(255, 255, 255); // #FFFFFF active command text
+/// A fault: a session that was lost, a login that was refused. VS Code's error red, and deliberately
+/// the same value as ANSI 9 in [`crate::screen`] — a machine's own error and this app's report of one
+/// are then the same red, which is the only thing that makes either of them legible at a glance.
+pub const VS_ERROR: Rgb = rgb(241, 76, 76); // #F14C4C
 
 // =============================================================================
 // The model

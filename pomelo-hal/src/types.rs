@@ -707,6 +707,51 @@ impl NasReading {
     }
 }
 
+/// Where an interactive session on the NAS stands.
+///
+/// [`NasShellStatus::Opening`] and [`NasShellStatus::Lost`] are the pair [`NasStatus`] draws for a
+/// look, and for the same reason: "not yet" is not "broken". A terminal that drew a login in progress
+/// the way it drew a login that failed would say something is wrong every time somebody opened it.
+///
+/// There is no `Unconfigured` here. A reading of a machine nobody pointed the board at is a page with
+/// nothing to draw, but a *session* is only ever opened on purpose — the state before somebody asks
+/// for one is [`NasShellStatus::Closed`], and the state after they ask is [`NasShellStatus::Opening`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NasShellStatus {
+    /// No session has been asked for, or the one there was has been hung up — by this side, or by the
+    /// machine's own `exit`.
+    #[default]
+    Closed,
+    /// Asked for, and the login has not finished. The state a terminal shows while it waits, and the
+    /// one it shows again if the session has to be re-opened.
+    Opening,
+    /// A shell is running at the other end, and what is typed goes to it.
+    Ready,
+    /// There was a session and it ended, and this is why. Kept rather than reset to
+    /// [`NasShellStatus::Closed`] so that the terminal can say what happened instead of going quiet.
+    Lost(NasFault),
+}
+
+/// What an interactive session on the NAS has said since the last look at it.
+///
+/// The answer to [`shell_take`][crate::traits::NasBackend::shell_take], and a snapshot for the reason
+/// [`NasReading`] is one: a terminal redraws every frame, and a call that waited at the other end for
+/// something to say would stop the redrawing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NasShell {
+    /// Where the session stands.
+    pub status: NasShellStatus,
+    /// Everything the machine has printed since the last call, exactly as it came off the wire.
+    ///
+    /// Bytes and not a `String`, because a terminal is a stream and not a list of lines: one character
+    /// can straddle two reads, so decoding each read on its own would turn a Chinese character into two
+    /// replacement characters — and not all of these bytes are text in the first place. A `\r`, a bell
+    /// and an escape sequence are the machine *drawing*: moving its cursor, erasing what it drew before,
+    /// choosing a colour. Which is a screen's business and not a session's, so the interpreter lives
+    /// above this trait, where the screen is.
+    pub output: Vec<u8>,
+}
+
 /// Metadata describing an audio stream.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AudioMeta {
