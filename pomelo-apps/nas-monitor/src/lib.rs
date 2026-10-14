@@ -69,6 +69,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use iced::theme::Palette;
+use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{button, column, container, row, scrollable, text, Column, Row, Space};
 use iced::{Alignment, Border, Color, Element, Length, Subscription, Theme};
 
@@ -156,6 +157,22 @@ pub enum Message {
     Open(usize),
     /// The list's "add a machine" button.
     Add,
+    /// A row's edit button: the form, filled in with the machine that row names.
+    ///
+    /// A place and not a host, for the reason [`Message::Open`] is one: the row is built in the same
+    /// frame the finger lands in, so the index is read from this app's own state and nothing else.
+    EditDevice(usize),
+    /// A row's delete button: ask about dropping that machine, by its place in the list.
+    ///
+    /// A question and not the act. The row sits in a list somebody is scrolling with a thumb, and what
+    /// it would drop is an address, an account and a password that nobody has written down anywhere else
+    /// — so the row asks and [`Message::ConfirmDelete`] is what answers. The files app's `Prompt` is the
+    /// same trade made the same way.
+    DeleteDevice(usize),
+    /// The confirmation's yes: the machine the row asked about goes, and the page stays on the list.
+    ConfirmDelete,
+    /// The confirmation's no, and the way out of a question nobody meant to ask.
+    CancelDelete,
     /// The monitoring page's edit button: the form, filled in with the machine it is on.
     Edit,
     /// A finger on one of the form's fields.
@@ -200,6 +217,13 @@ pub struct NasMonitor {
     watched: Option<NasCredentials>,
     /// Which of the three pages is up.
     screen: Screen,
+    /// The machine a row has asked about dropping, that nobody has answered yet — by address.
+    ///
+    /// By address and not by place, because the question outlives the frame it was asked in: the rows are
+    /// re-drawn from the list on every tick, and the question has to stay about the machine somebody
+    /// pointed at rather than about whatever is in that row by the time the answer comes. See
+    /// [`Message::DeleteDevice`].
+    confirming: Option<String>,
     /// What has been typed into the form.
     form: Form,
     tab: Tab,
@@ -331,6 +355,7 @@ impl NasMonitor {
             reading: NasReading::default(),
             watched: None,
             screen: Screen::List,
+            confirming: None,
             form: Form::adding(),
             tab: Tab::Overview,
             // No look is asked for here: the page opens on a list, and a machine nobody has picked is a
@@ -364,6 +389,14 @@ impl NasMonitor {
     /// The machines the board has been told about, as the list draws them.
     pub fn devices(&self) -> &[NasCredentials] {
         &self.devices
+    }
+
+    /// The machine a row has asked about dropping, if one has been asked about and not answered.
+    ///
+    /// Read by the list, which draws the question instead of the rows while it is up, and by the tests,
+    /// which is what a state with no other reader is for.
+    pub fn confirming(&self) -> Option<&str> {
+        self.confirming.as_deref()
     }
 
     /// Which of the three pages is up.
@@ -404,6 +437,26 @@ impl NasMonitor {
                 self.form = Form::adding();
                 self.screen = Screen::Form;
             }
+            // A row's pencil, which is the same form the header's pencil opens: one machine, three
+            // fields. What differs is where the machine comes from — the row it was pressed on rather
+            // than the one the monitoring page happens to be on.
+            Message::EditDevice(index) => {
+                if let Some(device) = self.devices.get(index).cloned() {
+                    self.form = Form::of(&device);
+                    self.screen = Screen::Form;
+                }
+            }
+            // The row asks the question; [`Message::ConfirmDelete`] is what acts on it. See
+            // [`Message::DeleteDevice`] for why the two are apart.
+            Message::DeleteDevice(index) => {
+                self.confirming = self.devices.get(index).map(|device| device.host.clone());
+            }
+            Message::ConfirmDelete => {
+                if let Some(host) = self.confirming.take() {
+                    self.forget(&host);
+                }
+            }
+            Message::CancelDelete => self.confirming = None,
             Message::Edit => {
                 if let Some(watched) = self.watched.clone() {
                     self.form = Form::of(&watched);
@@ -719,7 +772,15 @@ impl NasMonitor {
             scrollable(rows).height(Length::Fill).into()
         };
 
-        column![header, body, add_button(sizes, theme, ink, words)]
+        // What a row's bin leaves behind: the question, in the place the "add a machine" button holds.
+        // Over the list rather than instead of it, so the row it is about stays on screen while it is
+        // asked — the address in the question is one to check against the row it names.
+        let footer: Element<'_, Message> = match &self.confirming {
+            Some(host) => confirm_bar(host, sizes, theme, ink, words),
+            None => add_button(sizes, theme, ink, words),
+        };
+
+        column![header, body, footer]
             .spacing(style::GAP)
             .padding(style::MARGIN)
             .width(Length::Fill)
@@ -749,7 +810,12 @@ impl NasMonitor {
 
         let (dot, note) = device_status(known, reached, inks, muted, words);
 
-        button(
+        // The row is three buttons and not one, which is the shape this grew into: the identity half
+        // opens the page about the machine, and the pencil and the bin beside it correct and drop it
+        // without opening anything. The half that opens it is a button of its own rather than the card
+        // around all three, because a button inside a button is a press whose owner is whichever one the
+        // platform walks to first — so the card is a plain container and each action is its own button.
+        let identity = button(
             Row::with_children(vec![
                 text(Icon::DNS.glyph())
                     .font(pomelo_material_symbols::font())
@@ -779,7 +845,7 @@ impl NasMonitor {
             .align_y(Alignment::Center)
             .width(Length::Fill),
         )
-        .padding(style::CELL_PAD * 1.5)
+        .padding(style::CELL_PAD)
         .width(Length::Fill)
         .on_press(Message::Open(index))
         .style(move |_theme, status| button::Style {
@@ -787,7 +853,7 @@ impl NasMonitor {
                 if matches!(status, button::Status::Pressed) {
                     style::track(theme)
                 } else {
-                    style::card(theme)
+                    Color::TRANSPARENT
                 }
                 .into(),
             ),
@@ -796,6 +862,31 @@ impl NasMonitor {
                 ..Border::default()
             },
             ..button::Style::default()
+        });
+
+        // The two ways to correct the machine, to the right of the row and clear of the half that opens
+        // it. Both are words on chips and not bare glyphs: see [`row_action`], where the arithmetic is.
+        let danger = style::status_ink(theme).offline();
+
+        container(
+            Row::with_children(vec![
+                identity.into(),
+                row_action(words.edit, Message::EditDevice(index), sizes, theme, ink),
+                row_action(words.delete, Message::DeleteDevice(index), sizes, theme, danger),
+            ])
+            .spacing(style::CELL_PAD * 0.5)
+            .align_y(Alignment::Center)
+            .width(Length::Fill),
+        )
+        .padding(style::CELL_PAD * 0.5)
+        .width(Length::Fill)
+        .style(move |_theme| container::Style {
+            background: Some(style::card(theme).into()),
+            border: Border {
+                radius: sizes.small.into(),
+                ..Border::default()
+            },
+            ..container::Style::default()
         })
         .into()
     }
@@ -848,7 +939,20 @@ impl NasMonitor {
         column![
             container(text(title).size(sizes.headline).color(ink))
                 .padding([0.0, style::HEADER_INSET - style::MARGIN]),
-            scrollable(fields).height(Length::Fill),
+            // The rail is not drawn, which is the other half of what [`style::SCROLLBAR`] is about: iced
+            // paints the bar *over* its content's right edge, so a field that runs the full width of the
+            // page has its last ten pixels — its border, its corner — covered by a strip of the page's
+            // own colour, and reads as a box whose right side has gone off the panel. The task viewer
+            // keeps that strip clear because a table has a last column to stop short of it; a field has
+            // only its own edge, and there is nowhere to move it to. The wifi map's cards, which are
+            // full-width the same way, made the same trade and said so.
+            //
+            // What is given up is the bar's hint that there is more below — the fields are taller than
+            // the room left over the keyboard. What is not given up is the dragging: the strip still
+            // scrolls under a finger. See [`NasMonitor::form`] for the arithmetic.
+            scrollable(fields)
+                .direction(Direction::Vertical(Scrollbar::hidden()))
+                .height(Length::Fill),
             wrong,
             buttons,
             container(touch_keyboard::band_with_theme(
@@ -1293,6 +1397,30 @@ impl NasMonitor {
             }
         };
 
+        // A correction, and not a second machine — which is the same thing only while the address is left
+        // alone. The backend keys its list by host (see `NasBackend::remember`), so writing down an
+        // address the list does not have yet *adds* it, and the one the form was opened on stays where it
+        // was: a list holding a typo and its correction side by side, both of them a machine to somebody
+        // reading it. `Form::editing` is the address that has to go; it is what the note on `Form` means
+        // by a correction being an update rather than an addition.
+        //
+        // Skipped when the two are alike, which is the ordinary correction — an account, a password, a
+        // host key. There is nothing to drop then, and the `remember` below does the updating on its own.
+        if let Some(was) = self.form.editing.clone() {
+            if was != device.host {
+                let _ = self.board.nas().forget(&was);
+                self.seen.remove(&was);
+
+                // The page cannot stay on an address the list no longer has, and `reload` does not read
+                // `watched` back: which machine is being looked at is a choice made on a page
+                // (`NasBackend::watching`), not a fact written in the file.
+                if self.watched.as_ref().is_some_and(|held| held.host == was) {
+                    self.watched = None;
+                    self.reading = NasReading::default();
+                }
+            }
+        }
+
         if self.board.nas().remember(&device).is_err() {
             // The board could not write it down — a flash that is full, or an image with no backend in
             // it at all. The form stays up with what was typed still in it, which is the only copy of
@@ -1312,9 +1440,20 @@ impl NasMonitor {
             return;
         };
 
-        let _ = self.board.nas().forget(&host);
+        self.forget(&host);
+    }
 
-        self.seen.remove(&host);
+    /// Drops `host` and goes back to the list.
+    ///
+    /// One body for the two places that drop a machine — the form's delete button, and a row's once its
+    /// question has been answered — because there is more to it than the backend's `forget`: what this
+    /// app remembers about the machine goes with it, and so does the monitoring page if that was the
+    /// machine it was about. Two copies of that would be two chances to drop a machine and leave a page
+    /// open onto nothing.
+    fn forget(&mut self, host: &str) {
+        let _ = self.board.nas().forget(host);
+
+        self.seen.remove(host);
 
         // If that was the machine the monitoring page was on, the page has nothing left to be about.
         if self
@@ -1598,6 +1737,54 @@ fn icon_button(
     .into()
 }
 
+/// A row's own action: a word on a button, and the button the size of a finger.
+///
+/// The pencil and the bin were bare glyphs here until they were tried with a thumb, and a glyph with
+/// nothing around it is a target the width of its own ink — twenty-odd pixels across, on a panel where
+/// the row above and the row below are what a slip hits instead. A word is wider than a glyph at the
+/// same type size, and it says what the button does without having to be learnt, which is what a row
+/// read in passing needs.
+///
+/// The chip is [`style::track`] and not [`style::card`] like every other button on this page rests on.
+/// Those buttons sit *on the page*, where a card-coloured one is a shape against it; this one sits on a
+/// card, where the same colour is nothing at all. The track is the one surface here that is neither the
+/// card nor a meaning — [`style::network`] is the network, [`style::status_ink`] is a status — so a chip
+/// of it is what "pressable" looks like inside a row. Under the finger the chip fills with the ink the
+/// word was drawn in and the word cuts out of it, which is the same trade the buttons above the keyboard
+/// make by filling: the colour that meant the word becomes the thing behind it.
+fn row_action(
+    label: &str,
+    message: Message,
+    sizes: style::Sizes,
+    theme: ThemeMode,
+    ink: Color,
+) -> Element<'static, Message> {
+    button(text(label.to_string()).size(sizes.text))
+        .padding([style::CELL_PAD * 1.2, style::CELL_PAD * 2.0])
+        .on_press(message)
+        .style(move |_theme, status| {
+            let pressed = matches!(status, button::Status::Pressed);
+
+            button::Style {
+                background: Some(
+                    if pressed {
+                        ink
+                    } else {
+                        style::track(theme)
+                    }
+                    .into(),
+                ),
+                text_color: if pressed { style::surface(theme) } else { ink },
+                border: Border {
+                    radius: sizes.small.into(),
+                    ..Border::default()
+                },
+                ..button::Style::default()
+            }
+        })
+        .into()
+}
+
 /// The list's "add a machine" button: the one thing on that page that is not a machine.
 ///
 /// Filled with the card colour and turning the network green under a finger, because it is the page's
@@ -1639,6 +1826,69 @@ fn add_button(
         ..button::Style::default()
     })
     .into()
+}
+
+/// The question a row's bin asks: which machine, and the two answers to it.
+///
+/// A question and not a second tap on the bin, because the two are not the same promise: a bin that
+/// dropped the machine would be a row where a thumb that slipped while scrolling has already done it,
+/// and what it drops is an address, an account and a password nobody has written down anywhere else.
+/// 取消 is drawn and not merely implied by tapping elsewhere, because "anywhere else" on this page is a
+/// row, and a row is a button.
+fn confirm_bar(
+    host: &str,
+    sizes: style::Sizes,
+    theme: ThemeMode,
+    ink: Color,
+    words: &Words,
+) -> Element<'static, Message> {
+    let danger = style::status_ink(theme).offline();
+
+    Row::with_children(vec![
+        text(format!("{} {host}?", words.delete_ask))
+            .size(sizes.text)
+            .color(ink)
+            .width(Length::Fill)
+            .into(),
+        form_button(words.cancel, Message::CancelDelete, false, sizes, theme, ink),
+        Space::new().width(Length::Fixed(style::CELL_PAD)).into(),
+        danger_button(words.delete, Message::ConfirmDelete, sizes, theme, danger),
+    ])
+    .spacing(style::CELL_PAD * 0.5)
+    .align_y(Alignment::Center)
+    .width(Length::Fill)
+    .into()
+}
+
+/// A button in the destructive colour: the confirmation's yes.
+///
+/// Styled the way the form's own delete button is — red on the card, filling with red under the finger
+/// and turning its word white — so that the two places this app drops a machine are recognisably the
+/// same act. See [`NasMonitor::delete_button`], which is the other one.
+fn danger_button(
+    label: &str,
+    message: Message,
+    sizes: style::Sizes,
+    theme: ThemeMode,
+    danger: Color,
+) -> Element<'static, Message> {
+    button(text(label.to_string()).size(sizes.text))
+        .padding([style::CELL_PAD * 1.2, style::CELL_PAD * 2.5])
+        .on_press(message)
+        .style(move |_theme, status| {
+            let pressed = matches!(status, button::Status::Pressed);
+
+            button::Style {
+                background: Some(if pressed { danger } else { style::card(theme) }.into()),
+                text_color: if pressed { Color::WHITE } else { danger },
+                border: Border {
+                    radius: sizes.small.into(),
+                    ..Border::default()
+                },
+                ..button::Style::default()
+            }
+        })
+        .into()
 }
 
 /// One of the form's two ordinary buttons: save and cancel, which differ only in which one is filled.
@@ -1745,7 +1995,15 @@ struct Words {
     password: &'static str,
     save: &'static str,
     cancel: &'static str,
+    /// A row's pencil, now that it is a word rather than a glyph. It is the row's alone: the form a row
+    /// opens says [`Words::edit_device`] at its head instead, because "edit" as a heading names a mode
+    /// and "edit <machine>" names the machine — see [`NasMonitor::form`].
+    edit: &'static str,
     delete: &'static str,
+    /// What a row's bin says before it means it. The machine's address is appended to it by
+    /// [`confirm_bar`], because the question is about one machine and the name is the only part of the
+    /// sentence that is not the same every time.
+    delete_ask: &'static str,
     wrong_host: &'static str,
     wrong_user: &'static str,
     cpu: &'static str,
@@ -1793,7 +2051,9 @@ impl Words {
                 password: "密码",
                 save: "保存",
                 cancel: "取消",
+                edit: "编辑",
                 delete: "删除",
+                delete_ask: "确定删除",
                 wrong_host: "要填地址",
                 wrong_user: "要填账号",
                 cpu: "CPU",
@@ -1835,7 +2095,9 @@ impl Words {
                 password: "Password",
                 save: "Save",
                 cancel: "Cancel",
+                edit: "Edit",
                 delete: "Delete",
+                delete_ask: "Delete",
                 wrong_host: "an address is required",
                 wrong_user: "an account is required",
                 cpu: "CPU",
@@ -2218,6 +2480,148 @@ mod tests {
         );
         assert_eq!(monitor.reading().status, NasStatus::Unconfigured);
         let _ = monitor.view();
+    }
+
+    /// A board told about two machines, which is the shortest list a row's buttons can be told apart on.
+    ///
+    /// With one machine in it, "the row that was pressed" and "the machine the page is on" are the same
+    /// machine, and a test of the difference between them passes whichever of the two the code reads.
+    fn monitor_of_two_machines() -> NasMonitor {
+        let board = Arc::new(Board::simulated());
+        board.nas().remember(&credentials("192.168.1.10")).unwrap();
+        board.nas().remember(&credentials("192.168.1.20")).unwrap();
+
+        NasMonitor::new(board)
+    }
+
+    /// A row's pencil opens the form on *that* row's machine, without opening a session with it first.
+    ///
+    /// Which is the reason the pencil is on the row at all. Correcting a machine is what somebody does
+    /// when its credentials are wrong — a password changed on the box, an account renamed — and opening a
+    /// session with it is the one thing wrong credentials will not allow. While the only pencil was the
+    /// one in the monitoring page's header, that meant opening the machine, which meant a session, which
+    /// meant it could not be done.
+    ///
+    /// Two machines, and the page on the second, so that the header's pencil would open a *different* one
+    /// and the row's has to be read from the row.
+    #[test]
+    fn a_rows_pencil_opens_the_form_on_that_row() {
+        let mut monitor = monitor_of_two_machines();
+
+        monitor.update(Message::Open(1));
+        assert_eq!(monitor.watched().unwrap().host, "192.168.1.20");
+        monitor.update(Message::Back);
+        assert_eq!(monitor.screen(), Screen::List);
+
+        monitor.update(Message::EditDevice(0));
+
+        assert_eq!(monitor.screen(), Screen::Form);
+        assert_eq!(monitor.form.host, "192.168.1.10", "the row that was pressed");
+        assert_eq!(monitor.form.user, "nasstat");
+        assert!(monitor.form.editing.is_some(), "and it is a correction");
+        assert_eq!(monitor.devices().len(), 2, "and opening it wrote nothing down");
+        let _ = monitor.view();
+    }
+
+    /// A corrected address rewrites the machine the form was opened on instead of adding a second one
+    /// beside it.
+    ///
+    /// The case a row's pencil exists for — an address typed wrong, or a box that moved — and the one the
+    /// form got wrong for as long as it only ever called `remember`. The backend keys its list by host, so
+    /// an address the list does not have yet is a *new* machine: the typo stayed in the list beside its own
+    /// correction, two rows for one box and one of them permanently offline. `Form::editing` is the
+    /// address that has to go, and it is what the note on `Form` means by a correction being an update.
+    #[test]
+    fn a_corrected_address_rewrites_that_machine() {
+        let mut monitor = monitor();
+
+        monitor.update(Message::EditDevice(0));
+        assert_eq!(monitor.form.host, "192.168.1.10");
+
+        // Retyped the way the panel's keyboard retypes a field: cleared, then a character at a time.
+        monitor.update(Message::Focus(Field::Host));
+
+        while !monitor.form.host.is_empty() {
+            monitor.update(Message::Key(KeyAction::Backspace));
+        }
+        type_into(&mut monitor, Field::Host, "192.168.1.11");
+        monitor.update(Message::Save);
+
+        assert_eq!(monitor.screen(), Screen::List);
+        assert_eq!(monitor.devices().len(), 1, "corrected, not added beside it");
+        assert_eq!(monitor.devices()[0].host, "192.168.1.11");
+        assert_eq!(
+            monitor.devices()[0].user, "nasstat",
+            "and the rest of the machine came with it"
+        );
+        let _ = monitor.view();
+    }
+
+    /// A row's bin asks before it drops anything, and 取消 is a real way out of the question.
+    ///
+    /// The row sits in a list somebody is scrolling with a thumb, and what it would drop is an address, an
+    /// account and a password nobody has written down anywhere else — so a bin that dropped the machine
+    /// would be a row where a slipped thumb has already done it. The files app's `Prompt` is the same
+    /// trade made the same way.
+    #[test]
+    fn a_rows_bin_asks_before_it_drops_a_machine() {
+        let mut monitor = monitor();
+
+        monitor.update(Message::DeleteDevice(0));
+
+        assert_eq!(
+            monitor.confirming(),
+            Some("192.168.1.10"),
+            "the row asks, and names the machine it is asking about"
+        );
+        assert_eq!(monitor.screen(), Screen::List, "and the list stays up");
+        assert_eq!(monitor.devices().len(), 1, "and nothing has been dropped yet");
+        let _ = monitor.view();
+
+        // 取消: the question goes, the machine stays.
+        monitor.update(Message::CancelDelete);
+
+        assert!(monitor.confirming().is_none());
+        assert_eq!(monitor.devices().len(), 1, "a question answered no is not a machine dropped");
+        let _ = monitor.view();
+
+        // Asking again and answering yes is what drops it.
+        monitor.update(Message::DeleteDevice(0));
+        monitor.update(Message::ConfirmDelete);
+
+        assert!(monitor.confirming().is_none());
+        assert!(monitor.devices().is_empty());
+        let _ = monitor.view();
+    }
+
+    /// The question stays about the machine somebody pointed at, and not about whatever is in that row by
+    /// the time it is answered.
+    ///
+    /// The reason `confirming` holds an address rather than a place in the list. A machine dropped through
+    /// the form takes its row with it and every row below moves up by one, so an index asked about before
+    /// that lands one machine off afterwards — and the wrong box is the one that goes.
+    #[test]
+    fn the_question_follows_the_machine_and_not_the_row() {
+        let mut monitor = monitor_of_two_machines();
+
+        monitor.update(Message::DeleteDevice(1));
+        assert_eq!(monitor.confirming(), Some("192.168.1.20"));
+
+        // The first machine goes the long way round, through the form, which pulls the second row up into
+        // the place the question was asked in.
+        monitor.update(Message::Open(0));
+        monitor.update(Message::Edit);
+        monitor.update(Message::Delete);
+
+        assert_eq!(monitor.devices().len(), 1);
+        assert_eq!(monitor.devices()[0].host, "192.168.1.20", "the row moved up");
+
+        monitor.update(Message::ConfirmDelete);
+
+        assert!(
+            monitor.devices().is_empty(),
+            "the machine that was asked about went, not the one that took its row"
+        );
     }
 
     /// A board that cannot watch a NAS says so, and it is a different screen from a board nobody has
