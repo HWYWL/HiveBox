@@ -549,3 +549,88 @@ fn http_response_text_is_none_for_bytes_that_are_not_utf8() {
     assert_eq!(response.text(), Some("{\"a\":1}"));
 }
 
+/// A file sink puts the bytes in the file, and the response comes back with an empty body.
+///
+/// This is the whole of the difference between the two sinks, and the reason a caller has to remember
+/// which it asked for: the answer to a glyph-table request is two megabytes and belongs on the card, so
+/// there is nothing in the response to hand over and the file is the only place the bytes are.
+#[test]
+fn sim_http_a_file_sink_writes_the_body_where_it_was_asked_to() {
+    use pomelo_hal::sim::SimHttp;
+    use pomelo_hal::{HttpBackend, Sink};
+
+    let path = std::env::temp_dir().join("pomelo_hal_sim_http_file_sink.bin");
+    let _ = std::fs::remove_file(&path);
+    let path = path.to_string_lossy().into_owned();
+
+    let mut http = SimHttp::answering("glyphs");
+    http.start_to("https://example.com/font.bin", Sink::File(path.clone()))
+        .unwrap();
+
+    // The sink is kept, not just used: it is the only thing that says where the answer went, and a test
+    // that could only see the body would pass on a page that wrote to the wrong path.
+    assert_eq!(http.last_sink(), Some(&Sink::File(path.clone())));
+
+    for _ in 0..8 {
+        http.tick();
+    }
+
+    let response = http.take_result().unwrap();
+    assert_eq!(response.status, 200);
+    assert!(
+        response.body.is_empty(),
+        "a file sink's bytes are in the file, not the buffer"
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "glyphs");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A file sink that cannot be written is a fault of the board, not of the network.
+///
+/// The distinction is the one a person acts on: nothing was wrong with the request, and what they do
+/// about it is look at the card rather than at the Wi-Fi.
+#[test]
+fn sim_http_a_file_sink_that_cannot_be_written_is_a_storage_fault() {
+    use pomelo_hal::sim::SimHttp;
+    use pomelo_hal::{HttpBackend, HttpFault, Sink};
+
+    // Under a directory that does not exist, which is what a card that is not in the slot looks like
+    // from here.
+    let path = std::env::temp_dir()
+        .join("pomelo_hal_no_such_directory")
+        .join("font.bin");
+
+    let mut http = SimHttp::answering("glyphs");
+    http.start_to(
+        "https://example.com/font.bin",
+        Sink::File(path.to_string_lossy().into_owned()),
+    )
+    .unwrap();
+
+    for _ in 0..8 {
+        http.tick();
+    }
+
+    assert_eq!(http.state(), HttpState::Failed(HttpFault::Storage));
+    assert!(http.take_result().is_err(), "a failed request has no answer");
+}
+
+/// A file sink with no file in it is an argument error, not a fault.
+///
+/// It is a page that built a path wrong, and telling it "the card is full" would send whoever reads the
+/// message looking in the wrong place.
+#[test]
+fn sim_http_refuses_a_file_sink_with_no_path() {
+    use pomelo_hal::sim::SimHttp;
+    use pomelo_hal::{HttpBackend, Sink};
+
+    let mut http = SimHttp::answering("glyphs");
+
+    assert!(matches!(
+        http.start_to("https://example.com/font.bin", Sink::File(String::new())),
+        Err(HalError::InvalidArg)
+    ));
+    assert_eq!(http.state(), HttpState::Idle);
+}
+

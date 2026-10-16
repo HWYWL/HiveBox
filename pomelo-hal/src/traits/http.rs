@@ -29,21 +29,42 @@
 //! [`SystemBackend::clock`][crate::traits::SystemBackend::clock], which is where the time comes from.
 
 use crate::error::HalError;
-use crate::types::{HttpResponse, HttpState};
+use crate::types::{HttpResponse, HttpState, Sink};
 
 /// Fetching documents over HTTP and HTTPS.
 pub trait HttpBackend: Send + Sync {
-    /// Asks for `url`. Returns at once; the answer arrives when it arrives.
+    /// Asks for `url`, and puts the answer in the backend's own buffer.
+    ///
+    /// Returns at once; the answer arrives when it arrives. This is the whole of a *document* — a
+    /// forecast, a manifest, a page of JSON — and the bound that goes with it is
+    /// [`HttpResponse::MAX_BODY_BYTES`][crate::types::HttpResponse::MAX_BODY_BYTES], with an answer
+    /// over it reported as [`HttpFault::TooLarge`][crate::types::HttpFault::TooLarge]. A *file* is
+    /// megabytes and goes to [`HttpBackend::start_to`] instead.
+    fn start(&mut self, url: &str) -> Result<(), HalError> {
+        self.start_to(url, Sink::Memory)
+    }
+
+    /// Asks for `url`, with the answer going to `sink`.
+    ///
+    /// The general form of [`HttpBackend::start`], which is this with
+    /// [`Sink::Memory`][crate::types::Sink::Memory]. The sink is worth its own parameter because the
+    /// two answers are not the same kind of thing: the buffer is bounded and a file is not, and only
+    /// the caller knows which it asked for.
     ///
     /// The URL *is* the request: this is a `GET`, and the schemes it accepts are `http` and `https`.
     /// A request with a body or a method of its own is not needed by anything on this board yet, and
     /// a parameter carrying both would be a parameter every implementation has to look at to find
     /// out it is empty.
     ///
+    /// A [`Sink::File`][crate::types::Sink::File] answer is *not* in the [`HttpResponse`] that
+    /// [`HttpBackend::take_result`] hands over — that one's body is empty — but in the file the sink
+    /// named, whose length is the answer's length. Remembering the sink between the two calls is the
+    /// caller's job, and it is the only thing that says where to look.
+    ///
     /// [`HalError::Busy`] while a request is already in flight, and [`HalError::InvalidArg`] for
-    /// something that is not an URL this backend can fetch. Neither is a fault of the *network* —
-    /// what the last request did is [`HttpBackend::state`].
-    fn start(&mut self, url: &str) -> Result<(), HalError>;
+    /// something that is not an URL this backend can fetch, or a sink it cannot use. Neither is a
+    /// fault of the *network* — what the last request did is [`HttpBackend::state`].
+    fn start_to(&mut self, url: &str, sink: Sink) -> Result<(), HalError>;
 
     /// How the request is going, as a snapshot.
     ///

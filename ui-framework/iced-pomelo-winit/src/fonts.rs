@@ -21,9 +21,9 @@
 //! # The default font
 //!
 //! An app written for iced knows nothing about this board's fonts, and would draw no text at all
-//! if it had to install one. So this crate carries its own: [`install_default`] puts a 1.8 MB
-//! Simplified-Chinese subset of Source Han Sans (see `fonts/README.md`) in the database unless
-//! something else already did, and the host calls it on the way in —
+//! if it had to install one. So this crate carries its own: [`install_default`] puts a 0.19 MB
+//! Simplified-Chinese subset of Source Han Sans (see `pomelo-font`'s README) in the database
+//! unless something else already did, and the host calls it on the way in —
 //! [`Application::new`](crate::Application::new) and [`Host::new`](crate::Host::new).
 //!
 //! Two rules, and the order between them is the whole design:
@@ -41,6 +41,8 @@
 
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "renderer")]
+use std::sync::OnceLock;
 
 use iced_graphics::text::cosmic_text::fontdb::Family;
 
@@ -48,9 +50,14 @@ use iced_graphics::text::cosmic_text::fontdb::Family;
 ///
 /// One font, not two: CJK and Latin live in the same face, because mixing a Latin font with a
 /// Chinese one means deciding twice per label which one draws it — and `Font::default()` can only
-/// name one family. The subset is Source Han Sans SC cut to `charset-common.txt` (3755 GB2312
-/// level-1 characters plus ASCII, CJK punctuation and the fullwidth forms) and the cuts are in
-/// `pomelo-os` under `assets/fonts/source/`; `fonts/README.md` has the exact command.
+/// name one family.
+///
+/// The subset is Source Han Sans SC cut to the characters this source tree writes, plus ASCII and a
+/// fullwidth space: `tools/scan_charset.py` reads them out of the string and character literals, so
+/// a label that somebody wrote is a label with glyphs, and there is no second list to keep in step
+/// with the code. `pomelo-font`'s README has the exact commands — and the reason the cut is this
+/// narrow: a GB2312 level-1 charset is 3.3 MB larger, which is the difference between one app slot
+/// on a 16 MB part and two.
 const DEFAULT: &[u8] = include_bytes!("../fonts/dist/SourceHanSansSC-Regular-Subset.otf");
 
 /// The glyphs of [`DEFAULT`] that were rasterised on the build machine, at the one size the
@@ -67,6 +74,50 @@ const DEFAULT: &[u8] = include_bytes!("../fonts/dist/SourceHanSansSC-Regular-Sub
 const BAKED: &[&[u8]] = &[
     include_bytes!("../fonts/dist/SourceHanSansSC-Regular-Subset-common@24px.bin"),
 ];
+
+/// The tables to install instead of [`BAKED`], if a firmware put any here — see [`prefer_tables`].
+#[cfg(feature = "renderer")]
+static PREFERRED: OnceLock<&'static [&'static [u8]]> = OnceLock::new();
+
+/// Says that [`DEFAULT`]'s glyph tables are `tables`, rather than the ones baked into this image.
+///
+/// The one caller is a firmware's boot, and the one reason is size: the 24 px coverage is a couple of
+/// megabytes, which is a couple of megabytes a board that wants two app slots cannot spare — so the
+/// table is published on its own, a box is given a newer one by writing a file, and this is how the
+/// interface is told to draw from it. The bytes are borrowed for as long as the process runs, so the
+/// caller has to hand over memory that lives that long (`Box::leak`; there is one of these per boot).
+///
+/// Call this **before** anything installs a font — before the first frame, and therefore before
+/// [`install_default`] runs from either entry point. A later call is the same as no call at all:
+/// [`install`] reads this once, at the moment it binds the tables to the face.
+///
+/// # Errors
+///
+/// If a table is not one. That check is here, and not left to [`iced_pomelo_gfx::baked::install`],
+/// precisely because these bytes did *not* come out of the image: a table that arrived over the network
+/// is a table that can be truncated, and the documented answer to a bad one is a panic — which is the
+/// right answer for `include_bytes!` and the wrong one for a download. So a caller that gets an `Err`
+/// logs it and carries on with the baked table, and a caller that gets an `Ok` knows the renderer will
+/// not be handed anything it refuses.
+#[cfg(feature = "renderer")]
+pub fn prefer_tables(
+    tables: &'static [&'static [u8]],
+) -> Result<(), iced_pomelo_gfx::baked::Error> {
+    for bytes in tables {
+        iced_pomelo_gfx::baked::Atlas::new(bytes)?;
+    }
+
+    // Lost, and not an error: the tables are read once, so a second preference is a second boot's
+    // question and this one has already been answered.
+    let _ = PREFERRED.set(tables);
+    Ok(())
+}
+
+/// The tables to bind to [`DEFAULT`]: the ones a firmware preferred, or the baked ones.
+#[cfg(feature = "renderer")]
+fn tables() -> &'static [&'static [u8]] {
+    PREFERRED.get().copied().unwrap_or(BAKED)
+}
 
 /// Whether anyone has installed a font yet — an app, a firmware, or [`install_default`] itself.
 static INSTALLED: AtomicBool = AtomicBool::new(false);
@@ -100,10 +151,14 @@ pub fn install(bytes: &'static [u8]) {
     // The tables are installed by whoever installed the font they were baked from: an app that
     // brings a face of its own gets none of this, and the renderer would refuse them by `font_id`
     // even if it did.
+    //
+    // Which tables, and not whether: a firmware that found a newer coverage on a card said so with
+    // [`prefer_tables`], and this is where that is read — once, because a table's glyph numbers only
+    // mean anything against the face they were baked from, and this is the moment that face exists.
     #[cfg(feature = "renderer")]
     if std::ptr::eq(bytes, DEFAULT) {
         if let Some((id, _)) = face {
-            iced_pomelo_gfx::baked::install(id, BAKED);
+            iced_pomelo_gfx::baked::install(id, tables());
         }
     }
 }

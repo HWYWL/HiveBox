@@ -387,6 +387,7 @@ fn every_fault_is_a_sentence_and_a_thing_to_do_in_both_languages() {
         HttpFault::Timeout,
         HttpFault::Tls,
         HttpFault::TooLarge,
+        HttpFault::Storage,
         HttpFault::Unsupported,
     ];
 

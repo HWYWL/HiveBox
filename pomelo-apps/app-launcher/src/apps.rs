@@ -21,26 +21,31 @@ pub use pomelo_widgets::{AppIcon, AppMeta as Entry};
 
 include!(concat!(env!("OUT_DIR"), "/baked_icons.rs"));
 
-/// Fourteen apps, in the order the grid shows them: each [`crate::PER_PAGE`] fill a page, and the rest
-/// fall on the one after.
+/// Fifteen apps, in the order the grid shows them: each [`crate::PER_PAGE`] fill a page, and the rest
+/// fall on the one after — six, six and three.
 ///
-/// The order is the interface's and not the alphabet's. The four on the first page are the four
-/// things this box is *for* — what it plays, what it serves, what it can be told to do, and how it
-/// is set up — and the pages after that hold the ones that are about the box itself and what is beside
-/// it rather than the jobs it is for: the calculator, which has nothing to do with it at all, the task
-/// viewer, which is about nothing else, the NAS monitor, which is about the machine next to it, the
-/// clock, which is about nothing but the time this box thinks it is, the overview, which is about
-/// the box itself and is the one tile that is about more than one thing, the file manager, which is
-/// about the two filesystems this box can mount and is the way to move anything in either, and the
-/// power log, which is about the battery and is the only tile on the grid that is about *time* — the
-/// overview shows what the battery is, and this one shows what it has been doing. The channel map
-/// closes the third page: it is about the air around the box, which is the one thing that page watches
-/// which belongs to neither the box nor the machine beside it.
+/// The order is the interface's and not the alphabet's. The four the first page opened with are still
+/// the first four, because they are still the four things this box is *for* — what it plays, what it
+/// serves, what it can be told to do, and how it is set up. The fifth is the one tile that is about the
+/// box's own software rather than about anything that software does: the updater, where a firmware or a
+/// glyph table is replaced, and it sits beside the settings for that reason — both are pages about the
+/// box itself rather than pages about a job. The calculator closes the page: it is the one app here
+/// that has nothing to do with the box at all, and it was the first tile of the second page until the
+/// page had room for six.
 ///
-/// The fourth page is the two things the box has no say in. The weather is the channel map's subject
-/// one layer up — the sky rather than the air — and it is read the same way, over the network, which
-/// is why the two are neighbours across the page break. The games app is last because it is the only
-/// tile on the grid whose subject is not the box at all: it is the person holding it.
+/// The second page holds the ones that are about the box and what is beside it rather than the jobs it
+/// is for: the task viewer, which is about nothing else, the NAS monitor, which is about the machine
+/// next to it, the clock, which is about nothing but the time this box thinks it is, the overview,
+/// which is about the box itself and is the one tile that is about more than one thing, the file
+/// manager, which is about the two filesystems this box can mount and is the way to move anything in
+/// either, and the power log, which is about the battery and is the only tile on the grid that is about
+/// *time* — the overview shows what the battery is, and this one shows what it has been doing.
+///
+/// The third page is the three things the box has no say in. The channel map opens it: it is about the
+/// air around the box, which belongs to neither the box nor the machine beside it. The weather is the
+/// channel map's subject one layer up — the sky rather than the air — and it is read the same way, over
+/// the network, which is why the two are neighbours. The games app is last because it is the only tile
+/// on the grid whose subject is not the box at all: it is the person holding it.
 pub const CATALOGUE: &[Entry] = &[
     // Page 1
     Entry {
@@ -67,7 +72,18 @@ pub const CATALOGUE: &[Entry] = &[
         icon: AppIcon::glyph(Icon::SETTINGS),
         accent: (124, 132, 146),
     },
-    // Page 2
+    Entry {
+        name: "Update",
+        name_zh: "更新",
+        // An arrow coming down onto a bar, which is what `system_update` draws and what the page's two
+        // rows do. Plain `UPDATE` is the pair of circular arrows that means "look again" — which is
+        // what the button *inside* the page wears, on the row that checks for a new version — and a
+        // tile that wore it too would be the same picture for two different things.
+        icon: AppIcon::glyph(Icon::SYSTEM_UPDATE),
+        // An indigo, in the stretch between the server's blue-violet and the settings page's grey: the
+        // one hue the spread has left that is neither a job's colour nor a reading's own.
+        accent: (63, 81, 181),
+    },
     Entry {
         name: "Calculator",
         name_zh: "计算器",
@@ -102,7 +118,7 @@ pub const CATALOGUE: &[Entry] = &[
         // server's violet, and this is the one place left between them that is not a grey.
         accent: (214, 51, 132),
     },
-    // Page 3
+    // Page 2
     Entry {
         name: "Overview",
         name_zh: "概览",
@@ -147,7 +163,7 @@ pub const CATALOGUE: &[Entry] = &[
         // is neither a signal-meter blue nor a success green.
         accent: (0, 137, 123),
     },
-    // Page 4
+    // Page 3
     Entry {
         name: "Weather",
         name_zh: "天气",

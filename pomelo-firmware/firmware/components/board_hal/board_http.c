@@ -1,7 +1,7 @@
 // =============================================================================
 // HTTP client (esp_http_client + ESP-TLS)
 // -----------------------------------------------------------------------------
-// The Rust `HttpBackend`, served by a worker task: `hal_http_start` names a URL
+// The Rust `HttpBackend`, served by a worker task: `hal_http_start_to` names a URL
 // and returns, the task does the resolve, the handshake and the read, and the
 // state kept here is what the poll reads. Non-blocking for the same reason the
 // Wi-Fi scan is — a frame loop cannot wait a second and a half for a server, and
@@ -15,9 +15,19 @@
 // reading 1970 rejects every certificate ever issued. `hal_time_sync()` is what
 // fixes that; this file is where it shows.
 //
-// One request at a time, one body buffer, and the answer is *taken* rather than
-// read twice: `hal_http_take` hands over the bytes and clears the state that said
-// they were there.
+// One request at a time, and the answer is *taken* rather than read twice:
+// `hal_http_take` hands over the bytes and clears the state that said they were
+// there.
+//
+// A body goes one of two ways. `HAL_HTTP_SINK_MEMORY` is a document: it lands in
+// the one buffer this file owns and `HAL_HTTP_BODY_MAX` is the bound on it, which
+// is what stops a page that asked for something unbounded from taking the heap
+// with it. `HAL_HTTP_SINK_FILE` is a file — a glyph table, a firmware image — and
+// is written out as it arrives through the same buffer used as a staging area, so
+// its size is the filesystem's problem rather than this board's memory. A
+// download that ends any way but successfully removes what it wrote: half a glyph
+// table reads as a font with some of its characters missing, and that is a
+// failure which surfaces a long way from its cause.
 // =============================================================================
 
 #include <stdbool.h>
@@ -76,6 +86,12 @@ static uint8_t *s_body = NULL;
 
 /** The URL the worker is fetching. Written under the lock, read by the worker while `busy`. */
 static char s_url[HAL_HTTP_URL_MAX];
+
+/** Where the answer goes: `HAL_HTTP_SINK_*`. Written under the lock, read by the worker while `busy`. */
+static int32_t s_sink = HAL_HTTP_SINK_MEMORY;
+
+/** The file a `HAL_HTTP_SINK_FILE` request writes. Same lifetime as `s_url`, and empty otherwise. */
+static char s_path[HAL_HTTP_PATH_MAX];
 
 static inline void lock(void)
 {
@@ -190,6 +206,12 @@ static void http_task(void *arg)
     size_t used = 0;
     bool record = true;
 
+    /* The file a `HAL_HTTP_SINK_FILE` request writes, declared up here and not at the point it is
+     * opened: the ways out above that point jump to `out`, which closes it, and a pointer that was
+     * never assigned would be closed and deleted there. Zero is "nothing open", which is what every
+     * path that did not get as far as opening one leaves. */
+    FILE *file = NULL;
+
     /* The certificate bundle in the image, and the reason HTTPS needs a clock: mbedTLS checks the
      * window on every certificate it is shown, so this only works once `hal_time_sync()` has run. */
     const esp_http_client_config_t cfg = {
@@ -225,14 +247,41 @@ static void http_task(void *arg)
     (void)esp_http_client_fetch_headers(client);
     status = (int32_t)esp_http_client_get_status_code(client);
 
-    while (used < HAL_HTTP_BODY_MAX - 1) {
+    /* Where the bytes go. A file is opened before the first chunk, so that a path that cannot be
+     * written is the request's own answer rather than a mystery at the end of a long download — and
+     * the body of a `404` lands in it just as the body of a success does, because the status is the
+     * answer's to carry and not this file's to judge. */
+    const bool to_file = (s_sink == HAL_HTTP_SINK_FILE);
+    if (to_file) {
+        file = fopen(s_path, "wb");
+        if (file == NULL) {
+            ESP_LOGW(TAG, "cannot write %s", s_path);
+            fault = HAL_HTTP_FAULT_STORAGE;
+            goto out;
+        }
+    }
+
+    for (;;) {
         if (is_cancelled()) {
             ESP_LOGI(TAG, "cancelled: %s", s_url);
             record = false;
             goto out;
         }
 
-        const int read = esp_http_client_read(client, (char *)s_body + used, HAL_HTTP_BODY_MAX - 1 - used);
+        /* `used` is the answer's length either way, but only the buffered one is bounded by it: a file
+         * has somewhere else to put the rest. */
+        if (!to_file && used >= HAL_HTTP_BODY_MAX - 1) {
+            ESP_LOGW(TAG, "answer over %d bytes: %s", HAL_HTTP_BODY_MAX, s_url);
+            fault = HAL_HTTP_FAULT_TOO_LARGE;
+            goto out;
+        }
+
+        /* A file stages each chunk through the head of the same buffer: it is the read buffer as much
+         * as it is the body buffer, and there is no reason for this file to own a second one. */
+        uint8_t *const into = to_file ? s_body : s_body + used;
+        const int room = (int)(HAL_HTTP_BODY_MAX - 1 - (to_file ? 0 : used));
+
+        const int read = esp_http_client_read(client, (char *)into, room);
         if (read < 0) {
             ESP_LOGW(TAG, "read %s failed (%d)", s_url, read);
             fault = fault_of(ESP_FAIL, tls);
@@ -250,21 +299,43 @@ static void http_task(void *arg)
             goto out;
         }
 
+        if (to_file && fwrite(into, 1, (size_t)read, file) != (size_t)read) {
+            ESP_LOGW(TAG, "write %s failed", s_path);
+            fault = HAL_HTTP_FAULT_STORAGE;
+            goto out;
+        }
+
         used += (size_t)read;
     }
 
-    if (used >= HAL_HTTP_BODY_MAX - 1) {
-        ESP_LOGW(TAG, "answer over %d bytes: %s", HAL_HTTP_BODY_MAX, s_url);
-        fault = HAL_HTTP_FAULT_TOO_LARGE;
-        goto out;
+    if (to_file) {
+        /* Let go of the file before the way out, so that `out` does not read a good close as a reason
+         * to delete a file that is whole. A close that *fails* is the opposite case — the bytes may
+         * never have reached the card — so that one is removed here rather than left to be read. */
+        FILE *const written = file;
+        file = NULL;
+        if (fclose(written) != 0) {
+            ESP_LOGW(TAG, "close %s failed", s_path);
+            remove(s_path);
+            fault = HAL_HTTP_FAULT_STORAGE;
+            goto out;
+        }
+        ESP_LOGI(TAG, "%s -> %d, %u bytes to %s", s_url, (int)status, (unsigned)used, s_path);
+    } else {
+        /* A NUL just past the end, so that a `printf` of a body is not a buffer overrun. The Rust side
+         * carries the length and does not depend on it. */
+        s_body[used] = '\0';
+        ESP_LOGI(TAG, "%s -> %d, %u bytes", s_url, (int)status, (unsigned)used);
     }
 
-    /* A NUL just past the end, so that a `printf` of a body is not a buffer overrun. The Rust side
-     * carries the length and does not depend on it. */
-    s_body[used] = '\0';
-    ESP_LOGI(TAG, "%s -> %d, %u bytes", s_url, (int)status, (unsigned)used);
-
 out:
+    if (file != NULL) {
+        /* Cancelled, or failed part way: half a glyph table reads as a font with some of its characters
+         * missing, which is a failure that surfaces a long way from here. */
+        fclose(file);
+        remove(s_path);
+    }
+
     if (client != NULL) {
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
@@ -283,7 +354,7 @@ out:
 // Public API
 // =============================================================================
 
-esp_err_t hal_http_start(const char *url)
+esp_err_t hal_http_start_to(const char *url, int32_t sink, const char *path)
 {
     if (url == NULL || url[0] == '\0') {
         return ESP_ERR_INVALID_ARG;
@@ -293,6 +364,21 @@ esp_err_t hal_http_start(const char *url)
         return ESP_ERR_INVALID_ARG;
     }
     if (strncmp(url, "http://", 7) != 0 && !url_is_tls(url)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* The path is checked here rather than by `fopen` on the worker for the same reason the URL is: a
+     * page that built an empty one has a bug, and "the card is full" is the wrong thing to tell it. */
+    size_t path_length = 0;
+    if (sink == HAL_HTTP_SINK_FILE) {
+        if (path == NULL || path[0] == '\0') {
+            return ESP_ERR_INVALID_ARG;
+        }
+        path_length = strlen(path);
+        if (path_length >= HAL_HTTP_PATH_MAX) {
+            return ESP_ERR_INVALID_ARG;
+        }
+    } else if (sink != HAL_HTTP_SINK_MEMORY) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -322,6 +408,12 @@ esp_err_t hal_http_start(const char *url)
     }
 
     memcpy(s_url, url, length + 1);
+    s_sink = sink;
+    if (sink == HAL_HTTP_SINK_FILE) {
+        memcpy(s_path, path, path_length + 1);
+    } else {
+        s_path[0] = '\0';
+    }
 
     /* The two refusals that need no network, answered before anything is sent. */
     int32_t fault = HAL_HTTP_FAULT_NONE;
@@ -391,7 +483,14 @@ esp_err_t hal_http_take(int32_t *out_status, const uint8_t **out_body, size_t *o
     }
 
     *out_status = s_snap.status;
-    *out_body = s_body;
+    /* A file sink's bytes went to the file as they arrived and are not in this buffer at all: the
+     * length still says how many there were, which is what a caller checking a download against a
+     * manifest's size wants, and a NULL pointer is the honest answer for "there is no buffer".
+     *
+     * `s_sink` and not a field of the snapshot: the sink is a property of the *request*, and it is
+     * read here rather than copied into the snapshot because a request that had already been taken
+     * would have cleared one and left the other saying where the bytes went. */
+    *out_body = (s_sink == HAL_HTTP_SINK_FILE) ? NULL : s_body;
     *out_length = s_snap.length;
 
     /* Taken: the answer belongs to the caller now and the client is free for the next request. The

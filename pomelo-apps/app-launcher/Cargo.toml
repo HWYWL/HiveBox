@@ -42,6 +42,7 @@ overview = { path = "../overview", default-features = false }
 settings = { path = "../settings", default-features = false }
 task-viewer = { path = "../task-viewer", default-features = false }
 terminal = { path = "../terminal", default-features = false }
+updater = { path = "../updater", default-features = false }
 weather = { path = "../weather", default-features = false }
 web-manager = { path = "../web-manager", default-features = false }
 wifi-map = { path = "../wifi-map", default-features = false }

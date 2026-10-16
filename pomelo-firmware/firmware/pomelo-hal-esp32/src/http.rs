@@ -1,11 +1,15 @@
 //! The board as a client of somebody else's HTTP service.
 //!
 //! A thin `extern "C"` binding over `components/board_hal/board_http.c`, which does the fetch on a
-//! task of its own with `esp_http_client` and ESP-TLS. What crosses the boundary is a URL, a state,
-//! a fault and the bytes of an answer — the same four things [`HttpBackend`] names, and nothing about
-//! sockets, certificates or redirects. The one piece of state that stays here is nothing at all: the
-//! C side owns the request, the worker and the body buffer, so there is no way for two tasks to
-//! disagree about which request is running.
+//! task of its own with `esp_http_client` and ESP-TLS. What crosses the boundary is a URL, where the
+//! answer goes, a state, a fault and the bytes of an answer — the same things [`HttpBackend`] names,
+//! and nothing about sockets, certificates or redirects. The one piece of state that stays here is
+//! nothing at all: the C side owns the request, the worker and the body buffer, so there is no way for
+//! two tasks to disagree about which request is running.
+//!
+//! A [`Sink::File`] request is the one case where the answer does not cross at all: the C side writes
+//! it to the path with `fopen` as the bytes arrive, and hands back a NULL body. The length is still
+//! the answer's, and the file is the only place its bytes are.
 //!
 //! # Why not Rust
 //!
@@ -29,7 +33,7 @@ use std::ffi::CString;
 
 use pomelo_hal::error::HalError;
 use pomelo_hal::traits::HttpBackend;
-use pomelo_hal::types::{HttpFault, HttpResponse, HttpState};
+use pomelo_hal::types::{HttpFault, HttpResponse, HttpState, Sink};
 
 mod ffi {
     use core::ffi::{c_char, c_int};
@@ -38,6 +42,10 @@ mod ffi {
     pub const STATE_IDLE: c_int = 0;
     pub const STATE_RUNNING: c_int = 1;
     pub const STATE_DONE: c_int = 2;
+
+    /// `HAL_HTTP_SINK_*`, from `board_hal.h`.
+    pub const SINK_MEMORY: c_int = 0;
+    pub const SINK_FILE: c_int = 1;
 
     /// `HAL_HTTP_FAULT_*`, from `board_hal.h`.
     ///
@@ -49,9 +57,10 @@ mod ffi {
     pub const FAULT_TIMEOUT: c_int = 4;
     pub const FAULT_TLS: c_int = 5;
     pub const FAULT_TOO_LARGE: c_int = 6;
+    pub const FAULT_STORAGE: c_int = 7;
 
     extern "C" {
-        pub fn hal_http_start(url: *const c_char) -> c_int;
+        pub fn hal_http_start_to(url: *const c_char, sink: c_int, path: *const c_char) -> c_int;
         pub fn hal_http_get_state() -> c_int;
         pub fn hal_http_get_fault() -> c_int;
         pub fn hal_http_take(
@@ -104,6 +113,7 @@ fn fault_from(code: c_int) -> HttpFault {
         ffi::FAULT_TLS => HttpFault::Tls,
         ffi::FAULT_TOO_LARGE => HttpFault::TooLarge,
         ffi::FAULT_UNREACHABLE => HttpFault::Unreachable,
+        ffi::FAULT_STORAGE => HttpFault::Storage,
         // `FAULT_NONE` cannot be reached from a failure and anything else is a code this side has not
         // been taught. Both are "we could not reach it", which is the fault that sends a person to
         // look at the network rather than at anything this board controls.
@@ -112,10 +122,21 @@ fn fault_from(code: c_int) -> HttpFault {
 }
 
 impl HttpBackend for EspHttp {
-    fn start(&mut self, url: &str) -> Result<(), HalError> {
+    fn start_to(&mut self, url: &str, sink: Sink) -> Result<(), HalError> {
         let url = CString::new(url).map_err(|_| HalError::InvalidArg)?;
 
-        let code = unsafe { ffi::hal_http_start(url.as_ptr()) };
+        // The path is bound outside the call so that it outlives the pointer taken to it — the C side
+        // copies it before returning, and the worker reads that copy from then on.
+        let (sink_code, path) = match &sink {
+            Sink::Memory => (ffi::SINK_MEMORY, None),
+            Sink::File(path) => (
+                ffi::SINK_FILE,
+                Some(CString::new(path.as_str()).map_err(|_| HalError::InvalidArg)?),
+            ),
+        };
+        let raw_path = path.as_ref().map_or(ptr::null(), |path| path.as_ptr());
+
+        let code = unsafe { ffi::hal_http_start_to(url.as_ptr(), sink_code, raw_path) };
         if code == 0 {
             Ok(())
         } else {

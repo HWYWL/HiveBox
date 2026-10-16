@@ -82,6 +82,13 @@ except ImportError:
     print("[!] 需要 freetype-py：pip install freetype-py")
     sys.exit(1)
 
+# 控制台未必是 UTF-8：Windows 的 PowerShell 默认 GBK，而「缺字」那一行会把字符集里字体
+# 没有的字原样打出来 —— 那里面可能有 GBK 编不出来的 emoji，于是烘培成功了、脚本却抛
+# UnicodeEncodeError 退出，看起来像失败。让它降级成 `?`，不要让它变成错误。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(errors="replace")
+
 ROOT = pathlib.Path(__file__).resolve().parent
 
 # **从运行时那份子集烘**，不从 16.5 MB 的源字体烘。子集化会重排 glyph_id，所以表里的编号

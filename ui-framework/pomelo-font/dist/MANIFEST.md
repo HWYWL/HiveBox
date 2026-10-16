@@ -5,13 +5,13 @@ rebake with `python3 bake.py` after changing the charset or the sizes.
 
 ## What was baked
 
-* source font: `dist\SourceHanSansSC-Regular-Subset.otf` — 1784812 B, sha256 `9132c458c2ae7ad7a868f80694e59bae1eebdec8507ef4f410914f2e71cabb31`
-* charset: `source\charset-common.txt` — 4013 characters
+* source font: `dist\SourceHanSansSC-Regular-Subset.otf` — 195540 B, sha256 `6a708e1abf840651befb45ff9de9a5a6488b36d2c82f0e9362a849e31a12a857`
+* charset: `source\charset-common.txt` — 528 characters
 * coverage: 8-bit alpha, no hinting, pixel-aligned (subpixel bins unused)
 
 | table | size | glyphs | coverage | file | bytes/glyph |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `SourceHanSansSC-Regular-Subset-common@24px.bin` | 24 px | 4013 | 1984.6 KiB | 2031.6 KiB | 506 B |
+| `SourceHanSansSC-Regular-Subset-common@24px.bin` | 24 px | 528 | 227.8 KiB | 234.0 KiB | 442 B |
 
 ## Which sizes are cached, and what happens without one
 

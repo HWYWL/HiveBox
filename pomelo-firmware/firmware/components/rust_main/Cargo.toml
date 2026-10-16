@@ -45,6 +45,11 @@ iced-pomelo-winit = { package = "iced_winit", path = "../../../../ui-framework/i
 # feature set decided from here — the renderer reaches this crate through `iced-pomelo-gfx`.
 pomelo-gfx = { path = "../../../../ui-framework/pomelo-gfx", optional = true }
 app-launcher = { path = "../../../../pomelo-apps/app-launcher", default-features = false }
+# The box's own software, for one question asked at boot: which glyph table the interface is drawn with.
+# That crate is the one that knows where tables live and how their versions are written in a file name,
+# and the boot is the only other thing that has to know — so the rule stays in one place and the
+# composition root asks for it, rather than a second copy of it living here.
+updater = { path = "../../../../pomelo-apps/updater", default-features = false }
 # The board's hardware lives next door in the firmware — the FFI declarations sit beside the C
 # they call. This crate is the composition root that injects it and translates hardware button
 # inputs (InputAction) into app launcher messages.

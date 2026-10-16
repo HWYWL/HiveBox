@@ -45,7 +45,7 @@ pub trait StorageBackend: Send + Sync {
     /// The flash chip those filesystems live on, and what every part of it is for.
     ///
     /// The chip and not a filesystem. `volumes` answers "how full is what I can write"; a board whose
-    /// built-in volume is 3 MB of a 16 MB chip has 13 MB that answer says nothing about, and the
+    /// built-in volume is 3.88 MB of a 16 MB chip has 12.1 MB that answer says nothing about, and the
     /// person looking at a storage page is asking where it went. See [`FlashLayout`].
     ///
     /// Unlike the two above this does not change while the box runs — a partition table is written

@@ -1,14 +1,25 @@
 # ESP-IDF Partition Table
 # Name,   Type, SubType, Offset,  Size, Flags
 nvs,      data, nvs,     0x9000,  0x6000,
-phy_init, data, phy,     0xf000,  0x1000,
-# The app partition is 0xAF0000 (10.94 MB): the firmware plus the glyph tables baked into it.
+otadata,  data, ota,     0xF000,  0x2000,
+phy_init, data, phy,     0x11000, 0x1000,
+# Two app slots, 6 MB each, and no factory partition.
 #
-# It was 12 MB while three tables were embedded (18, 20 and 24 px). The interface has one type size
-# now -- only the 24 px table is left -- so the ~2.6 MB the other two took is flash that nothing
-# claims. Giving it back to the app partition would only reserve room the app does not use.
-factory,  app,  factory, 0x10000,  0xAF0000,
+# A factory partition is a third copy of the firmware that a box with a working app never reads
+# twice. With two slots the bootloader boots whichever one `otadata` selects, and a blank
+# `otadata` -- a chip that has only ever been flashed -- selects `ota_0`. So the first flash of a
+# new board is still `idf.py flash`, and every update after it is written into the *other* slot
+# and selected by a reboot. There is nothing a factory row would add.
+#
+# 6 MB is the size the image needs and not a round number picked for looks. The firmware is
+# 5.6 MB, and most of that is the glyph tables -- see `pomelo-font` for why they are that size.
+# 6 MB is that plus the room a release grows into, and it is the largest slot that still leaves a
+# filesystem worth having: every byte here comes straight out of `internal`, which is the half of
+# the flash the owner can write.
+ota_0,    app,  ota_0,   0x20000, 0x600000,
+ota_1,    app,  ota_1,   0x620000,0x600000,
 # internal is the board's own filesystem -- Wi-Fi credentials, AppData, whatever its owner keeps --
-# and it now runs to the end of the chip: 5 MB at 0xB00000, up from 3 MB. The table uses all 16 MB,
-# so nothing is left unallocated (see `hal_storage_get_flash`).
-internal, data, spiffs,  0xB00000, 0x500000,
+# and it runs to the end of the chip: 0x3E0000 (3.88 MB) at 0xC20000, down from 5 MB, because the
+# second app slot had to come from somewhere. The table uses all 16 MB, so nothing is left
+# unallocated (see `hal_storage_get_flash`).
+internal, data, spiffs,  0xC20000,0x3E0000,

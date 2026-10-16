@@ -18,9 +18,10 @@ use std::time::Duration;
 /// draws one for a failed read is a page that says the battery is empty when the gauge is merely
 /// broken. An empty string disappears into the row and says nothing at all.
 ///
-/// The fullwidth hyphen-minus and not the em dash, for the same reason the rest of the box uses it: the
-/// panel's font is a subset of GB2312, which has this character in its punctuation rows and not the
-/// typographic dash, and a glyph the font does not have draws as a box.
+/// The fullwidth hyphen-minus and not the em dash, because it is the dash the rest of the box writes.
+/// The panel's font is cut to exactly the characters this source tree draws (`tools/scan_charset.py`),
+/// so reusing a character that is already written costs nothing, while a character nobody has written
+/// yet is a box on the panel until the charset is rebaked and the board reflashed.
 pub const MISSING: &str = "－";
 
 /// [`MISSING`], as an owned string, for the places that need one.

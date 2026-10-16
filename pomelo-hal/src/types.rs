@@ -89,8 +89,9 @@ pub enum FlashRegionKind {
 /// be a map that did not add up to the chip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlashRegion {
-    /// How this machine spells it — a partition's own label (`nvs`, `factory`, `internal`), or the
-    /// name the platform gave a region that is not one. Data, not interface text, like a mount point.
+    /// How this machine spells it — a partition's own label (`nvs`, `otadata`, `ota_0`, `internal`),
+    /// or the name the platform gave a region that is not one. Data, not interface text, like a mount
+    /// point.
     pub label: String,
     pub kind: FlashRegionKind,
     pub size: u32,
@@ -98,9 +99,9 @@ pub struct FlashRegion {
 
 /// The whole flash chip: how big it is, and what every part of it is for.
 ///
-/// This is why a storage page needs more than [`VolumeInfo`]: the built-in volume is 3 MB of a 16 MB
-/// chip, and the other 13 MB are the firmware and the reservations around it. A page that draws only
-/// the filesystem answers "how much room is left" and not "where did the flash go".
+/// This is why a storage page needs more than [`VolumeInfo`]: the built-in volume is 3.88 MB of a 16 MB
+/// chip, and the other 12.1 MB are two copies of the firmware and the reservations around them. A page
+/// that draws only the filesystem answers "how much room is left" and not "where did the flash go".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlashLayout {
     pub total_bytes: u32,
@@ -487,6 +488,33 @@ impl WebStatus {
     }
 }
 
+/// Where an answer's bytes go as they arrive.
+///
+/// This is the one thing about a request that a caller cannot leave unsaid, because the two answers
+/// differ by an order of magnitude: a document — a forecast, a manifest, a page of JSON — is a few
+/// kilobytes and belongs in memory, where `HttpResponse::MAX_BODY_BYTES` is the bound that keeps a
+/// surprising one from eating the heap; a *file* — a glyph table, a picture, a firmware image — is
+/// megabytes and belongs on a filesystem, where its size is the filesystem's problem and not the
+/// board's memory. The same request with the wrong sink is an out-of-memory reboot or a needless
+/// write to the card, so the choice is made by the caller that knows what it asked for.
+///
+/// The path rides along with the choice rather than being a second argument to the backend: which
+/// request writes where is one decision, and a backend that took the two separately would be a
+/// backend that could be handed a URL and somebody else's file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Sink {
+    /// Into the backend's own buffer, handed over by
+    /// [`take_result`][crate::traits::HttpBackend::take_result].
+    Memory,
+    /// Into this file, created or overwritten, as the bytes arrive.
+    ///
+    /// The directories above it must already be there: this writes a file, and making the path to it
+    /// is a separate thing a page does with `std::fs` (or `StorageBackend::write_file`, which makes
+    /// them on the way). A download that fails part way leaves nothing behind — see
+    /// [`HttpFault::Storage`], which is the failure, and the removal that goes with it.
+    File(String),
+}
+
 /// How a request is going, as [`HttpBackend`][crate::traits::HttpBackend] reports it.
 ///
 /// The same start-and-poll shape the radio's scan has, for the same reason: a request is a second or
@@ -530,6 +558,15 @@ pub enum HttpFault {
     Tls,
     /// The answer was larger than this board will hold. See [`HttpResponse::MAX_BODY_BYTES`].
     TooLarge,
+    /// The answer could not be written where it was asked to go: a [`Sink::File`] whose path would
+    /// not open, whose filesystem filled up part way, or whose write failed. A fault of the *board*
+    /// rather than of the network — the bytes were arriving — and the one to tell apart from
+    /// [`HttpFault::Unreachable`], because what a person does about it is look at the card.
+    ///
+    /// Nothing is left behind: a half-written file is removed rather than kept, since a truncated
+    /// glyph table reads as a font with some of its characters missing, which is a failure that
+    /// surfaces far from its cause.
+    Storage,
     /// This board cannot make requests at all: its image has no HTTP client in it. Not a fault of the
     /// network, and the answer while a backend is still a placeholder — the same note
     /// [`NasFault::Unsupported`] carries.

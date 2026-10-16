@@ -23,8 +23,12 @@ pub const WALLPAPER_DARK: (u8, u8, u8) = (0, 0, 0);
 /// panel has no bezel to hide in, so it keeps the near-white it has always had.
 pub const WALLPAPER_LIGHT: (u8, u8, u8) = (242, 242, 247);
 
-/// The app grid: two columns of two rows, so a page holds four apps, one to a quadrant.
-pub const COLUMNS: usize = 2;
+/// The app grid: three columns of two rows, so a page holds six apps.
+///
+/// Two by two, one tile to a quadrant, was what a page of four was laid out for. Six is three
+/// across and two down: the grid is scanned by column before it is read as rows, and a column of
+/// three is what a page of a phone's home screen has.
+pub const COLUMNS: usize = 3;
 pub const ROWS: usize = 2;
 
 /// The apps one page of the grid holds.
@@ -46,19 +50,39 @@ pub const ICON: f32 = 118.0;
 pub const ICON_RADIUS: f32 = 33.0;
 pub const GLYPH: f32 = 54.0;
 
+/// The gap the grid leaves between its columns, and at its left and right edges.
+///
+/// The three columns do not add up to the panel's width. What is left over is split four ways by the
+/// flexible spaces the page is built from — one outside each edge, and one between each pair of columns
+/// — so this is what each of those spaces comes to. [`LABEL_MAX_WIDTH`] is where the room is spent.
+///
+/// A page of six pays for its two extra tiles here and in [`TILE_WIDTH`], and nowhere else: the icon
+/// stays the size a page of four drew it at, because two rows of two hundred pixels hold a 118 px icon,
+/// its gap and its label with fifty to spare.
+pub const GRID_GAP: f32 = 12.0;
+
 /// The app tile container width: wider than the icon, and wider than most names need.
 ///
-/// 160 px, so that the longest name the catalogue has stays on one line beside it. What happens to
-/// one that does not is [`LABEL_MAX_WIDTH`]'s: a tile's label is a single line and is cut with an
-/// ellipsis, because a label that wrapped would be a row a different height from the row beside it.
-pub const TILE_WIDTH: f32 = 160.0;
+/// 144 px, which with [`GRID_GAP`] back is the third of the panel a column gets — 3 × 144 + 4 × 12 =
+/// 480 — so that the longest name the catalogue has stays on one line beside it. What happens to one
+/// that does not is [`LABEL_MAX_WIDTH`]'s: a tile's label is a single line and is cut with an ellipsis,
+/// because a label that wrapped would be a row a different height from the row beside it.
+pub const TILE_WIDTH: f32 = 144.0;
 
 /// The app grid icon label font size: the size the interface draws at.
 pub const LABEL: f32 = FONT;
 pub const GLYPH_GAP: f32 = 10.0;
 
 /// Maximum width for a tile label before truncation with "...".
-pub const LABEL_MAX_WIDTH: f32 = TILE_WIDTH - 4.0;
+///
+/// Wider than [`TILE_WIDTH`] by a [`GRID_GAP`] less a couple of pixels, because a label is drawn
+/// centred and a tile does not clip what it holds: the 12 px the grid leaves between two columns is
+/// room a single-line name may lean into, and two names leaning into it from opposite sides still
+/// leave a gap between them.
+///
+/// Which is the room the one name that needs it — "Web Manager", about 151 px at 24 px against the 144
+/// its tile has — would not fit without.
+pub const LABEL_MAX_WIDTH: f32 = TILE_WIDTH + GRID_GAP - 4.0;
 
 /// Estimated width of a single character in pixels at given font size.
 ///

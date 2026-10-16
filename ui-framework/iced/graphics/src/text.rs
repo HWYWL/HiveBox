@@ -163,7 +163,7 @@ impl FontSystem {
             // face keeps pointing at `.rodata` instead of being copied onto the
             // heap. `into_owned()` here cost every `include_bytes!` font a
             // program hands to `Settings::fonts` its own size in PSRAM, which
-            // is 1.8 MB for the board's font, held for the life of the process.
+            // is 0.19 MB for the board's font, held for the life of the process.
             // An owned font is unaffected: it was already on the heap.
             cosmic_text::fontdb::Source::Binary(Arc::new(bytes)),
         );

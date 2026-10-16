@@ -6,10 +6,15 @@
 //! depending on whether the service was up. What the device's client has to get right is the
 //! *trait* — start, poll, collect — and that is exactly what this one gets right, with the answer
 //! supplied by whoever built it instead of by the internet.
+//!
+//! A [`Sink::File`] request is the one place this reaches past its own buffers: the answer is written
+//! to the path with `std::fs`, because a desktop *has* a filesystem and the job is then the same job
+//! rather than an impression of it. A path that will not open fails as [`HttpFault::Storage`], the way
+//! a card that is not in the slot does.
 
 use crate::error::HalError;
 use crate::traits::HttpBackend;
-use crate::types::{HttpFault, HttpResponse, HttpState};
+use crate::types::{HttpFault, HttpResponse, HttpState, Sink};
 
 /// How long a simulated request takes to come back, in ticks.
 ///
@@ -37,6 +42,10 @@ pub struct SimHttp {
     /// The last URL asked for, kept so that a test can check the request a page *built* — the query
     /// string, the days of forecast — and not only what it did with the answer.
     last_url: Option<String>,
+    /// The last sink a request was given, for the same reason as [`SimHttp::last_url`]: a page that
+    /// downloads a glyph table is a page whose *choice of file* is half of what it has to get right,
+    /// and a test that could only see the body would pass on a page that wrote to the wrong path.
+    last_sink: Option<Sink>,
 }
 
 /// One answer in a [`SimHttp`] script: what a request is answered with, status and body together.
@@ -91,6 +100,7 @@ impl SimHttp {
             next: 0,
             result: None,
             last_url: None,
+            last_sink: None,
         }
     }
 
@@ -155,6 +165,11 @@ impl SimHttp {
     pub fn last_url(&self) -> Option<&str> {
         self.last_url.as_deref()
     }
+
+    /// The last sink a request was asked to put its answer in.
+    pub fn last_sink(&self) -> Option<&Sink> {
+        self.last_sink.as_ref()
+    }
 }
 
 impl Default for SimHttp {
@@ -177,7 +192,7 @@ fn fetchable(url: &str) -> bool {
 }
 
 impl HttpBackend for SimHttp {
-    fn start(&mut self, url: &str) -> Result<(), HalError> {
+    fn start_to(&mut self, url: &str, sink: Sink) -> Result<(), HalError> {
         if matches!(self.state, HttpState::Running | HttpState::Done) {
             // Refused rather than queued: a request in flight, or an answer nobody collected, is a
             // page that lost track of one — and quietly dropping it would hide that.
@@ -192,8 +207,15 @@ impl HttpBackend for SimHttp {
         if !fetchable(url) {
             return Err(HalError::InvalidArg);
         }
+        if matches!(&sink, Sink::File(path) if path.is_empty()) {
+            // A file sink with no file in it. Refused here rather than turned into a fault later,
+            // because it is a page that built a path wrong and not a card that is not there — the
+            // same line the device's client draws.
+            return Err(HalError::InvalidArg);
+        }
 
         self.last_url = Some(url.to_string());
+        self.last_sink = Some(sink);
         self.answer_ticks_left = ANSWER_TICKS;
         self.state = HttpState::Running;
         Ok(())
@@ -228,19 +250,53 @@ impl HttpBackend for SimHttp {
 
         self.state = match self.fault {
             Some(fault) => HttpState::Failed(fault),
-            None => {
-                // One answer per request, taken from the script and then stepped over: the answer is
-                // cloned out before the index moves so that the body outlives the borrow of the script
-                // it came from.
-                let answer = self.answers[self.next % self.answers.len()].clone();
-                self.next += 1;
+            None => self.settle(),
+        };
+    }
+}
 
+impl SimHttp {
+    /// Hands over the script's next answer: into the buffer, or into the file a sink named.
+    fn settle(&mut self) -> HttpState {
+        // One answer per request, taken from the script and then stepped over: the answer is cloned out
+        // before the index moves so that the body outlives the borrow of the script it came from.
+        let answer = self.answers[self.next % self.answers.len()].clone();
+        self.next += 1;
+        let body = answer.body.into_bytes();
+
+        let Some(path) = self.file_sink() else {
+            self.result = Some(HttpResponse {
+                status: answer.status,
+                body,
+            });
+            return HttpState::Done;
+        };
+
+        // The answer lands in the file and not in the buffer, exactly as the device's client leaves it:
+        // a page that downloaded a glyph table has the file and no copy in memory, which is the point of
+        // asking for one. A write that fails is the card's fault and not the network's.
+        match std::fs::write(&path, &body) {
+            Ok(()) => {
                 self.result = Some(HttpResponse {
                     status: answer.status,
-                    body: answer.body.into_bytes(),
+                    body: Vec::new(),
                 });
                 HttpState::Done
             }
-        };
+            Err(_) => {
+                self.result = None;
+                HttpState::Failed(HttpFault::Storage)
+            }
+        }
+    }
+
+    /// The path a file sink asked for, if the last request was given one.
+    ///
+    /// Cloned out rather than borrowed so that the caller is free to write to `self` afterwards.
+    fn file_sink(&self) -> Option<String> {
+        match &self.last_sink {
+            Some(Sink::File(path)) => Some(path.clone()),
+            _ => None,
+        }
     }
 }

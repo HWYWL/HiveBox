@@ -18,7 +18,7 @@ pomelo-font/
 ├── bake.py              # 烘培脚本
 ├── requirements.txt     # pip 依赖
 ├── source/
-│   ├── charset-common.txt               # 字符集定义（3755 汉字 + ASCII + 标点）
+│   ├── charset-common.txt               # 字符集（由 tools/scan_charset.py 生成，勿手改）
 │   └── source-han-sans-sc-regular.otf   # 源字体（不进 git，见下方下载命令）
 └── dist/
     ├── SourceHanSansSC-Regular-Subset.otf         # 运行时子集字体（进固件）
@@ -44,6 +44,12 @@ curl -sSL -o source/source-han-sans-sc-regular.otf \
 # sha256: f1d8611151880c6c336aabeac4640ef434fa13cbfbf1ffe82d0a71b2a5637256
 ```
 
+### 生成字符集（改了界面文案之后）
+
+```bash
+python tools/scan_charset.py --write   # 在主仓库根目录跑
+```
+
 ### 子集化（仅在字符集 `source/charset-common.txt` 变更时需要）
 
 ```bash
@@ -62,16 +68,29 @@ python3 bake.py --sizes 24 32        # 指定字号
 
 烘培完成后提交 `dist/` 的变更，在 `pomelo-os` 里更新 `vendor/pomelo-font` 的 submodule 指针。
 
-## 字体与字号选择
+## 字符集
 
-字体是**思源黑体 SC Regular**（Source Han Sans SC Regular）的精简子集，包含：
+字体是**思源黑体 SC Regular**（Source Han Sans SC Regular）的子集，收的字就是**这棵树画出来的字**：
+由主仓库的 `tools/scan_charset.py` 从源码的字符串与字符字面量里扫出来（注释不算 —— 注释不进固件），
+再加上 ASCII 可打印区和一个全角空格。
 
-- GB2312 一级汉字（区 16–55，共 3755 字）
-- ASCII 可打印字符（U+0020–U+007E）
-- 中文标点与全角形式
-- **界面用到的个别补充字**：不在 GB2312 一级字里的字（例如「渲」「浏」），在 `source/charset-common.txt` 末尾单独列一行补入 —— 一级字之外的常用字不多，但界面每写一句新话都可能碰到一个，碰到就补一个字、重跑一次子集化与烘焙
+这条规则换掉了曾经的「GB2312 一级字（3755 字）+ 手工补字」，换来的体积是这样：
 
-> 界面文案里出现的新字如果不在子集里，屏幕上画出来的是一个方框（`.notdef`），不会报错也不会让构建失败。补字的步骤见「子集化」与「烘培字形表」两节：**子集化会重排 glyph_id，所以补字之后必须重烘**，两处 `dist/` 也要一起更新。
+| 字符集 | 字数 | 运行时子集 | 24 px 预烘表 |
+| --- | ---: | ---: | ---: |
+| GB2312 一级字 | 4013 | 1.70 MB | 1.98 MB |
+| 源码里画出来的字 | 529 | 0.19 MB | 0.23 MB |
+
+差出来的 **3.27 MB** 正是 app 能不能立起两个 OTA 槽位的关键：16 MB 的 flash 装不下两个各带一套完整
+字库的 app。
+
+反过来，字数是跟着代码走的：多写一句文案就多一个字，删掉一句就少一个字，不再需要「碰到了补一行」。
+
+**代价是兜底没了**。屏幕上会出现、而源码里没写过的字 —— SD 卡上的文件名（`files` 的
+`format!("删除「{name}」？")`）、Wi-Fi 名字、网络接口返回的文案 —— 画出来是方框（`.notdef`）。
+这是刻意的取舍：要兜底就把 GB2312 那一档放回来，也就是把那 3.27 MB 放回来。
+
+> 界面文案里出现的新字如果不在子集里，屏幕上画出来的是一个方框（`.notdef`），不会报错也不会让构建失败。补字的步骤是：把要写的话写进代码，重跑 `python tools/scan_charset.py --write`（在主仓库根目录），再做「子集化」与「烘培字形表」两节 —— **子集化会重排 glyph_id，所以字符集一变就必须重烘**，主仓库 `iced-pomelo-winit/fonts/dist/` 与本仓库 `dist/` 两处都要更新。
 
 烘培的字号只有一个：
 

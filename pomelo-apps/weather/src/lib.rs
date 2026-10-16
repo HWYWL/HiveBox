@@ -431,6 +431,7 @@ impl Words {
             (Language::Chinese, HttpFault::Timeout) => "请求超时",
             (Language::Chinese, HttpFault::Tls) => "安全连接失败",
             (Language::Chinese, HttpFault::TooLarge) => "返回内容超出上限",
+            (Language::Chinese, HttpFault::Storage) => "返回的内容没能写进去",
             (Language::Chinese, HttpFault::Unsupported) => "这台设备无法发起请求",
 
             (_, HttpFault::NoNetwork) => "Not on a network",
@@ -439,6 +440,7 @@ impl Words {
             (_, HttpFault::Timeout) => "The request timed out",
             (_, HttpFault::Tls) => "The secure connection failed",
             (_, HttpFault::TooLarge) => "The answer was larger than this board holds",
+            (_, HttpFault::Storage) => "The answer could not be written",
             (_, HttpFault::Unsupported) => "This board cannot make requests",
         }
     }
@@ -455,6 +457,7 @@ impl Words {
             (Language::Chinese, HttpFault::Timeout) => "稍后重试",
             (Language::Chinese, HttpFault::Tls) => "稍后重试",
             (Language::Chinese, HttpFault::TooLarge) => "稍后重试",
+            (Language::Chinese, HttpFault::Storage) => "检查存储空间后重试",
             (Language::Chinese, HttpFault::Unsupported) => "这台设备上无解",
             (_, HttpFault::NoNetwork) => "Turn the Wi-Fi on in Settings",
             (_, HttpFault::ClockNotSet) => "Set the clock, then try again",
@@ -462,6 +465,7 @@ impl Words {
             (_, HttpFault::Timeout) => "Try again in a while",
             (_, HttpFault::Tls) => "Try again in a while",
             (_, HttpFault::TooLarge) => "Try again in a while",
+            (_, HttpFault::Storage) => "Check the storage, then try again",
             (_, HttpFault::Unsupported) => "Nothing to be done about it here",
         }
     }

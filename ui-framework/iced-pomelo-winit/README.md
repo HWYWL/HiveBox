@@ -63,7 +63,7 @@ fork and takes this crate over git. `pomelo-os`'s `vendor/README.md` has the man
 ## The font
 
 A program written for iced installs no font — on a desktop the operating system has them — so this
-crate embeds one: a 1.8 MB Simplified-Chinese subset of Source Han Sans from `pomelo-font` (`vendor/pomelo-font/dist/`),
+crate embeds one: a 0.19 MB Simplified-Chinese subset of Source Han Sans from `pomelo-font` (`vendor/pomelo-font/dist/`),
 installed when an app or a firmware has not installed a font of its own. `fonts::install` always wins; `fonts::install_default` only
 fills a gap. See [`pomelo-font`](https://github.com/pomelos-on-sale/pomelo-font) for what the subset covers, how it was cut, and its licence
 (Apache-2.0, see `OFL.txt` in that repository).

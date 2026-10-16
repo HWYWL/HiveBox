@@ -26,6 +26,7 @@ members = [
     "power-log",
     "settings",
     "terminal",
+    "updater",
     "weather",
     "web-manager",
     "wifi-map",

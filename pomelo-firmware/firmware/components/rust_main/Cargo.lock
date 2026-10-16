@@ -65,6 +65,7 @@ dependencies = [
  "settings",
  "task-viewer",
  "terminal",
+ "updater",
  "weather",
  "web-manager",
  "wifi-map",
@@ -1983,6 +1984,7 @@ dependencies = [
  "pomelo-gfx",
  "pomelo-hal",
  "pomelo-hal-esp32",
+ "updater",
 ]
 
 [[package]]
@@ -2739,6 +2741,16 @@ checksum = "f4987bdc12753382e0bec4a65c50738ffaabc998b9cdd1f952fb5f39b0048a96"
 dependencies = [
  "crypto-common 0.2.2",
  "ctutils",
+]
+
+[[package]]
+name = "updater"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "pomelo-hal",
+ "pomelo-material-symbols",
+ "pomelo-widgets",
 ]
 
 [[package]]

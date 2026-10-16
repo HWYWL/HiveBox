@@ -151,8 +151,17 @@ fn screen(settings: &Settings, height: f32) -> Simulator<'_, Message> {
 /// simulator has no scroll — `find` only sees what is visible — so a press asks for a screen that
 /// shows the whole list. What the panel's own height is for is the *layout*, which is what
 /// `interface` checks.
+///
+/// A page taller than [`TALL`] needs [`press_on`]. The storage page is one: its flash map has grown a
+/// row every time the partition table grew, and a press that landed below the fold would be a test
+/// failing on a layout change rather than on the thing it is about.
 fn press(settings: &mut Settings, label: &str) -> Result<(), iced_test::Error> {
-    let mut ui = screen(settings, TALL);
+    press_on(settings, label, TALL)
+}
+
+/// [`press`] on a screen `height` logical pixels tall.
+fn press_on(settings: &mut Settings, label: &str, height: f32) -> Result<(), iced_test::Error> {
+    let mut ui = screen(settings, height);
     let _ = ui.click(label)?;
 
     for message in ui.into_messages() {
@@ -681,12 +690,15 @@ fn the_storage_page_shows_the_built_in_volume_and_the_card() -> Result<(), iced_
 /// Its own number and not [`TALL`]: the page grew a card when the flash map landed, and [`TALL`] was
 /// sized for the main list. The simulator has no scroll, so anything below the fold is not found —
 /// and a test that only ever found the first three rows would pass whatever the rows below them said.
+///
+/// The map is the part that keeps growing: it draws a row per region, and the table went from four
+/// partitions to six when the second app slot arrived.
 const STORAGE_PAGE: f32 = 2400.0;
 
 /// The page says where the whole chip went, and not only the part of it a filesystem can use.
 ///
-/// The built-in volume is 5 MB; the board's flash is 16 MB. A page of volumes alone answers "how much
-/// room is left" and never says what the other 11 MB are for, which is the question a person opening
+/// The built-in volume is 3.88 MB; the board's flash is 16 MB. A page of volumes alone answers "how much
+/// room is left" and never says what the other 12.1 MB are for, which is the question a person opening
 /// a storage page is asking.
 #[test]
 fn the_storage_page_maps_the_whole_flash_chip() -> Result<(), iced_test::Error> {
@@ -699,20 +711,22 @@ fn the_storage_page_maps_the_whole_flash_chip() -> Result<(), iced_test::Error> 
         .flash()
         .expect("the board's flash is always readable");
 
-    // The chip, from the map's own numbers: 16 MB of NOR, and every byte of it claimed — the app
-    // partition gave back what the two dropped glyph tables freed, and the filesystem took all of it.
+    // The chip, from the map's own numbers: 16 MB of NOR, and all but one stretch of it claimed. That
+    // stretch is what an app partition's 64 KB alignment costs: the partition table's own rows and the
+    // PHY blob end 56 KB below `ota_0`, and nothing may be put in between. Two app slots and the
+    // filesystem take the rest, and the filesystem runs to the last byte of the chip.
     assert_eq!(flash.total_bytes, 16 * 1024 * 1024);
     assert_eq!(
         flash.allocated_bytes(),
-        16 * 1024 * 1024,
-        "the table reaches the end of the chip"
+        flash.total_bytes - 0xE000,
+        "everything is claimed but the 56 KB the app alignment leaves"
     );
 
     let mut ui = screen(&settings, STORAGE_PAGE);
 
     assert!(ui.find("Internal flash").is_ok(), "the chip heads the page");
 
-    // Every region the board reported is a row: the four partitions of its table, and the two
+    // Every region the board reported is a row: the six partitions of its table, and the three
     // stretches that are not partitions at all. Drawn from the map, so a board with a different
     // table draws a different list.
     for region in &flash.regions {
@@ -792,8 +806,9 @@ fn the_storage_page_can_be_asked_to_look_again() -> Result<(), iced_test::Error>
     settings.update(Message::Open(SettingsSection::Storage));
     assert!(settings.storage().card().is_none());
 
-    // The press, through the widget tree, as a finger makes it.
-    press(&mut settings, "Check again")?;
+    // The press, through the widget tree, as a finger makes it — on the storage page's own height,
+    // because the flash map alone is taller than the main list [`TALL`] was sized for.
+    press_on(&mut settings, "Check again", STORAGE_PAGE)?;
 
     assert!(
         settings.storage().card().is_none(),

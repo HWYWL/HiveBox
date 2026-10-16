@@ -175,24 +175,33 @@ jobs:
             exit 1
           fi
 
-      - name: 产出待发布的资产
+      # ------------------------------------------------------------------- bin/
+      #
+      # 更新页要的两样东西（固件、字库）与它们的清单，一次归置好。文件名里的版本号和镜像自报
+      # 的那个必须是同一个，否则机器会把自己认成另一个版本，更新页要么反复提示、要么永不提示
+      # —— 所以版本由 `publish_bin.py` 自己问镜像（`esptool image-info`），而不是从 tag 拼。
+      #
+      # 字库是烘焙出来的那张 24 px 字形表；它的名字里是字号（`@24px`）而不是版本，版本读
+      # 它旁边的 `fonts/dist/VERSION`。
+      - name: 归置 bin/（固件、字库与 manifest.json）
         run: |
           set -eo pipefail
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            version="${GITHUB_REF_NAME}"
-          else
-            version="$(git rev-parse --short HEAD)"
-          fi
-          asset="hivebox-firmware-${version}.bin"
-          cp pomelo-firmware/firmware/build/merged-binary.bin "${asset}"
-          ls -l "${asset}"
-          echo "ASSET=${asset}" >> "$GITHUB_ENV"
+          . "$HOME/esp-idf/export.sh"
+
+          font="ui-framework/iced-pomelo-winit/fonts/dist/SourceHanSansSC-Regular-Subset-common@24px.bin"
+          python tools/publish_bin.py --font "${font}"
+
+          ls -l bin/
+          firmware="$(ls bin/hivebox-firmware-*.bin)"
+          echo "ASSET=${firmware}" >> "$GITHUB_ENV"
+          echo "ARTIFACT=$(basename "${firmware}")" >> "$GITHUB_ENV"
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ASSET }}
-          path: ${{ env.ASSET }}
+          name: ${{ env.ARTIFACT }}
+          # 整个 bin/：固件、字库和 manifest.json 是一套，分开放就没有意义了。
+          path: bin/
 
       # -------------------------------------------------------------- 发行说明
       - name: 找这一版的发行说明
@@ -212,6 +221,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ github.ref_name }}
-          files: ${{ env.ASSET }}
+          # 固件、字库和清单一起发：更新页读的是仓库里的 `bin/manifest.json`，而 Release 是
+          # 同一套东西的另一个入口，两边对不上的时候最难查。
+          files: |
+            bin/hivebox-firmware-*.bin
+            bin/hivebox-font-*.bin
+            bin/manifest.json
           body_path: ${{ steps.notes.outputs.path }}
           generate_release_notes: ${{ steps.notes.outputs.path == '' }}

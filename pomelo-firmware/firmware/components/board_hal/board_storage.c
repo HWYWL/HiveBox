@@ -570,8 +570,10 @@ esp_err_t hal_storage_get_flash(hal_flash_layout_t *out)
         cursor = part->address + part->size;
     }
 
-    /* Past the last partition. The table does not have to reach the end of the chip, and on this
-     * board it does not: the flash is 16 MB and the last partition ends 960 KB before it. */
+    /* Past the last partition. The table does not have to reach the end of the chip; on this board it
+     * reaches it exactly -- `internal` is sized as the remainder -- so this adds nothing here and is
+     * kept for the next table that leaves a gap. The one gap this table does have is above the PHY
+     * blob, where an app partition has to start on a 64 KB boundary, and it is reported like any other. */
     if (chip > cursor) {
         add_region(out, "unallocated", HAL_FLASH_REGION_UNALLOCATED, chip - cursor);
     }

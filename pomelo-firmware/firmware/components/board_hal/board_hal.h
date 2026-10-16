@@ -345,10 +345,17 @@ esp_err_t hal_time_sync(void);
 /** Longest URL accepted, including its terminator. */
 #define HAL_HTTP_URL_MAX  512
 
+/** Longest file path accepted by `HAL_HTTP_SINK_FILE`, including its terminator. */
+#define HAL_HTTP_PATH_MAX 512
+
 #define HAL_HTTP_IDLE     0
 #define HAL_HTTP_RUNNING  1
 #define HAL_HTTP_DONE     2
 #define HAL_HTTP_FAILED  -1
+
+/** Where an answer's bytes go as they arrive, as `Sink` mirrors. */
+#define HAL_HTTP_SINK_MEMORY 0
+#define HAL_HTTP_SINK_FILE   1
 
 /** Why a request did not come back, as the closed list `HttpFault` mirrors. */
 #define HAL_HTTP_FAULT_NONE        0
@@ -358,24 +365,39 @@ esp_err_t hal_time_sync(void);
 #define HAL_HTTP_FAULT_TIMEOUT     4
 #define HAL_HTTP_FAULT_TLS         5
 #define HAL_HTTP_FAULT_TOO_LARGE   6
+#define HAL_HTTP_FAULT_STORAGE     7
 
-/** @brief Ask for a URL. Returns at once; the answer arrives when it arrives.
+/** @brief Ask for a URL, with the answer going to `sink`. Returns at once; the answer arrives when it
+ * arrives.
  *
- * A `GET`, and the URL is the whole of the request. Nothing is sent until the worker task runs, so a
- * URL that is obviously unfetchable is refused here rather than reported as a network fault: an
- * argument error, a URL that does not fit, and a request already in flight are all answers from this
- * call. A board that is off the network, or an `https` URL on a board whose clock has never been set,
- * are *not* — those are the request's own answer, and they are waiting in `hal_http_get_state()`
- * before the first byte of anything is sent.
+ * A `GET`, and the URL is the whole of the request. `HAL_HTTP_SINK_MEMORY` reads the body into the one
+ * buffer this file owns, where `HAL_HTTP_BODY_MAX` is the bound and an answer over it is
+ * `HAL_HTTP_FAULT_TOO_LARGE`; that is the whole of a document. `HAL_HTTP_SINK_FILE` streams it into
+ * `path` as it arrives, so the answer may be any size the filesystem has room for — a glyph table or a
+ * firmware image, which is a megabyte and more — and nothing is left behind if it does not finish:
+ * a cancelled or failed download removes what it wrote.
+ *
+ * Nothing is sent until the worker task runs, so a URL that is obviously unfetchable is refused here
+ * rather than reported as a network fault: an argument error, a URL that does not fit, and a request
+ * already in flight are all answers from this call. A board that is off the network, or an `https` URL
+ * on a board whose clock has never been set, are *not* — those are the request's own answer, and they
+ * are waiting in `hal_http_get_state()` before the first byte of anything is sent.
+ *
+ * @param url  The URL to fetch.
+ * @param sink `HAL_HTTP_SINK_MEMORY`, or `HAL_HTTP_SINK_FILE` to write `path`.
+ * @param path The file to write when the sink is `HAL_HTTP_SINK_FILE`; ignored otherwise. Its
+ *             directories must already exist — this opens a file, and making the path to it is the
+ *             caller's.
  *
  * @return
  *      - ESP_OK when the request has been taken (including the two faults above)
- *      - ESP_ERR_INVALID_ARG for NULL, "", a URL over `HAL_HTTP_URL_MAX`, or a scheme that is
- *        neither `http` nor `https`
+ *      - ESP_ERR_INVALID_ARG for NULL, "", a URL over `HAL_HTTP_URL_MAX`, a scheme that is neither
+ *        `http` nor `https`, a sink that is neither of the two, or a `HAL_HTTP_SINK_FILE` request with
+ *        no path or one over `HAL_HTTP_PATH_MAX`
  *      - ESP_ERR_INVALID_STATE while another request is in flight
  *      - ESP_ERR_NO_MEM when the worker task could not be created
  */
-esp_err_t hal_http_start(const char *url);
+esp_err_t hal_http_start_to(const char *url, int32_t sink, const char *path);
 
 /** @brief How the request is going: `HAL_HTTP_*`. Cheap and safe to call any time. */
 int32_t hal_http_get_state(void);
@@ -386,12 +408,17 @@ int32_t hal_http_get_fault(void);
 /** @brief The answer of the request that just finished, and clear it.
  *
  * Hands back a pointer *into the client's own buffer* rather than a copy, so the bytes are valid until
- * the next `hal_http_start` and the caller must read them before asking for anything else.
+ * the next `hal_http_start_to` and the caller must read them before asking for anything else. A
+ * `HAL_HTTP_SINK_FILE` answer is *not* in that buffer — its bytes are in the file the sink named, and
+ * have been since they arrived — so `out_body` comes back NULL and only `out_length` says how much
+ * there was.
  *
  * @param[out] out_status Receives the status code the server wrote.
  * @param[out] out_body   Receives a pointer to the body, not NUL-terminated as a document but with a
- *                        NUL just past its end, so a `printf` of it is not a buffer overrun.
- * @param[out] out_length Receives the body's length in bytes.
+ *                        NUL just past its end, so a `printf` of it is not a buffer overrun. NULL for a
+ *                        file sink, whose body is in the file.
+ * @param[out] out_length Receives the body's length in bytes, whether it went into the buffer or into a
+ *                        file.
  *
  * @return
  *      - ESP_OK
@@ -531,8 +558,8 @@ esp_err_t hal_storage_rename(const char *from, const char *to);
 /* The flash chip itself: how much of it there is, and what every region of it is for.
  *
  * hal_storage_get_internal() answers "how full is the filesystem the box can write" — on this board
- * 3 MB of a 16 MB chip. This answers the question under it: where the other 13 MB went. A page that
- * draws only the first is drawing a third of the answer.
+ * 3.88 MB of a 16 MB chip. This answers the question under it: where the other 12.1 MB went. A page
+ * that draws only the first is drawing a quarter of the answer.
  *
  * The regions tile the whole chip: the bootloader and the partition table below the first partition,
  * and the stretch past the last one, are reported rather than left out, so a bar drawn from this adds

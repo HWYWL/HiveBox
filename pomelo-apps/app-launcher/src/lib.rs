@@ -38,8 +38,8 @@
 //!
 //! # The grid is paged, and the page slides under the finger
 //!
-//! A page is [`PER_PAGE`] apps, one to a quadrant, so the fourteen the catalogue has are four pages:
-//! four, four, four and two.
+//! A page is [`PER_PAGE`] apps, three to a row, so the fifteen the catalogue has are three pages:
+//! six, six and three.
 //! A finger turning one is a **drag**: down on the grid, across, up. iced has no widget for that — a
 //! `button` captures the press it is given, and `Scrollable` scrolls for a wheel, a touch or its own
 //! scrollbar and for nothing else — so the gesture is read by `pomelo-widgets`' pager.
@@ -137,6 +137,7 @@ use pomelo_hal::Board;
 use power_log::PowerLog;
 use settings::Settings;
 use task_viewer::TaskViewer;
+use updater::Updater;
 use terminal::Terminal;
 use weather::Weather;
 use web_manager::WebManager;
@@ -186,21 +187,22 @@ enum Screen {
 ///
 /// Indices, because that is what the grid hands over when a tile is tapped. The tests assert that
 /// each of these still names the app it says it does, and every entry has one: the catalogue and
-/// the list of apps are the same fourteen things, in the same order.
+/// the list of apps are the same fifteen things, in the same order.
 pub const MUSIC: usize = 0;
 pub const WEB_MANAGER: usize = 1;
 pub const TERMINAL: usize = 2;
 pub const SETTINGS: usize = 3;
-pub const CALCULATOR: usize = 4;
-pub const TASK_VIEWER: usize = 5;
-pub const NAS_MONITOR: usize = 6;
-pub const CLOCK: usize = 7;
-pub const OVERVIEW: usize = 8;
-pub const FILES: usize = 9;
-pub const POWER_LOG: usize = 10;
-pub const WIFI_MAP: usize = 11;
-pub const WEATHER: usize = 12;
-pub const GAMES: usize = 13;
+pub const UPDATER: usize = 4;
+pub const CALCULATOR: usize = 5;
+pub const TASK_VIEWER: usize = 6;
+pub const NAS_MONITOR: usize = 7;
+pub const CLOCK: usize = 8;
+pub const OVERVIEW: usize = 9;
+pub const FILES: usize = 10;
+pub const POWER_LOG: usize = 11;
+pub const WIFI_MAP: usize = 12;
+pub const WEATHER: usize = 13;
+pub const GAMES: usize = 14;
 
 /// What the launcher reacts to.
 ///
@@ -276,6 +278,9 @@ pub enum Message {
     /// A message from one of the apps this launcher hosts.
     Calculator(calculator::Message),
     Settings(settings::Message),
+    /// The updater's own: a row opened, a finger on one of its four buttons, or the frame that reads
+    /// what the network answered.
+    Updater(updater::Message),
     Music(music_player::Message),
     Terminal(terminal::Message),
     WebManager(web_manager::Message),
@@ -362,6 +367,9 @@ pub struct Launcher {
     screen: Screen,
     calculator: Option<Calculator>,
     settings: Option<Settings>,
+    /// The updater. Plain `updater` and not `updater_app`, for the overview's reason: nothing else in
+    /// the launcher is called that.
+    updater: Option<Updater>,
     music: Option<Player>,
     terminal: Option<Terminal>,
     web_manager: Option<WebManager>,
@@ -431,6 +439,7 @@ impl Launcher {
             screen: Screen::Grid,
             calculator: None,
             settings: None,
+            updater: None,
             music: None,
             terminal: None,
             web_manager: None,
@@ -491,6 +500,9 @@ impl Launcher {
         if let Some(app) = &mut self.settings {
             app.set_preferences(prefs);
         }
+        if let Some(app) = &mut self.updater {
+            app.set_preferences(prefs);
+        }
         if let Some(app) = &mut self.music {
             app.set_preferences(prefs);
         }
@@ -547,6 +559,24 @@ impl Launcher {
             self.calculator = Some(app);
         }
         self.calculator.as_mut().unwrap()
+    }
+
+    /// The updater, which is handed the board and reads three backends through it: the network (the
+    /// list of what the repository has), the storage (the card a glyph table has to land on) and the
+    /// system (the version this image was built with, and the partition a new image is written to).
+    ///
+    /// It asks the repository what it has on the way in, for the weather page's reason one step
+    /// further on: a page whose whole subject is "is there a newer one" should open on that question
+    /// having been *asked*, rather than on an empty row waiting for a finger. The request is
+    /// asynchronous and frame-driven — see the app's own docs — so this app, like the two before it,
+    /// is parked in [`Launcher::subscription`] and poked by [`Message::Tick`].
+    pub fn get_or_create_updater(&mut self) -> &mut Updater {
+        if self.updater.is_none() {
+            let mut app = Updater::new(Arc::clone(&self.board));
+            app.set_preferences(self.preferences);
+            self.updater = Some(app);
+        }
+        self.updater.as_mut().unwrap()
     }
 
     pub fn get_or_create_settings(&mut self) -> &mut Settings {
@@ -871,6 +901,7 @@ impl Launcher {
             TERMINAL => self.terminal = None,
             CALCULATOR => self.calculator = None,
             SETTINGS => self.settings = None,
+            UPDATER => self.updater = None,
             MUSIC => self.music = None,
             WEB_MANAGER => self.web_manager = None,
             TASK_VIEWER => self.task_viewer = None,
@@ -1138,6 +1169,17 @@ impl Launcher {
         }
     }
 
+    /// The updater. One page and no tabs, so the launcher's own back gesture is the way out, as it is
+    /// for the pages beside it. The one hosted page that can end with the box rebooting into a new
+    /// image rather than with the app closing.
+    fn updater_screen(&self) -> Element<'_, Message> {
+        if let Some(app) = &self.updater {
+            app.view().map(Message::Updater)
+        } else {
+            Space::new().into()
+        }
+    }
+
 
     /// One app tile: an icon button and label, sized strictly to [`style::TILE_WIDTH`] width.
     ///
@@ -1343,6 +1385,15 @@ impl Launcher {
             subs.push(app.subscription().map(Message::Games));
         }
 
+        // The updater's subscription is the weather page's, letter for letter: frames only while a check
+        // is in flight — see `Updater::waiting` — so a page sitting on a version number costs nothing,
+        // and the beat below is what ends the wait on a board with no frames. The two are the same case
+        // for the same reason: what both are waiting on is a request whose answer arrives in a second,
+        // where the beat arrives in sixteen.
+        if let (Screen::App(UPDATER), Some(app)) = (self.screen, &self.updater) {
+            subs.push(app.subscription().map(Message::Updater));
+        }
+
         Subscription::batch(subs)
     }
 
@@ -1400,6 +1451,9 @@ impl Launcher {
                     }
                     SETTINGS => {
                         self.get_or_create_settings();
+                    }
+                    UPDATER => {
+                        self.get_or_create_updater();
                     }
                     MUSIC => {
                         self.get_or_create_music();
@@ -1565,6 +1619,16 @@ impl Launcher {
                 if let (Screen::App(GAMES), Some(app)) = (self.screen, &mut self.games) {
                     app.update(games::Message::Tick(Instant::now()));
                 }
+
+                // The updater is asked the ninth way, and the weather page's reason applies to it
+                // twice over: both of its rows are waits — a repository's list, and then a download
+                // that takes minutes — and this is the beat that ends them on a board whose host
+                // serves no frames. It is asked only while it *is* the screen, which is the one place
+                // it differs from the two pages whose requests are over in a moment: a download left
+                // running behind another app is a download nobody can watch or stop.
+                if let (Screen::App(UPDATER), Some(app)) = (self.screen, &mut self.updater) {
+                    app.update(updater::Message::Tick(Instant::now()));
+                }
             }
             Message::Resized(size) => {
                 self.size = size;
@@ -1594,6 +1658,7 @@ impl Launcher {
             Message::WifiMap(message) => self.get_or_create_wifi_map().update(message),
             Message::Weather(message) => self.get_or_create_weather().update(message),
             Message::Games(message) => self.get_or_create_games().update(message),
+            Message::Updater(message) => self.get_or_create_updater().update(message),
             Message::Settings(settings::Message::Back) => return self.go_back(),
             Message::Settings(message) => {
                 let (task, new_prefs) = {
@@ -2049,6 +2114,7 @@ impl Launcher {
             TERMINAL => self.terminal_screen(),
             CALCULATOR => self.calculator_screen(),
             SETTINGS => self.settings_screen(),
+            UPDATER => self.updater_screen(),
             MUSIC => self.music_screen(),
             WEB_MANAGER => self.web_manager_screen(),
             TASK_VIEWER => self.task_viewer_screen(),
@@ -2476,6 +2542,8 @@ mod tests {
         assert_eq!(CATALOGUE[WEB_MANAGER].localized_name(Language::Chinese), "网页管理");
         assert_eq!(CATALOGUE[TERMINAL].localized_name(Language::Chinese), "终端");
         assert_eq!(CATALOGUE[SETTINGS].localized_name(Language::Chinese), "设置");
+        assert_eq!(CATALOGUE[UPDATER].localized_name(Language::Chinese), "更新");
+        assert_eq!(CATALOGUE[UPDATER].name, "Update");
         assert_eq!(CATALOGUE[CALCULATOR].localized_name(Language::Chinese), "计算器");
         assert_eq!(
             CATALOGUE[TASK_VIEWER].localized_name(Language::Chinese),
@@ -2502,17 +2570,17 @@ mod tests {
         assert_eq!(CATALOGUE[GAMES].name, "Games");
     }
 
-    /// The grid's four pages, in the order they are drawn: the four the box is for, the four that are
-    /// about the box itself and what is beside it, the four the third page ends on — the overview, the
-    /// file manager, the power log and, the one tile there that is about neither the box nor the machine
-    /// beside it, the channel map — and the last two, where the weather is the sky over the box and the
-    /// game is about nobody but the person holding it.
+    /// The grid's three pages, in the order they are drawn: the six the box is for — what it plays,
+    /// what it serves, what it can be told to do, how it is set up, how its own software is replaced,
+    /// and the one tile that is about none of that — then the six that are about the box itself and
+    /// what is beside it, and last the three the box has no say in: the air, the sky, and the person
+    /// holding it.
     ///
     /// Written out rather than derived, because the order *is* the interface: a page and a position
     /// are what a finger learns, and a reshuffle that left this test green would be the one kind of
     /// change nobody would notice until they were holding the box.
     #[test]
-    fn the_catalogue_is_four_pages_in_the_order_the_grid_shows_them() {
+    fn the_catalogue_is_three_pages_in_the_order_the_grid_shows_them() {
         let names: Vec<&str> = CATALOGUE.iter().map(|entry| entry.name).collect();
 
         assert_eq!(
@@ -2522,6 +2590,7 @@ mod tests {
                 "Web Manager",
                 "Terminal",
                 "Settings",
+                "Update",
                 "Calculator",
                 "Tasks",
                 "Server",
@@ -2534,11 +2603,11 @@ mod tests {
                 "Games"
             ]
         );
-        assert_eq!(CATALOGUE.len(), 14, "and the fourteen are all the tiles there are");
+        assert_eq!(CATALOGUE.len(), 15, "and the fifteen are all the tiles there are");
         assert_eq!(
             Launcher::new(Arc::new(Board::simulated())).pages(),
-            4,
-            "four, four, four and two"
+            3,
+            "six, six and three"
         );
     }
 
