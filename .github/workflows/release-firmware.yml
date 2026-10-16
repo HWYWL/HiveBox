@@ -177,24 +177,26 @@ jobs:
 
       # ------------------------------------------------------------------- bin/
       #
-      # 更新页要的两样东西（固件、字库）与它们的清单，一次归置好。文件名里的版本号和镜像自报
+      # 更新页要的东西（固件、字库）与它们的清单，一次归置好。文件名里的版本号和镜像自报
       # 的那个必须是同一个，否则机器会把自己认成另一个版本，更新页要么反复提示、要么永不提示
       # —— 所以版本由 `publish_bin.py` 自己问镜像（`esptool image-info`），而不是从 tag 拼。
       #
-      # 字库是烘焙出来的那张 24 px 字形表；它的名字里是字号（`@24px`）而不是版本，版本读
-      # 它旁边的 `fonts/dist/VERSION`。卡上那一对是烘焙脚本直接产出的（`dist/card/`），
-      # 版本在它自己的文件名里 —— 它和上面那两件不是一回事（那两件是更新页按清单下载的，
-      # 这一对是给人往 SD 卡里放的），所以只落到 `bin/card/` 这一层子目录里。
-      - name: 归置 bin/（固件、字库、卡上字体包与 manifest.json）
+      # 字库给的是卡上那一对（烘焙脚本直接产出的 `dist/card/`）：表当 `font` 的 `file`、字体当
+      # 它的 `face`，发布脚本把两件**平铺**进 `bin/` 并记进同一个 `font` 项 —— 更新页按
+      # `face` → `file` 的顺序把两件都下到 `/sdcard/fonts`，而它把一个名字既当下载地址又当落盘
+      # 路径，所以清单里的名字不能带目录。
+      #
+      # 单独那张烘自镜像内置字体的表（`fonts/dist/*@24px.bin`）不再发：它和镜像里带着的那张
+      # 一个字节都不差，发布它只会让更新页那一行对着一个「装完什么也没变」的版本喊更新。
+      - name: 归置 bin/（固件、字库包与 manifest.json）
         run: |
           set -eo pipefail
           . "$HOME/esp-idf/export.sh"
 
-          font="ui-framework/iced-pomelo-winit/fonts/dist/SourceHanSansSC-Regular-Subset-common@24px.bin"
           card="ui-framework/pomelo-font/dist/card"
-          python tools/publish_bin.py --font "${font}" --card-dir "${card}"
+          python tools/publish_bin.py --card-dir "${card}"
 
-          ls -l bin/ bin/card/
+          ls -l bin/
           firmware="$(ls bin/hivebox-firmware-*.bin)"
           echo "ASSET=${firmware}" >> "$GITHUB_ENV"
           echo "ARTIFACT=$(basename "${firmware}")" >> "$GITHUB_ENV"
@@ -227,12 +229,12 @@ jobs:
           # 固件、字库和清单一起发：更新页读的是仓库里的 `bin/manifest.json`，而 Release 是
           # 同一套东西的另一个入口，两边对不上的时候最难查。
           #
-          # 卡上那一对（`bin/card/` 里的字体与表）挂在同一页上，但它不在清单里 —— 更新页下不到
-          # 它，它也不是一个文件的事：两半必须同版，所以它是**给人拿**的（下载、拷进 SD 卡）。
+          # 字库里那一对（字体与烘它出来的表）挂在同一页上，正是更新页会下到卡上的那两个文件：
+          # 两条路都通 —— 让板子自己下，或者从这儿下到电脑、拷进 SD 卡。
           files: |
             bin/hivebox-firmware-*.bin
             bin/hivebox-font-*.bin
+            bin/hivebox-face-*.otf
             bin/manifest.json
-            bin/card/*
           body_path: ${{ steps.notes.outputs.path }}
           generate_release_notes: ${{ steps.notes.outputs.path == '' }}

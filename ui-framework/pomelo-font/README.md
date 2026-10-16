@@ -28,13 +28,16 @@ pomelo-font/
     ├── SourceHanSansSC-Regular-Subset-gb2312.otf   # 卡上那份的子集字体
     ├── SourceHanSansSC-Regular-Subset-gb2312@24px.bin
     ├── MANIFEST-gb2312.md                          # 卡上那一档的烘培参数
-    └── card/                                       # 卡上的字体包（`--card`，拷进 /sdcard/fonts）
+    └── card/                                       # 卡上的字体包（`--card`，发布给更新页下载）
         ├── hivebox-face-v3.otf
         └── hivebox-font-24px-v3.bin
 ```
 
 `dist/` 中的文件是已提交的产物：`SourceHanSansSC-Regular-Subset*.otf` 与两档 `@24px.bin` 里的**镜像那一份**
 被 `iced-pomelo-winit` 通过 `include_bytes!` 嵌入固件，`dist/card/` 是给 SD 卡的字体包（不进固件）。
+这一对由主仓库的 `tools/publish_bin.py --card-dir dist/card` 归置进 `bin/` —— **平铺**，清单里
+`font` 项的 `"file"` 是表、`"face"` 是字体（更新页把一个名字既当下载地址又当落盘路径），板子的
+「更新」页从那儿把两件一起下到卡上。
 
 ## 使用方法
 
@@ -104,9 +107,16 @@ python3 bake.py \
     --card v3
 ```
 
-两个文件一起拷进 SD 卡的 `fonts/`（`updater::FONT_DIR`，即 `/sdcard/fonts`），重启生效 —— **不用重刷固件**。
+两个文件一起进 SD 卡的 `fonts/`（`updater::FONT_DIR`，即 `/sdcard/fonts`），重启生效 —— **不用重刷固件**。
 `hivebox-face-*.otf` 是字体，`hivebox-font-24px-*.bin` 是它的表，**缺一个就退回内置那份**（半套东西不会
-把机器带进「画不出字」的状态）。换版本号时旧的那一对要自己从卡上删掉：`--card` 只负责写新的那一对。
+把机器带进「画不出字」的状态）。
+
+放进卡里有两条路，**都不用数据线**：板子的「更新」页点「字库 → 安装」，它按清单把两件一起下到
+`/sdcard/fonts`（先字体、后表 —— 表是开机扫的那一件，所以它是把这一对变成字体的那一下）；或者在
+Releases 页把这两件下到电脑、拷进卡里。两种都一样：**重启生效**，不需要重刷固件。
+
+换版本号时旧的那一对**不用自己删**：开机认的是「成套里最新的那一对」，孤零零的表（或只有字体、
+没有表的那一份）不算数，所以旧的那一对留着也碍不着事，多占的只是卡上的几兆。
 
 ## 字符集
 

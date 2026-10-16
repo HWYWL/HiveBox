@@ -32,10 +32,11 @@ use updater::Updater;
 
 /// What the repository would have sent.
 ///
-/// A real document rather than a convenient one: two members, the version in each file's name, and the
-/// size and digest beside it, exactly as `tools/publish.py` writes it. Keeping it real is what makes
-/// the demo worth running — the reader and the version's own read are exercised by what the page will
-/// meet on the network.
+/// A real document rather than a convenient one: two members, the version in each file's name, the size
+/// and digest beside it, and the font's second half under `"face"` — exactly as
+/// `tools/publish_bin.py --card-dir` writes it. Keeping it real is what makes the demo worth running:
+/// the reader, the version's own read, and the two requests a package's press makes are all exercised
+/// by what the page will meet on the network.
 const MANIFEST: &str = r#"{
     "generated": "2026-10-16T09:00:00Z",
     "firmware": {
@@ -45,10 +46,15 @@ const MANIFEST: &str = r#"{
         "sha256": "3f2a1c0e5b8d47a96f0c2e1d4b7a8c93e5f16a2d4c8b9e0f3a7d5c1b2e4f6a8d"
     },
     "font": {
-        "version": "1",
-        "file": "hivebox-font-24px-v1.bin",
-        "size": 2080400,
-        "sha256": "9c4137b0e2d54a86f1b3c7e0d2a4986fb5e31c70a2d849e6b1f3c5a7d90e2b48"
+        "version": "2",
+        "file": "hivebox-font-24px-v2.bin",
+        "size": 2268084,
+        "sha256": "9c4137b0e2d54a86f1b3c7e0d2a4986fb5e31c70a2d849e6b1f3c5a7d90e2b48",
+        "face": {
+            "file": "hivebox-face-v2.otf",
+            "size": 1910512,
+            "sha256": "1cfb6b3e3b688b8480148fe466540421707ed819bad1786dda6a3ffd18ae0e54"
+        }
     }
 }"#;
 

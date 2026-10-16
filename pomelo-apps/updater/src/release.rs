@@ -1,8 +1,21 @@
 //! What the repository publishes, and how this page reads two versions off it.
 //!
-//! One document, at a URL that does not change: [`MANIFEST_URL`]. It names the two files the project
-//! ships — the firmware image and the glyph table — and the page's whole job is reading a version out
-//! of each and holding it up against the one on the box.
+//! One document, at a URL that does not change: [`MANIFEST_URL`]. It names the firmware image and the
+//! glyph table, and the page's whole job is reading a version out of each and holding it up against the
+//! one on the box.
+//!
+//! # A table can bring the face it was baked from
+//!
+//! The image's member names one file and always does; the *font's* names one file, or two. A table is
+//! nothing on its own — its glyph numbers are the numbers of the face it was baked from — so a table
+//! that covers more than the image's subset has to arrive with that face, and the manifest says so the
+//! only way it can: a `"face"` member beside the `"file"`, naming the half that is not the table. See
+//! [`Release::face`].
+//!
+//! The version is the *table's*, read off the table's own name, and the face carries none of its own
+//! for the same reason it is not a release: the two are one font, and a face whose name disagreed with
+//! the table's would be a number nothing on this page could compare. The publisher is what keeps them
+//! in step — it refuses a directory that is not exactly one pair, in one version.
 //!
 //! # The version is in the file name
 //!
@@ -153,6 +166,25 @@ pub struct Release {
     pub size: u64,
     /// The file's SHA-256, lowercase hex. Empty for a manifest that did not say.
     pub sha256: String,
+    /// The face this release's table was baked from, when the manifest named one: the second half of a
+    /// font package, and `None` for every release that is one file — the image, and a table baked from
+    /// the subset the image itself carries. See this module's header.
+    pub face: Option<Face>,
+}
+
+/// The other half of a font package: the face a table's glyph numbers are the numbers of.
+///
+/// A [`Release`]'s file that is not a table, and not a release of its own: it has no version and no
+/// kind, because it is nothing without the table beside it — one font, published as two files, and the
+/// version they share is read off the table's name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Face {
+    /// Its name on the repository, which is also the name it takes on the card.
+    pub file: String,
+    /// How many bytes it is. `0` for a manifest that did not say.
+    pub size: u64,
+    /// Its SHA-256, lowercase hex. Empty for a manifest that did not say.
+    pub sha256: String,
 }
 
 /// What the repository has, as its own manifest said.
@@ -193,19 +225,8 @@ impl Manifest {
 
 impl Release {
     /// Where this file is, on the repository.
-    ///
-    /// Derived from [`MANIFEST_URL`] rather than written down, because the manifest and the files it
-    /// names are one directory: a second address here would be a second string to keep in step with
-    /// the branch name, and the branch name is the one thing on this page a rename elsewhere can break
-    /// — see [`MANIFEST_URL`]. Deriving it means the two cannot be on different branches, which is a
-    /// failure that would look like a manifest offering a file that is not there.
     pub fn url(&self) -> String {
-        let dir = MANIFEST_URL
-            .rsplit_once('/')
-            .map(|(dir, _)| dir)
-            .unwrap_or(MANIFEST_URL);
-
-        format!("{dir}/{}", self.file)
+        url_of(&self.file)
     }
 
     /// One member of the manifest, if it is there and complete enough to download.
@@ -226,15 +247,67 @@ impl Release {
             file,
             size: json::number(object, "size").unwrap_or(0),
             sha256: json::string(object, "sha256").unwrap_or_default().to_string(),
+            // Only the font's member can carry one: the image is one file by definition, and a member
+            // beside *it* would be a manifest describing something no press on this page asks for.
+            face: match kind {
+                Kind::Font => Face::read(object),
+                Kind::Firmware => None,
+            },
         })
     }
+}
+
+impl Face {
+    /// Where this file is, on the repository. The same directory as the manifest and the table beside
+    /// it — see [`url_of`].
+    pub fn url(&self) -> String {
+        url_of(&self.file)
+    }
+
+    /// The `"face"` member of a font's object, when it is there and complete enough to download.
+    ///
+    /// A face with no file name is not one: there would be nothing to fetch and no name to put on the
+    /// card, so a manifest that named half a package is read as one that named none — the table stands
+    /// on its own, which is what a lone `"file"` means everywhere else here.
+    fn read(object: &str) -> Option<Self> {
+        let face = json::member(object, "face")?;
+        let file = json::string(face, "file")?.to_string();
+
+        Some(Self {
+            file,
+            size: json::number(face, "size").unwrap_or(0),
+            sha256: json::string(face, "sha256").unwrap_or_default().to_string(),
+        })
+    }
+}
+
+/// Where a file the manifest names is, on the repository.
+///
+/// Derived from [`MANIFEST_URL`] rather than written down, because the manifest and the files it names
+/// are one directory: a second address here would be a second string to keep in step with the branch
+/// name, and the branch name is the one thing on this page a rename elsewhere can break — see
+/// [`MANIFEST_URL`]. Deriving it means the two cannot be on different branches, which is a failure that
+/// would look like a manifest offering a file that is not there.
+///
+/// The name is the file's own and never a path: a manifest naming `"card/…"` would be fetched from
+/// there and *written* under the directory the card's tables live in, because the two halves of a
+/// download — where it comes from and where it goes — are one name on this page, deliberately. What the
+/// page puts on the card is a file in the place the interface scans, or it is not a font.
+fn url_of(file: &str) -> String {
+    let dir = MANIFEST_URL
+        .rsplit_once('/')
+        .map(|(dir, _)| dir)
+        .unwrap_or(MANIFEST_URL);
+
+    format!("{dir}/{file}")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The manifest this project publishes, as the build script writes it.
+    /// The manifest this project publishes, as the build script writes it: a merged image, and a font
+    /// that is two files — a table, and the face it was baked from.
     const MANIFEST: &str = r#"{
         "generated": "2026-10-16T09:00:00Z",
         "firmware": {
@@ -244,10 +317,15 @@ mod tests {
             "sha256": "3f2a"
         },
         "font": {
-            "version": "1",
-            "file": "hivebox-font-24px-v1.bin",
-            "size": 2080400,
-            "sha256": "9c41"
+            "version": "3",
+            "file": "hivebox-font-24px-v3.bin",
+            "size": 2268084,
+            "sha256": "1cfb",
+            "face": {
+                "file": "hivebox-face-v3.otf",
+                "size": 1910512,
+                "sha256": "0f48"
+            }
         }
     }"#;
 
@@ -262,9 +340,56 @@ mod tests {
         assert_eq!(firmware.file, "hivebox-firmware-v0.7.0.bin");
         assert_eq!(firmware.version.text(), "v0.7.0");
         assert_eq!(firmware.size, 7_222_464);
-        assert_eq!(font.version.text(), "v1");
-        assert_eq!(font.size, 2_080_400);
+        assert_eq!(font.version.text(), "v3");
+        assert_eq!(font.size, 2_268_084);
         assert!(!manifest.is_empty());
+    }
+
+    /// The font's second half is read, and both halves are addressed out of the manifest's own
+    /// directory: a face somewhere else on the repository would be a file the page fetches from a
+    /// directory no release of this project has ever been published in.
+    #[test]
+    fn a_font_names_the_face_beside_the_table() {
+        let font = Manifest::parse(MANIFEST).font.expect("the font");
+        let face = font.face.as_ref().expect("the face the table was baked from");
+
+        assert_eq!(face.file, "hivebox-face-v3.otf");
+        assert_eq!(face.size, 1_910_512);
+        assert_eq!(face.sha256, "0f48");
+
+        let directory = |url: &str| url.rsplit_once('/').expect("a path").0.to_string();
+        assert_eq!(
+            directory(&face.url()),
+            directory(&font.url()),
+            "one directory for the manifest and both halves of the font"
+        );
+        assert!(
+            face.url().ends_with("/hivebox-face-v3.otf"),
+            "{} is the face under its own name",
+            face.url()
+        );
+    }
+
+    /// A face is read only when the manifest names it *whole*: a table on its own has none, half a face
+    /// member is none, and the image's member never has one.
+    ///
+    /// The half-named case is the one worth being strict about. A `"face"` with no file in it has no
+    /// name to fetch and no name to put on the card, so it is read as a manifest that named no package
+    /// at all — the table stands on its own, which is what a lone `"file"` means everywhere else here.
+    #[test]
+    fn a_face_is_read_only_when_the_manifest_names_it_whole() {
+        let alone = r#"{"font": {"file": "hivebox-font-24px-v1.bin"}}"#;
+        assert!(Manifest::parse(alone).font.unwrap().face.is_none());
+
+        let half = r#"{"font": {"file": "hivebox-font-24px-v3.bin", "face": {"size": 12}}}"#;
+        assert!(Manifest::parse(half).font.unwrap().face.is_none());
+
+        let image = r#"{"firmware": {"file": "hivebox-firmware-v0.7.0.bin",
+                                     "face": {"file": "hivebox-face-v3.otf"}}}"#;
+        assert!(
+            Manifest::parse(image).firmware.unwrap().face.is_none(),
+            "an image is one file, whatever a manifest says beside it"
+        );
     }
 
     /// A version is read from each of the three shapes a version is written in on this project: a

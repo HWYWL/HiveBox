@@ -49,6 +49,11 @@
 //! backend [`HttpBackend`] is not: [`Status::Unsupported(Kind::Firmware)`](Status::Unsupported) is what
 //! that row's press draws until it exists.
 //!
+//! A press on the table's row can be *two* requests, because a font that covers more than the image's
+//! subset is two files: the wider face, and the table baked from it. They are one install and not two —
+//! see [`Download::next`] — so the prompt stays up, the bar goes on, and the row is re-read once, when
+//! the table at the end of the chain is on the card.
+//!
 //! A download in flight is drawn from [`Download`], which is the request's progress read once a frame —
 //! the frame subscription exists for exactly that, and a minute of downloading with nothing moving on
 //! the screen is indistinguishable from a box that has hung.
@@ -166,6 +171,12 @@ pub enum DownloadFault {
 /// and not the page's whole state: it is replaced every frame the request is in flight and dropped the
 /// moment the answer is taken, while the status is what the page draws.
 pub struct Download {
+    /// Where the bytes are coming from: the manifest's own directory and [`Download::file`].
+    ///
+    /// Kept and not worked out again at each step, because one press can be two files and the second
+    /// one's address is the manifest's answer about a name that is not this one — see
+    /// [`Updater::install_font`].
+    pub(crate) url: String,
     /// The file's name on the repository — what the prompt says is being fetched. Not the path, which
     /// is [`FONT_DIR`] plus this and is nobody's business but the write's.
     pub(crate) file: String,
@@ -180,9 +191,38 @@ pub struct Download {
     /// [`Download::expected`] when it did not. `0` only when neither said — a bar with no end, and a
     /// count of bytes rather than a percentage.
     pub(crate) total: u64,
+    /// The file to fetch once this one has landed, when the press is a package: the table, behind the
+    /// face it was baked from. `None` for everything that is one file.
+    ///
+    /// Boxed because it is the tail of a list, and the *order* is the whole of what it says: the table
+    /// is the file the boot reads, so the font is not installed until the table has landed. A face on
+    /// its own is a file nothing draws with — the scan pairs it by version, and it has no table — and a
+    /// table on its own would be drawn with the glyph numbers of the face the *image* carries, which is
+    /// the failure the pair exists to prevent. So the half that lands first is harmless if the press is
+    /// abandoned or the second half fails, and the card is left with the font it already had.
+    pub(crate) next: Option<Box<Download>>,
 }
 
 impl Download {
+    /// One file of a press: where it comes from, what it is called, and where it goes.
+    ///
+    /// `dir` is the card's directory rather than the file's, because a download's two names are one:
+    /// the name on the repository is the name the card gets, and a manifest that named a path would put
+    /// a table somewhere the interface does not scan. See [`FONT_DIR`].
+    pub(crate) fn of(url: &str, file: &str, dir: &str, size: u64, next: Option<Box<Download>>) -> Self {
+        Self {
+            url: url.to_string(),
+            file: file.to_string(),
+            path: format!("{}/{}", dir.trim_end_matches('/'), file),
+            expected: size,
+            received: 0,
+            // The manifest's size to begin with, so that the bar has an end before the server's headers
+            // have been read — and gets the server's own the moment they are.
+            total: size,
+            next,
+        }
+    }
+
     /// How much of it is here, from `0.0` to `1.0`, or `None` when nothing has said how big it is.
     ///
     /// The denominator [`Download::total`] and never [`Download::expected`] on its own: the server's
@@ -533,6 +573,12 @@ impl Updater {
     ///
     /// Every way this can fail ends the same way — [`discard`] — because the file is the thing that
     /// makes the failure dangerous and not the status: see that function.
+    ///
+    /// A file that landed and is not the last one of a press is not an install yet: what follows it is
+    /// started and the bar goes on — see [`Download::next`] — and only the file at the end of the chain
+    /// ends the press. The checks are per file and not per press for the reason they exist: a size is a
+    /// statement about *this* file, and a `404` on the second half of a package is the second half's
+    /// answer.
     fn finish_download(&mut self, answer: Result<pomelo_hal::HttpResponse, HalError>) {
         let kind = self.downloading_kind();
         let download = self.download.take();
@@ -552,15 +598,19 @@ impl Updater {
 
                         Status::DownloadFailed(kind, DownloadFault::Incomplete)
                     }
-                    _ => {
-                        // Re-read, so that the row's version is the one that just landed rather than
-                        // the one the last check found. This is the whole reason the page can say
-                        // "updated" without keeping a version of its own: the card is the record.
-                        let installed = read_installed(&self.board, &self.font_dir);
-                        self.installed = installed;
+                    _ => match download.and_then(|download| download.next) {
+                        Some(next) => self.start_half(*next, kind),
+                        None => {
+                            // Re-read, so that the row's version is the one that just landed rather
+                            // than the one the last check found. This is the whole reason the page can
+                            // say "updated" without keeping a version of its own: the card is the
+                            // record.
+                            let installed = read_installed(&self.board, &self.font_dir);
+                            self.installed = installed;
 
-                        Status::Installed(kind)
-                    }
+                            Status::Installed(kind)
+                        }
+                    },
                 }
             }
             Ok(_) => {
@@ -574,6 +624,34 @@ impl Updater {
                 Status::DownloadFailed(kind, DownloadFault::Http(HttpFault::Unreachable))
             }
         };
+    }
+
+    /// Starts the file that follows one that landed, and answers what the page is drawing now.
+    ///
+    /// A press of two files is *one* install to a person, so the status stays [`Status::Downloading`] and
+    /// the bar goes on where it was: a prompt that blinked between the two halves would read as two
+    /// presses, and the file name under the sentence — which does change — is the answer to "what is it
+    /// doing now". What is thrown away is the reading of the request that just ended, because the next
+    /// one's progress has not been read yet; the new [`Download`] starts its bar at nothing, which is
+    /// where the file it is about is.
+    ///
+    /// A request that does not get away is a press that failed: there is no fault in the list for "the
+    /// second file could not be asked for", and the nearest true thing is the same one a first half that
+    /// could not be asked for gets — nothing answerable was reached. The half that landed is a real file
+    /// and stays, where it changes nothing until its table is there.
+    fn start_half(&mut self, half: Download, kind: Kind) -> Status {
+        match self
+            .board
+            .http()
+            .start_to(&half.url, Sink::File(half.path.clone()))
+        {
+            Ok(()) => {
+                self.download = Some(half);
+
+                Status::Downloading(kind)
+            }
+            Err(_) => Status::DownloadFailed(kind, DownloadFault::Http(HttpFault::Unreachable)),
+        }
     }
 
     /// The message the page sends when the check button is pressed.
@@ -606,11 +684,14 @@ impl Updater {
         }
     }
 
-    /// Starts the glyph table's download, or says why it did not start.
+    /// Starts the glyph table's download — the first of its two files, when it has two — or says why it
+    /// did not start.
     ///
     /// Three questions in a row, and each of them is a different answer to draw: is there a card (no →
     /// the one sentence about that), is there something to fetch (no → this press raced the check, so
-    /// ask again), and did the request get away (no → the reason it did not).
+    /// ask again), and did the request get away (no → the reason it did not). Which file is asked for
+    /// first is not one of the questions: it is [`Download::next`]'s and it is the face, so that the
+    /// file the boot scans for is the one that finishes the press.
     fn install_font(&mut self) {
         // The slot first: this is the moment the answer is needed, and it is a *mount* rather than a
         // read of a pin — see [`card_mounted`] for why that is not the same question.
@@ -645,19 +726,34 @@ impl Updater {
             return;
         }
 
-        let path = format!("{}/{}", self.font_dir.trim_end_matches('/'), release.file);
+        // The table is the file the boot reads, so it is the one that finishes the press: the face, when
+        // the manifest named one, goes in front of it and the two are chained — see [`Download::next`].
+        let table = Download::of(
+            &release.url(),
+            &release.file,
+            &self.font_dir,
+            release.size,
+            None,
+        );
 
-        match self.board.http().start_to(&release.url(), Sink::File(path.clone())) {
+        let download = match &release.face {
+            Some(face) => Download::of(
+                &face.url(),
+                &face.file,
+                &self.font_dir,
+                face.size,
+                Some(Box::new(table)),
+            ),
+            None => table,
+        };
+
+        match self
+            .board
+            .http()
+            .start_to(&download.url, Sink::File(download.path.clone()))
+        {
             Ok(()) => {
-                self.download = Some(Download {
-                    file: release.file.clone(),
-                    path,
-                    expected: release.size,
-                    received: 0,
-                    // The manifest's size to begin with, so that the bar has an end before the server's
-                    // headers have been read — and gets the server's own the moment they are.
-                    total: release.size,
-                });
+                self.download = Some(download);
                 self.status = Status::Downloading(Kind::Font);
             }
             // One request at a time, and the one in flight is the check that found this offer: nothing
@@ -856,10 +952,10 @@ fn card_mounted(board: &Board) -> bool {
 
 /// The font the box should be drawing with, as the card holds it.
 ///
-/// A card can carry the coverage on its own — a table baked from the face in this image, which is the
-/// half a download can deliver — or it can carry a wider face *with* the table baked from that face.
-/// [`face`](Self::face) is the difference, and the version is what ties the two files together: both
-/// name the same one.
+/// A card can carry the coverage on its own — a table baked from the face in this image — or it can
+/// carry a wider face *with* the table baked from that face, which is what a press on the page's font
+/// row fetches and writes here. [`face`](Self::face) is the difference, and the version is what ties
+/// the two files together: both name the same one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CardFont {
     /// The version the file — or both files — carries: what the page puts on the screen.
@@ -879,12 +975,17 @@ pub fn card_font() -> Option<CardFont> {
 /// The font in `dir`, whether it arrived as a face and a table or as a table on its own.
 ///
 /// A *complete* package wins, and that is a rule about correctness rather than about versions: a table
-/// on its own was baked from the face in the image — the page has no way to be handed a font, so that
-/// is the only face it can have been baked from — and handing it to a face that arrived on a card
-/// would be handing it glyph numbers from another font. The renderer refuses those (see
-/// `iced_pomelo_winit::fonts`), and a refused table is a box that rasterises every glyph it draws at
-/// 1.6 ms a glyph. So the question this answers is "the newest font that can actually be drawn with",
-/// which is what makes an older package beat a newer lone table.
+/// that arrived on its own is a table the manifest named *without* a face, which is a manifest saying
+/// it was baked from the face this image carries — the only other face a table can belong to — and
+/// handing that table to a face that came on a card would be handing it glyph numbers from another
+/// font. The renderer refuses those (see `iced_pomelo_winit::fonts`), and a refused table is a box that
+/// rasterises every glyph it draws at 1.6 ms a glyph. So the question this answers is "the newest font
+/// that can actually be drawn with", which is what makes an older package beat a newer lone table.
+///
+/// A press that stopped between the two halves of a package reads as exactly that: the face of the
+/// version that never finished has no table to be paired with, and is not a font this box draws with
+/// until its table is there — see [`Download::next`], which is why the face is the half that goes
+/// first.
 ///
 /// The firmware's boot asks this before the first frame and reads what it returns, which is what turns
 /// "the font is v3" from a claim into the thing actually being drawn: the page can say which font the

@@ -2,9 +2,20 @@
 """
 tools/publish_bin.py
 
-把一次构建的产物归置成 `bin/`：更新页要下载的两个文件（固件镜像、字库）、给人往 SD 卡里
-放的那一对卡上字体包（`bin/card/`），以及把它们各自的名字、版本、大小和摘要写下来的
-`bin/manifest.json`。
+把一次构建的产物归置成 `bin/`：更新页要下载的固件镜像与字库，以及把它们各自的名字、版本、
+大小和摘要写下来的 `bin/manifest.json`。
+
+字库这一项有两种形态，写在同一个 `font` 里：
+
+- **一张表**（`--font`）：表头里那个字体 SHA-256 就是**镜像内置那份字体**的，所以它单独
+  一个文件就能用 —— 镜像里已经有另一半了。
+- **一个包**（`--card-dir`）：表之外多一个 `"face"`，指向烘出这张表的那份字体。覆盖超出
+  内置子集的那一份只能这么给：表只对烘它的那份字体有意义，两件必须同版、同行。更新页按
+  `"face"` → `"file"` 的顺序把两个文件都下到 `/sdcard/fonts`（见 `pomelo-apps/updater`）。
+
+两件东西都**平铺**在 `bin/` 里，清单里的名字就是卡上的名字：更新页把同一个 `file` 既当
+下载地址又当落盘路径（`release::url_of` 与 `Download::of`），带目录的名字会被写进
+`/sdcard/fonts/` 底下，而开机只扫这一层。
 
 更新页（`pomelo-apps/updater`）读的就是这份清单，而它只认文件名里的版本 ——
 `hivebox-firmware-v0.7.0.bin` 是 `v0.7.0`，`hivebox-font-24px-v1.bin` 是 `v1`。所以
@@ -26,15 +37,19 @@ tools/publish_bin.py
 
 用法：
 
-    python tools/publish_bin.py                      # 固件取默认构建产物，字库用 --font 给
+    python tools/publish_bin.py                      # 固件取默认构建产物，字库用 --card-dir 给
+    python tools/publish_bin.py --card-dir ui-framework/pomelo-font/dist/card
     python tools/publish_bin.py --font /path/to/hivebox-font-24px-v1.bin
     python tools/publish_bin.py --version v0.7.0 --font-version 1
-    python tools/publish_bin.py --card-dir ui-framework/pomelo-font/dist/card
     python tools/publish_bin.py --dry-run            # 只打印会做什么
 
-字库版本按这个顺序找：`--font-version`、文件名里的 `v` 加数字、字库旁边的 `VERSION` 文件
-（`fonts/dist/VERSION`）。第三条是固件那条路在烘焙产物上的对应物 —— 那张表的名字里带的是
-字号（`@24px`）而不是版本，所以版本得另找一处写下来。
+`--font` 与 `--card-dir` 只能给一个（清单里 `font` 只有一项，而包是两者里更强的那种），
+`--font-version` 只能配 `--font`（包的版本就写在它两个名字里）。
+
+单独一张表的版本按这个顺序找：`--font-version`、文件名里的 `v` 加数字、字库旁边的
+`VERSION` 文件（`fonts/dist/VERSION`）。第三条是固件那条路在烘焙产物上的对应物 —— 那张表的
+名字里带的是字号（`@24px`）而不是版本，所以版本得另找一处写下来。包不需要任何一条：它的
+两个名字里都有版本，而且必须相同，`card_pair` 认不过就不发布。
 """
 
 import argparse
@@ -67,18 +82,17 @@ FIRMWARE_TEMPLATE = "hivebox-firmware-{version}.bin"
 FONT_TEMPLATE = "hivebox-font-24px-{version}.bin"
 
 # 4. 清旧版本时用的匹配式：只动这一类文件，免得把别的东西删掉。
+#
+#    字库那一条同时管着这一项的两种形态：单独一张表，和字体包里的表 —— 两者走的是同一条
+#    命名规则（`hivebox-font-24px-vN.bin`），占的也是清单里同一个 `font` 项（见文件头），
+#    所以在发布的那份就是留下的那份，上一版这时才真的是「旧的」。
 FIRMWARE_GLOB = re.compile(r"^hivebox-firmware-.*\.bin$")
 FONT_GLOB = re.compile(r"^hivebox-font-.*\.bin$")
 
-# 5. 卡上字体包（字体 + 照它烘的表）在 `bin/` 里的落脚处，以及它两个文件的命名规则。
+# 5. 字体包里另一半（烘出那张表的那份字体）的命名规则。
 #
-#    单独一层子目录，**不能平铺**：包里的表叫 `hivebox-font-24px-v3.bin`，和更新页那张表
-#    （`hivebox-font-24px-v1.bin`）走的是同一条命名规则，平铺在一起就会被 `prune` 的
-#    「同一种只留最新」互相删掉 —— 那两件东西名字像，用途完全不同：一件给更新页下到
-#    `/sdcard/fonts`，另一件要**和字体一起**放在那里才认。
-CARD_DIR_NAME = "card"
+#    版本必须和表的**完全相同**，这一点由 `card_pair` 认死；这里只管名字长什么样。
 CARD_FACE_GLOB = re.compile(r"^hivebox-face-.*\.otf$")
-CARD_TABLE_GLOB = re.compile(r"^hivebox-font-.*\.bin$")
 
 
 def display_path(path):
@@ -316,7 +330,8 @@ def card_pair(source_dir):
 
     names = sorted(os.listdir(source_dir))
     face = card_half(names, CARD_FACE_GLOB, source_dir)
-    table = card_half(names, CARD_TABLE_GLOB, source_dir)
+    # 表用的就是清单里 `font` 那一条的匹配式：单独一张表和包里的表是同一种东西、同一项。
+    table = card_half(names, FONT_GLOB, source_dir)
     if not face or not table:
         return None, (
             f"{display_path(source_dir)} 里不是正好一对：字体 `hivebox-face-*.otf` 与它的表 "
@@ -339,31 +354,32 @@ def card_pair(source_dir):
     return (face, table, face_version), None
 
 
-def publish_card(pair, bin_dir, dry_run):
-    """把一对卡上包放进 `bin/card/`，返回写进清单的那一项。"""
-    face, table, version = pair
-    card_dir = os.path.join(bin_dir, CARD_DIR_NAME)
-    if not dry_run:
-        os.makedirs(card_dir, exist_ok=True)
+def publish_font_package(pair, bin_dir, dry_run):
+    """把一对卡上字体包放进 `bin/`，返回写进清单 `font` 项的那一份。
 
+    两件都**平铺**，不带子目录：清单里的名字既是更新页的下载地址，也是它落到卡上的名字
+    （`release::url_of` 与 `Download::of` 用的是同一个 `file`），一个带目录的名字会被写进
+    `/sdcard/fonts/` 底下的子目录，而开机只扫这一层。
+    """
+    face, table, version = pair
     face_name = os.path.basename(face)
     table_name = os.path.basename(table)
-    face_size, face_sha = place(face, bin_dir, f"{CARD_DIR_NAME}/{face_name}", dry_run)
-    table_size, table_sha = place(table, bin_dir, f"{CARD_DIR_NAME}/{table_name}", dry_run)
-    prune(card_dir, CARD_FACE_GLOB, face_name, dry_run)
-    prune(card_dir, CARD_TABLE_GLOB, table_name, dry_run)
+
+    # 表在前、字体在后只是打印顺序：两份都写成了才写清单，中间出错这一版就没有清单。
+    table_size, table_sha = place(table, bin_dir, table_name, dry_run)
+    face_size, face_sha = place(face, bin_dir, face_name, dry_run)
+    prune(bin_dir, FONT_GLOB, table_name, dry_run)
+    prune(bin_dir, CARD_FACE_GLOB, face_name, dry_run)
 
     return {
         "version": version,
+        "file": table_name,
+        "size": table_size,
+        "sha256": table_sha,
         "face": {
-            "file": f"{CARD_DIR_NAME}/{face_name}",
+            "file": face_name,
             "size": face_size,
             "sha256": face_sha,
-        },
-        "table": {
-            "file": f"{CARD_DIR_NAME}/{table_name}",
-            "size": table_size,
-            "sha256": table_sha,
         },
     }
 
@@ -392,13 +408,17 @@ def main():
         help=f"要发布的固件镜像（默认 {os.path.relpath(DEFAULT_FIRMWARE, WORKSPACE_ROOT)}）；"
         f"版本从同一个 build/ 里的 {APP_IMAGE_NAME} 读",
     )
-    parser.add_argument("--font", help="字库文件；不给则清单里不写 font，更新页那一行就没有可下的东西")
+    parser.add_argument(
+        "--font",
+        help="单独一张表（烘自镜像内置那份字体）；不给且没有 --card-dir 时清单里不写 font，"
+        "更新页那一行就没有可下的东西",
+    )
     parser.add_argument("--version", help="固件版本号；不给则问应用镜像，再不给则问 git describe")
     parser.add_argument("--font-version", help="字库版本号；不给则从字库文件名里读")
     parser.add_argument(
         "--card-dir",
-        help="卡上字体包的目录（字体 `hivebox-face-*.otf` 与它的表 `hivebox-font-*.bin` 各一份）；"
-        f"给就把这一对归置进 bin/{CARD_DIR_NAME}/ 并写进清单的 card 项",
+        help="字体包的目录（字体 `hivebox-face-*.otf` 与它的表 `hivebox-font-*.bin` 各一份）；"
+        "给就把这一对平铺进 bin/ 并写进清单的 font 项（表当 `file`，字体当 `face`）",
     )
     parser.add_argument("--bin", default=DEFAULT_BIN_DIR, help="输出目录（默认仓库根的 bin/）")
     parser.add_argument("--dry-run", action="store_true", help="只打印会做什么，不落盘")
@@ -411,6 +431,19 @@ def main():
 
     if args.font and not os.path.isfile(args.font):
         print(f"[!] 找不到字库文件：{args.font}")
+        return 1
+
+    # 清单里的 `font` 只有一项，所以「一张表」和「一整包」只能来一个。包是两者里更强的那一种
+    # （表要和烘它的字体一起用），但也确实存在只有表的那种发布：它配的是镜像内置那份字体。
+    if args.font and args.card_dir:
+        print("[!] --font 与 --card-dir 只能给一个：清单里的 font 只有一项。")
+        print("    一张表和一整包是这一项的两种形态（包的 `face` 缺省时就是一个文件），")
+        print("    要发包就只给 --card-dir。")
+        return 1
+
+    if args.card_dir and args.font_version:
+        print("[!] --font-version 与 --card-dir 不能一起给：包的版本就在它的两个名字里，")
+        print("    而清单里的版本也只能是那个（更新页只读文件名里的版本）。")
         return 1
 
     # 卡上包**先认后写**：认不过就一个字节都不落盘，免得把这一版的一半留在 bin/ 里。
@@ -444,7 +477,13 @@ def main():
 
     # ---- 文件名 ---------------------------------------------------------------
     firmware_name = FIRMWARE_TEMPLATE.format(version=firmware_version)
-    font_name = FONT_TEMPLATE.format(version=font_version) if args.font else None
+
+    # 包里的表名是它自己的（版本已由 `card_pair` 从名字里读过并核对过），单独一张表才按模板拼。
+    font_name = None
+    if card:
+        font_name = os.path.basename(card[1])
+    elif args.font:
+        font_name = FONT_TEMPLATE.format(version=font_version)
 
     if not args.dry_run:
         os.makedirs(args.bin, exist_ok=True)
@@ -466,7 +505,9 @@ def main():
         },
     }
 
-    if args.font:
+    if card:
+        manifest["font"] = publish_font_package(card, args.bin, args.dry_run)
+    elif args.font:
         font_size, font_sha = place(args.font, args.bin, font_name, args.dry_run)
         prune(args.bin, FONT_GLOB, font_name, args.dry_run)
         manifest["font"] = {
@@ -476,16 +517,15 @@ def main():
             "sha256": font_sha,
         }
 
-    if card:
-        manifest["card"] = publish_card(card, args.bin, args.dry_run)
-
     write_manifest(args.bin, manifest, args.dry_run)
 
-    print(
-        f"[*] 完成。bin/ 现在有：{firmware_name}"
-        + (f"、{font_name}" if font_name else "")
-        + (f"、{CARD_DIR_NAME}/ 里一对（{card[2]}）" if card else "")
-    )
+    published = [firmware_name]
+    if card:
+        published.append(f"{font_name} + {os.path.basename(card[0])}（{card[2]} 的一对）")
+    elif font_name:
+        published.append(font_name)
+
+    print("[*] 完成。bin/ 现在有：" + "、".join(published))
     return 0
 
 

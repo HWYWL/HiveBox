@@ -23,7 +23,7 @@ use crate::{card_font_in, installed_font};
 use crate::{DownloadFault, Installed, Message, Status, Updater, Words};
 
 /// What the repository would have answered: the firmware a release ahead of the one the box is running,
-/// and a table.
+/// and a font — a package, which is the shape the project publishes and the one a press has two files in.
 const MANIFEST: &str = r#"{
     "firmware": {
         "version": "0.7.0",
@@ -35,7 +35,12 @@ const MANIFEST: &str = r#"{
         "version": "2",
         "file": "hivebox-font-24px-v2.bin",
         "size": 2080400,
-        "sha256": "9c41"
+        "sha256": "9c41",
+        "face": {
+            "file": "hivebox-face-v2.otf",
+            "size": 1910512,
+            "sha256": "0f48"
+        }
     }
 }"#;
 
@@ -447,6 +452,9 @@ fn every_download_fault_has_a_sentence_in_both_languages() {
 /// The name the fetched table has on the repository, and the name it lands under on the card.
 const TABLE_FILE: &str = "hivebox-font-24px-v2.bin";
 
+/// The same, for the other half of a package: the face the table above was baked from.
+const FACE_FILE: &str = "hivebox-face-v2.otf";
+
 /// A frame, which is the clock the page reads a request on — see [`Updater::subscription`].
 ///
 /// The same shape the radio page's tests use: a test has no launcher's pump, so the board is ticked by
@@ -473,13 +481,28 @@ fn table_body() -> String {
     "a glyph table, and not a page of HTML".repeat(48)
 }
 
-/// A manifest naming one table of exactly `bytes` bytes.
+/// The body of the face that comes in front of it, and a different length from the table's on purpose:
+/// a page that fetched the same file twice would pass a test where the two were one size.
+fn face_body() -> String {
+    "an OTF, and not a glyph table either".repeat(24)
+}
+
+/// A manifest naming one table of exactly `bytes` bytes, and nothing else: a font that stands on its
+/// own, baked from the face the image carries.
 ///
 /// The size is the manifest's and the body is the server's, and they are the same number here on
 /// purpose: the page holds one up against the other when the file lands, and a test that served a body
 /// of some other length would be running that check without meaning to.
 fn manifest_with_table(bytes: usize) -> String {
     format!(r#"{{"font":{{"file":"{TABLE_FILE}","size":{bytes},"sha256":""}}}}"#)
+}
+
+/// A manifest naming one *package*: the face, and the table baked from it.
+fn manifest_with_package(face: usize, table: usize) -> String {
+    format!(
+        r#"{{"font":{{"file":"{TABLE_FILE}","size":{table},"sha256":"",
+             "face":{{"file":"{FACE_FILE}","size":{face},"sha256":""}}}}}}"#
+    )
 }
 
 /// A page over a board whose client answers `script`, and the board itself.
@@ -542,6 +565,113 @@ fn the_tables_press_writes_the_table_to_the_card() {
     let words = Words::of(Language::English);
     let line = page.prompt(&words).expect("an install is a prompt").line;
     assert!(line.contains("v2"), "{line} names the version that is on the box");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A font that is two files is one press and two requests: the face, and then the table baked from it.
+///
+/// The order is the point and not an accident — the table is the file the boot reads, so the package is
+/// installed when the second file lands and a press that stopped in between leaves the card as it was.
+/// What a person sees is one install throughout: one row, one prompt, one bar that goes on moving.
+#[test]
+fn a_packages_press_fetches_both_halves_and_installs_the_pair() {
+    let dir = scratch("package-download");
+    let (face, table) = (face_body(), table_body());
+    let script = SimHttp::answering(manifest_with_package(face.len(), table.len()))
+        .then(face.clone())
+        .then(table.clone());
+    let (board, mut page) = answered_page(&dir, script);
+
+    page.update(Message::Install(Kind::Font));
+
+    assert_eq!(page.status, Status::Downloading(Kind::Font));
+    assert_eq!(
+        page.download.as_ref().map(|it| it.file.as_str()),
+        Some(FACE_FILE),
+        "the half nothing draws with goes first"
+    );
+
+    settle(&board, &mut page);
+
+    assert_eq!(
+        page.status,
+        Status::Downloading(Kind::Font),
+        "half a package is not an install, so the press is not over"
+    );
+    assert_eq!(
+        page.download.as_ref().map(|it| it.file.as_str()),
+        Some(TABLE_FILE),
+        "and this is what it is waiting on now"
+    );
+    assert_eq!(
+        std::fs::read(dir.join(FACE_FILE)).expect("the face landed").len(),
+        face.len()
+    );
+
+    settle(&board, &mut page);
+
+    assert_eq!(page.status, Status::Installed(Kind::Font));
+    assert_eq!(
+        std::fs::read(dir.join(TABLE_FILE)).expect("the table landed").len(),
+        table.len()
+    );
+    assert_eq!(
+        page.installed.font.as_ref().map(Version::text),
+        Some("v2"),
+        "the row names the version of the pair, which is the table's own"
+    );
+
+    // And the card agrees, read the way the boot reads it: one scan, two files, one font.
+    let font = card_font_in(dir.to_str().unwrap()).expect("a package on the card");
+    assert_eq!(font.version.text(), "v2");
+    assert!(font.face.is_some(), "with the face that arrived beside it");
+
+    let words = Words::of(Language::English);
+    let line = page.prompt(&words).expect("an install is a prompt").line;
+    assert!(line.contains("v2"), "{line} names the version that is on the box");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A package whose second half does not arrive installs nothing: what landed is a face with no table,
+/// which is not a font — every glyph of every screen would be rasterised on the device — so the card is
+/// left naming the font the box already had.
+///
+/// The half that arrived is kept rather than thrown away, and that is the chain's order working: it is
+/// a real file that changes nothing until its table is there, and the next press fetches it again.
+#[test]
+fn a_package_that_stops_at_its_first_half_installs_nothing() {
+    let dir = scratch("package-broken");
+    table(&dir, "hivebox-font-24px-v1.bin");
+
+    let face = face_body();
+    let script = SimHttp::answering(manifest_with_package(face.len(), 64))
+        .then(face)
+        .then((404u16, "<html>not found</html>"));
+    let (board, mut page) = answered_page(&dir, script);
+
+    page.update(Message::Install(Kind::Font));
+    settle(&board, &mut page);
+    settle(&board, &mut page);
+
+    assert_eq!(
+        page.status,
+        Status::DownloadFailed(Kind::Font, DownloadFault::NotFound)
+    );
+    assert!(
+        !dir.join(TABLE_FILE).exists(),
+        "the error page is not a table, whatever it is called"
+    );
+    assert!(
+        dir.join(FACE_FILE).is_file(),
+        "the half that landed is a real file and is not the dangerous one"
+    );
+    assert_eq!(
+        installed_font(dir.to_str().unwrap()).map(|version| version.text().to_owned()),
+        Some("v1".to_owned()),
+        "and the font the box draws with is the one it had"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
