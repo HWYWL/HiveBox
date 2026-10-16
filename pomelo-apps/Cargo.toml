@@ -22,7 +22,6 @@ members = [
     "games",
     "music-player",
     "nas-monitor",
-    "overview",
     "power-log",
     "settings",
     "terminal",

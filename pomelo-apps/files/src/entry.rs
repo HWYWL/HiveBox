@@ -101,8 +101,8 @@ pub fn sorted(mut entries: Vec<Entry>) -> Vec<Entry> {
 
 /// A byte count in the unit that fits it: `512 B`, `8.0 KB`, `1.2 GB`.
 ///
-/// Binary units, and exact below a kilobyte, for the same reason the overview's are: what is on this
-/// page is a filesystem's own numbers, and `1.0 KB` for 1024 bytes hides whether a file is empty.
+/// Binary units, and exact below a kilobyte, because what is on this page is a filesystem's own
+/// numbers: `1.0 KB` for 1024 bytes hides whether a file is empty.
 pub fn bytes(count: u64) -> String {
     const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
 

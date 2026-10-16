@@ -9,7 +9,7 @@
 //! A discharge curve is a column per sample: a full-height column with a gap on top of it for the part
 //! of the charge that is gone. The gap is a `Length::FillPortion` and the charge is the rest of the
 //! same hundred, so the two always add up to the column's height and the curve cannot disagree with the
-//! percentage printed above it by a rounding step — which is the trick the overview's bars are made of,
+//! percentage printed above it by a rounding step — which is the trick every bar on this box is made of,
 //! turned on its side.
 
 use iced::widget::scrollable::{Direction, Scrollbar};

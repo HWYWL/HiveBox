@@ -38,7 +38,6 @@ games = { path = "../games", default-features = false }
 music-player = { path = "../music-player", default-features = false }
 power-log = { path = "../power-log", default-features = false }
 nas-monitor = { path = "../nas-monitor", default-features = false }
-overview = { path = "../overview", default-features = false }
 settings = { path = "../settings", default-features = false }
 task-viewer = { path = "../task-viewer", default-features = false }
 terminal = { path = "../terminal", default-features = false }

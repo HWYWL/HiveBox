@@ -31,8 +31,8 @@
 //
 // `HAL_HTTP_SINK_OTA` is the third, and the only one whose destination this file
 // chooses: `esp_ota_get_next_update_partition` picks the app slot this image is
-// not running from, and the body is a firmware image going into it. Two rules
-// come with that and neither has an analogue in the other two sinks. A slot is
+// not running from, and the body is a firmware image going into it. Three rules
+// come with that and none has an analogue in the other two sinks. A slot is
 // only written to by an answer that *is* a success — a `404` page landing there
 // would erase an image to put a web page in its place. And a slot is only
 // *bootable* once the request has finished: `esp_ota_end` is what says the bytes
@@ -41,6 +41,22 @@
 // read that dies mid-body, a full slot — calls `esp_ota_abort`, which leaves the
 // boot partition where it was. So the worst a failed update does is fill a slot
 // nobody boots from, and the next attempt erases it again.
+//
+// And the erasing takes its turn with the reading instead of running ahead of
+// it. A slot has to be erased before it can be written, an image is five
+// megabytes, and five megabytes of erase is ninety-odd block erases — several
+// seconds of a progress bar that was put on the screen the moment the button
+// was pressed and does not move for any of them, which is indistinguishable
+// from a box that has hung. So `esp_ota_begin` is handed
+// `OTA_WITH_SEQUENTIAL_WRITES`, which erases nothing at all where it stands and
+// leaves each region to the `esp_ota_write` that is about to fill it: the
+// bytes are on the wire while the flash is being cleared for them, and the
+// first of them is shown as soon as the network delivers it. The writes are a
+// whole block at a time for a reason of the same kind — `esp_flash_erase_region`
+// only reaches for the block command when the region it is given is an aligned
+// block, and one 64 KB block erase costs about what sixteen 4 KB sector erases
+// do, so a chunk cut to the socket's size would trade the wait it just lost for
+// an install several times longer than it needs to be.
 // =============================================================================
 
 #include <stdbool.h>
@@ -73,6 +89,12 @@ static const char *TAG = "board_http";
 
 /** The socket's own read buffer. The body buffer beside it is the larger one, and is `board_hal.h`'s. */
 #define HAL_HTTP_READ_CHUNK 2048
+
+/** How much of an image is read, erased and written at a time — one whole erase block, for the reason
+ * in the note at the top of this file. It is staged in a buffer of its own, allocated per request and
+ * only for an image, because a buffer this size kept for the asking is a quarter of the PSRAM this
+ * board has left. */
+#define HAL_HTTP_OTA_CHUNK 65536
 
 /** What this board calls itself to a server. Servers log it, and a few refuse a request without one. */
 #define HAL_HTTP_USER_AGENT "HiveBox/1.0"
@@ -267,6 +289,14 @@ static void http_task(void *arg)
     esp_ota_handle_t ota = 0;
     const esp_partition_t *slot = NULL;
 
+    /* And again for the block an image is staged in — see `HAL_HTTP_OTA_CHUNK`. It is allocated late,
+     * once the request is known to be an image, and `out` frees it on every path, including the ones
+     * that jump there before the allocation ever happened; NULL is what those leave and what `free`
+     * takes. `ota_held` is how much of the block the reads have filled and the writes have not taken
+     * yet, and it is up here for the same reason. */
+    uint8_t *ota_chunk = NULL;
+    size_t ota_held = 0;
+
     /* The certificate bundle in the image, and the reason HTTPS needs a clock: mbedTLS checks the
      * window on every certificate it is shown, so this only works once `hal_time_sync()` has run. */
     const esp_http_client_config_t cfg = {
@@ -346,8 +376,10 @@ static void http_task(void *arg)
      * answer's to carry and not this file's to judge. */
     const bool to_file = (s_sink == HAL_HTTP_SINK_FILE);
     const bool to_ota = (s_sink == HAL_HTTP_SINK_OTA);
-    /* A file and a slot both stage each chunk through the head of the body buffer: it is the read
-     * buffer as much as it is the body buffer, and neither of them needs the bytes kept twice. */
+    /* A file stages each chunk through the head of the body buffer: it is the read buffer as much as
+     * it is the body buffer, and a file has no reason to keep the bytes twice. A slot keeps them in a
+     * staging block of its own — see `HAL_HTTP_OTA_CHUNK` — and either way the answer is not bounded
+     * by the body buffer, which is the question `staged` is asked below. */
     const bool staged = to_file || to_ota;
 
     /* A slot is the one place where the status *is* this file's to judge, and the reason is what
@@ -378,11 +410,37 @@ static void http_task(void *arg)
             goto out;
         }
 
-        /* The declared length is what lets `esp_ota_begin` erase exactly as much of the slot as the
-         * image needs; a server that declared nothing — a chunked body — gets `OTA_SIZE_UNKNOWN`,
-         * which erases as the bytes arrive. A slot too small for the image fails here, before a
-         * byte of it has been fetched. */
-        const esp_err_t began = esp_ota_begin(slot, (total > 0) ? total : OTA_SIZE_UNKNOWN, &ota);
+        /* A slot too small for the image is the one thing `OTA_WITH_SEQUENTIAL_WRITES` cannot answer
+         * for us — nothing is erased or written where that call stands, so there is no earlier
+         * moment at which it could have looked at a length — and it is worth answering here rather
+         * than ninety block erases later, because "the repository publishes an image meant for a
+         * board with twice this flash" is something a person can act on and a write that ran off the
+         * end of a partition is not. A server that declared nothing cannot be asked at all; that
+         * image is refused by the write that reaches the end of the slot, which is the same failure
+         * one slow download later. */
+        if (total > slot->size) {
+            ESP_LOGW(TAG, "%s is %u bytes, %s holds %u", s_url, (unsigned)total, slot->label,
+                     (unsigned)slot->size);
+            fault = HAL_HTTP_FAULT_STORAGE;
+            goto out;
+        }
+
+        ota_chunk = (uint8_t *)heap_caps_malloc(HAL_HTTP_OTA_CHUNK, MALLOC_CAP_SPIRAM);
+        if (ota_chunk == NULL) {
+            /* The internal heap is the fallback and a worse fit for this than it is for the body
+             * buffer: this allocation is made in the middle of the largest thing this board does. */
+            ota_chunk = (uint8_t *)malloc(HAL_HTTP_OTA_CHUNK);
+        }
+        if (ota_chunk == NULL) {
+            ESP_LOGW(TAG, "no room to stage %d bytes of an image", HAL_HTTP_OTA_CHUNK);
+            fault = HAL_HTTP_FAULT_STORAGE;
+            goto out;
+        }
+
+        /* Nothing is erased by this call and nothing is written where it stands — see the note at the
+         * top of this file. What it buys is the handle: the slot, and the rule that a region is
+         * erased once, by the write that is about to fill it. */
+        const esp_err_t began = esp_ota_begin(slot, OTA_WITH_SEQUENTIAL_WRITES, &ota);
         if (began != ESP_OK) {
             ESP_LOGW(TAG, "esp_ota_begin(%s): %s", slot->label, esp_err_to_name(began));
             fault = HAL_HTTP_FAULT_STORAGE;
@@ -410,9 +468,12 @@ static void http_task(void *arg)
         }
 
         /* A staged chunk goes into the head of the same buffer, and only a document is accumulated
-         * past it — see `staged` above. */
-        uint8_t *const into = staged ? s_body : s_body + used;
-        const int room = (int)(HAL_HTTP_BODY_MAX - 1 - (staged ? 0 : used));
+         * past it — see `staged` above. An image is the exception, and the erase is why: the block
+         * the write below clears is the block this read fills, so the read is the size of a block
+         * rather than the size of the socket's buffer, and the two are never cut to fit each other. */
+        uint8_t *const into = to_ota ? (ota_chunk + ota_held) : (staged ? s_body : s_body + used);
+        const int room = to_ota ? (int)(HAL_HTTP_OTA_CHUNK - ota_held)
+                                : (int)(HAL_HTTP_BODY_MAX - 1 - (staged ? 0 : used));
 
         const int read = esp_http_client_read(client, (char *)into, room);
         if (read < 0) {
@@ -438,12 +499,21 @@ static void http_task(void *arg)
             goto out;
         }
 
-        /* A chunk into the slot. A flash write that will not take is the board's fault and not the
-         * network's — see `HAL_HTTP_FAULT_STORAGE` — and the way out drops the write whole. */
-        if (to_ota && esp_ota_write(ota, into, (size_t)read) != ESP_OK) {
-            ESP_LOGW(TAG, "esp_ota_write into %s failed", slot->label);
-            fault = HAL_HTTP_FAULT_STORAGE;
-            goto out;
+        /* A block into the slot, once there is a whole one. A flash write that will not take is the
+         * board's fault and not the network's — see `HAL_HTTP_FAULT_STORAGE` — and the way out drops
+         * the write whole. */
+        if (to_ota) {
+            ota_held += (size_t)read;
+
+            if (ota_held == HAL_HTTP_OTA_CHUNK) {
+                if (esp_ota_write(ota, ota_chunk, ota_held) != ESP_OK) {
+                    ESP_LOGW(TAG, "esp_ota_write into %s failed", slot->label);
+                    fault = HAL_HTTP_FAULT_STORAGE;
+                    goto out;
+                }
+
+                ota_held = 0;
+            }
         }
 
         used += (size_t)read;
@@ -451,6 +521,21 @@ static void http_task(void *arg)
         /* Per chunk and not per frame: the frame loop reads this while the worker writes it, and a
          * reading taken here is one a bar can move on. */
         report_progress(used, total);
+    }
+
+    /* What is left of an image when the body ends part-way into a block: the tail of every image ever
+     * published, since none of them is a multiple of the erase size. It is written here, as the one
+     * write that is not a whole block, and its last sectors are erased one at a time by the same call
+     * — a sector-erase tail, rather than the ninety sector-erase blocks that reading a chunk at a
+     * time would have cost. */
+    if (to_ota && ota_held > 0) {
+        if (esp_ota_write(ota, ota_chunk, ota_held) != ESP_OK) {
+            ESP_LOGW(TAG, "esp_ota_write into %s failed", slot->label);
+            fault = HAL_HTTP_FAULT_STORAGE;
+            goto out;
+        }
+
+        ota_held = 0;
     }
 
     if (to_file) {
@@ -514,6 +599,10 @@ out:
          * next attempt erases the slot again on its way in. */
         esp_ota_abort(ota);
     }
+
+    /* The staging block lives for the request and not for the sink, so that a board that never
+     * installs anything never pays for one. */
+    free(ota_chunk);
 
     if (client != NULL) {
         esp_http_client_close(client);

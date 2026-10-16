@@ -201,7 +201,7 @@ pub const RING_LABEL_GAP: f32 = 6.0;
 /// this font's and not this file's to know exactly.
 ///
 /// Three lines and not two, because a firmware version is one long word with nowhere to break:
-/// `v0.10.3-20261016` is sixteen characters and about 197 px wide at this size, against the 176 the
+/// `v0.10.4-20261016` is sixteen characters and about 197 px wide at this size, against the 176 the
 /// half of the row a card gets leaves for it — so it wraps onto a second line, and that line has to
 /// be inside the card. At two lines' worth of height the card's own content was taller than the card
 /// and the overflow came out where a centred box puts it: half of it above, pushing the name up out

@@ -38,8 +38,8 @@
 //!
 //! # The grid is paged, and the page slides under the finger
 //!
-//! A page is [`PER_PAGE`] apps, four to a row, so the fifteen the catalogue has are two pages:
-//! eight and seven.
+//! A page is [`PER_PAGE`] apps, four to a row, so the fourteen the catalogue has are two pages:
+//! eight and six.
 //! A finger turning one is a **drag**: down on the grid, across, up. iced has no widget for that — a
 //! `button` captures the press it is given, and `Scrollable` scrolls for a wheel, a touch or its own
 //! scrollbar and for nothing else — so the gesture is read by `pomelo-widgets`' pager.
@@ -132,7 +132,6 @@ use files::Files;
 use games::Games;
 use music_player::Player;
 use nas_monitor::NasMonitor;
-use overview::Overview;
 use pomelo_hal::Board;
 use power_log::PowerLog;
 use settings::Settings;
@@ -187,22 +186,21 @@ enum Screen {
 ///
 /// Indices, because that is what the grid hands over when a tile is tapped. The tests assert that
 /// each of these still names the app it says it does, and every entry has one: the catalogue and
-/// the list of apps are the same fifteen things, in the same order.
+/// the list of apps are the same fourteen things, in the same order.
 pub const MUSIC: usize = 0;
 pub const WEB_MANAGER: usize = 1;
-pub const TERMINAL: usize = 2;
-pub const SETTINGS: usize = 3;
-pub const UPDATER: usize = 4;
-pub const TASK_VIEWER: usize = 5;
-pub const NAS_MONITOR: usize = 6;
-pub const FILES: usize = 7;
-pub const CALCULATOR: usize = 8;
-pub const CLOCK: usize = 9;
-pub const OVERVIEW: usize = 10;
+pub const NAS_MONITOR: usize = 2;
+pub const FILES: usize = 3;
+pub const WEATHER: usize = 4;
+pub const GAMES: usize = 5;
+pub const SETTINGS: usize = 6;
+pub const UPDATER: usize = 7;
+pub const TERMINAL: usize = 8;
+pub const TASK_VIEWER: usize = 9;
+pub const CLOCK: usize = 10;
 pub const POWER_LOG: usize = 11;
-pub const WIFI_MAP: usize = 12;
-pub const WEATHER: usize = 13;
-pub const GAMES: usize = 14;
+pub const CALCULATOR: usize = 12;
+pub const WIFI_MAP: usize = 13;
 
 /// What the launcher reacts to.
 ///
@@ -268,7 +266,7 @@ pub enum Message {
     ///
     /// The launcher has no clock of its own to advance: the status bar's minute arrives with the
     /// battery push. This exists for the hosted apps that show something *moving* — the settings
-    /// list's readout, the task viewer's list, the clock's hands and the overview's dashboard — which
+    /// list's readout, the task viewer's list and the clock's hands — which
     /// are told to look at the board again rather than being handed values to draw. None of them is
     /// read while it is not being looked at, and an app that was never opened makes this one match
     /// arm.
@@ -287,8 +285,6 @@ pub enum Message {
     TaskViewer(task_viewer::Message),
     NasMonitor(nas_monitor::Message),
     Clock(clock::Message),
-    /// The overview's own: a tick to look again, or a finger on its one button.
-    Overview(overview::Message),
     /// The file manager's own: a volume, a row, one of its four actions, or a name typed into a prompt.
     Files(files::Message),
     /// The power log's own: the beat that looks at the gauge, or a finger asking for a sample now.
@@ -367,7 +363,7 @@ pub struct Launcher {
     screen: Screen,
     calculator: Option<Calculator>,
     settings: Option<Settings>,
-    /// The updater. Plain `updater` and not `updater_app`, for the overview's reason: nothing else in
+    /// The updater. Plain `updater` and not `updater_app`, for the clock's reason: nothing else in
     /// the launcher is called that.
     updater: Option<Updater>,
     music: Option<Player>,
@@ -378,13 +374,10 @@ pub struct Launcher {
     /// The clock. Named `clock_app` because `clock` is the *status bar's* reading, and the two are
     /// different things: the bar's is a string the platform pushes, and this is the app's own state.
     clock_app: Option<Clock>,
-    /// The overview. Plain `overview` and not `overview_app`, because there is no status bar reading
-    /// called that to be told apart from — the bar has a clock and a battery, and no dashboard.
-    overview: Option<Overview>,
-    /// The file manager. Plain `files` and not `files_app`, for the overview's reason: there is no
+    /// The file manager. Plain `files` and not `files_app`, for the clock's reason: there is no
     /// status bar reading of that name for a suffix to be told apart from.
     files: Option<Files>,
-    /// The power log. Plain `power_log` and not `power_log_app`, for the same reason as the two above:
+    /// The power log. Plain `power_log` and not `power_log_app`, for the same reason as the one above:
     /// nothing else in the launcher is called that.
     power_log: Option<PowerLog>,
     /// The channel map. Plain `wifi_map` and not `wifi_map_app`, for the power log's reason: the
@@ -456,7 +449,6 @@ impl Launcher {
             task_viewer: None,
             nas_monitor: None,
             clock_app: None,
-            overview: None,
             files: None,
             power_log: None,
             wifi_map: None,
@@ -519,9 +511,6 @@ impl Launcher {
             app.set_preferences(prefs);
         }
         if let Some(app) = &mut self.clock_app {
-            app.set_preferences(prefs);
-        }
-        if let Some(app) = &mut self.overview {
             app.set_preferences(prefs);
         }
         if let Some(app) = &mut self.files {
@@ -701,21 +690,6 @@ impl Launcher {
         self.clock_app.as_mut().unwrap()
     }
 
-    /// The overview, which is handed the board like the three apps before it and is the only one that
-    /// reads *all* of it: the gauge, the radio, the two filesystems, the two pools and the machine
-    /// next door are five different backends, and the page is the one place they are asked together.
-    ///
-    /// [`Overview::new`] reads once and then asks the two slow backends — the card in the slot and the
-    /// server — to look again, so opening this page is not a two-second wait for its first frame.
-    pub fn get_or_create_overview(&mut self) -> &mut Overview {
-        if self.overview.is_none() {
-            let mut app = Overview::new(Arc::clone(&self.board));
-            app.set_preferences(self.preferences);
-            self.overview = Some(app);
-        }
-        self.overview.as_mut().unwrap()
-    }
-
     /// The file manager, which is handed the board like the apps before it and is the one that writes
     /// to it: the volumes come from the same storage backend the terminal reads, and the four actions
     /// go back through its `fopen` rather than through `std::fs`.
@@ -828,11 +802,6 @@ impl Launcher {
         self.get_or_create_clock()
     }
 
-    /// The overview app.
-    pub fn overview(&mut self) -> &Overview {
-        self.get_or_create_overview()
-    }
-
     /// The file manager app.
     pub fn files(&mut self) -> &Files {
         self.get_or_create_files()
@@ -907,7 +876,6 @@ impl Launcher {
             TASK_VIEWER => self.task_viewer = None,
             NAS_MONITOR => self.nas_monitor = None,
             CLOCK => self.clock_app = None,
-            OVERVIEW => self.overview = None,
             FILES => self.files = None,
             POWER_LOG => self.power_log = None,
             WIFI_MAP => self.wifi_map = None,
@@ -1097,18 +1065,8 @@ impl Launcher {
         }
     }
 
-    /// The overview. One page and no tabs, so the launcher's own back gesture is the way out, exactly
-    /// as it is for the NAS monitor.
-    fn overview_screen(&self) -> Element<'_, Message> {
-        if let Some(app) = &self.overview {
-            app.view().map(Message::Overview)
-        } else {
-            Space::new().into()
-        }
-    }
-
     /// The file manager. One page and no tabs, so the launcher's own back gesture is the way out, as
-    /// it is for the NAS monitor and the overview.
+    /// it is for the NAS monitor.
     fn files_screen(&self) -> Element<'_, Message> {
         if let Some(app) = &self.files {
             app.view().map(Message::Files)
@@ -1470,9 +1428,6 @@ impl Launcher {
                     CLOCK => {
                         self.get_or_create_clock();
                     }
-                    OVERVIEW => {
-                        self.get_or_create_overview();
-                    }
                     FILES => {
                         self.get_or_create_files();
                     }
@@ -1573,17 +1528,7 @@ impl Launcher {
                     app.update(clock::Message::Tick);
                 }
 
-                // The overview is asked the fourth way, which is the clock's reason with one more
-                // turn on it: it is a dashboard, so the whole board is worth reading exactly while
-                // somebody is looking at the page and never otherwise. Its own subscription is a
-                // window's frames and this board has none, so the beat is handed to it from here —
-                // and the app throws away anything faster than its own sample, which is what keeps
-                // a window's sixty frames a second from being sixty reads of five backends.
-                if let (Screen::App(OVERVIEW), Some(app)) = (self.screen, &mut self.overview) {
-                    app.update(overview::Message::Tick(Instant::now()));
-                }
-
-                // The power log is asked the fifth way, which is the overview's reason with a longer
+                // The power log is asked the fourth way, which is the clock's reason with a longer
                 // horizon on it: it is a curve, so the gauge is worth reading while somebody is looking
                 // at it — and worth writing down once an hour for as long as they do. Its own
                 // subscription is a window's frames and this board has none, so the beat comes from
@@ -1593,7 +1538,7 @@ impl Launcher {
                     app.update(power_log::Message::Tick(Instant::now()));
                 }
 
-                // The channel map is asked the sixth way, and its reason is the first one in this list
+                // The channel map is asked the fifth way, and its reason is the first one in this list
                 // again: a scan is a wait, and this is the beat that ends it on a board whose host
                 // serves no frames. One a second is slow for something that is over in thirty
                 // milliseconds, and it is the whole of what this page needs: what it draws is a
@@ -1602,7 +1547,7 @@ impl Launcher {
                     app.update(wifi_map::Message::Tick(Instant::now()));
                 }
 
-                // The weather page is asked the seventh way, and its reason is the sixth one again: a
+                // The weather page is asked the sixth way, and its reason is the fifth one again: a
                 // request is a wait, and this is the beat that ends it on a board whose host serves no
                 // frames. One a second is the whole of what the page needs — it draws an answer, and a
                 // press of its own button asks for the next one.
@@ -1610,7 +1555,7 @@ impl Launcher {
                     app.update(weather::Message::Tick(Instant::now()));
                 }
 
-                // The games app is asked the eighth way, and it is the odd one here: it is the only
+                // The games app is asked the seventh way, and it is the odd one here: it is the only
                 // app this launcher hands a beat to that has a clock of its own. A snake steps about
                 // ten times a second and this beat is once, so the real clock is the frames the app
                 // subscribes to — see [`Launcher::subscription`], which forwards them while it is the
@@ -1620,7 +1565,7 @@ impl Launcher {
                     app.update(games::Message::Tick(Instant::now()));
                 }
 
-                // The updater is asked the ninth way, and the weather page's reason applies to it
+                // The updater is asked the eighth way, and the weather page's reason applies to it
                 // twice over: both of its rows are waits — a repository's list, and then a download
                 // that takes minutes — and this is the beat that ends them on a board whose host
                 // serves no frames. It is asked only while it *is* the screen, which is the one place
@@ -1652,7 +1597,6 @@ impl Launcher {
             }
             Message::NasMonitor(message) => self.get_or_create_nas_monitor().update(message),
             Message::Clock(message) => self.get_or_create_clock().update(message),
-            Message::Overview(message) => self.get_or_create_overview().update(message),
             Message::Files(message) => self.get_or_create_files().update(message),
             Message::PowerLog(message) => self.get_or_create_power_log().update(message),
             Message::WifiMap(message) => self.get_or_create_wifi_map().update(message),
@@ -2120,7 +2064,6 @@ impl Launcher {
             TASK_VIEWER => self.task_viewer_screen(),
             NAS_MONITOR => self.nas_monitor_screen(),
             CLOCK => self.clock_screen(),
-            OVERVIEW => self.overview_screen(),
             FILES => self.files_screen(),
             POWER_LOG => self.power_log_screen(),
             WIFI_MAP => self.wifi_map_screen(),
@@ -2556,8 +2499,6 @@ mod tests {
         assert_eq!(CATALOGUE[NAS_MONITOR].name, "Server");
         assert_eq!(CATALOGUE[CLOCK].localized_name(Language::Chinese), "时钟");
         assert_eq!(CATALOGUE[CLOCK].name, "Clock");
-        assert_eq!(CATALOGUE[OVERVIEW].localized_name(Language::Chinese), "概览");
-        assert_eq!(CATALOGUE[OVERVIEW].name, "Overview");
         assert_eq!(CATALOGUE[FILES].localized_name(Language::Chinese), "文件管理");
         assert_eq!(CATALOGUE[FILES].name, "Files");
         assert_eq!(CATALOGUE[POWER_LOG].localized_name(Language::Chinese), "电量日志");
@@ -2570,18 +2511,18 @@ mod tests {
         assert_eq!(CATALOGUE[GAMES].name, "Games");
     }
 
-    /// The grid's two pages, in the order they are drawn: the eight the box is for — what it plays,
-    /// what it serves, what it can be told to do, how it is set up, how its own software is replaced,
-    /// and the three that are about the box itself and what is beside it: what it is running, the
-    /// machine next to it, and what is stored on either — then the seven that are not: the one app
-    /// that has nothing to do with the box at all, the time, the box's own dashboard, its battery, the
-    /// air, the sky, and the person holding it.
+    /// The grid's two pages, in the order they are drawn: the eight the first page holds, which is
+    /// the box in use — what it plays, the page it serves, the machine beside it, the files on either,
+    /// then the sky, the person holding it, and the two pages about its own software, the settings and
+    /// the updater — then the six of the second page, which is the box itself: the terminal, what it is
+    /// running, the time it thinks it is, what its battery has been doing, and the two that are only
+    /// ever opened to play with, the calculator and the channel map.
     ///
     /// Written out rather than derived, because the order *is* the interface: a page and a position
     /// are what a finger learns, and a reshuffle that left this test green would be the one kind of
     /// change nobody would notice until they were holding the box. The page boundary is part of that:
-    /// the file manager is on the first page and the calculator is not, which is the trade the two
-    /// of them made when the page ran out of places.
+    /// four to a row and two rows is what the first page holds, and what falls past the eighth tile
+    /// opens the second — which is where the two rows of the second page are the two rows of it.
     #[test]
     fn the_catalogue_is_two_pages_in_the_order_the_grid_shows_them() {
         let names: Vec<&str> = CATALOGUE.iter().map(|entry| entry.name).collect();
@@ -2591,26 +2532,25 @@ mod tests {
             [
                 "Music",
                 "Web Manager",
-                "Terminal",
-                "Settings",
-                "Update",
-                "Tasks",
                 "Server",
                 "Files",
-                "Calculator",
-                "Clock",
-                "Overview",
-                "Power Log",
-                "Wi-Fi Map",
                 "Weather",
-                "Games"
+                "Games",
+                "Settings",
+                "Update",
+                "Terminal",
+                "Tasks",
+                "Clock",
+                "Power Log",
+                "Calculator",
+                "Wi-Fi Map"
             ]
         );
-        assert_eq!(CATALOGUE.len(), 15, "and the fifteen are all the tiles there are");
+        assert_eq!(CATALOGUE.len(), 14, "and the fourteen are all the tiles there are");
         assert_eq!(
             Launcher::new(Arc::new(Board::simulated())).pages(),
             2,
-            "eight and seven"
+            "eight and six"
         );
     }
 
@@ -3454,7 +3394,6 @@ mod tests {
         assert!(launcher.terminal.is_none());
         assert!(launcher.web_manager.is_none());
         assert!(launcher.clock_app.is_none());
-        assert!(launcher.overview.is_none());
         assert!(launcher.files.is_none());
         assert!(launcher.power_log.is_none());
 
@@ -3466,7 +3405,6 @@ mod tests {
         assert!(launcher.terminal.is_none());
         assert!(launcher.web_manager.is_none());
         assert!(launcher.clock_app.is_none());
-        assert!(launcher.overview.is_none());
         assert!(launcher.files.is_none());
         assert!(launcher.power_log.is_none());
 
@@ -3501,49 +3439,8 @@ mod tests {
         assert!(launcher.clock_app.is_none(), "killing frees it");
     }
 
-    /// The overview is the app that reads *all* of the board, and it is the one whose first frame is
-    /// worth watching: opened on demand, kept while backgrounded, freed on exit — and the same five
-    /// readings the page shows are the ones the launcher's pump keeps fresh while it is up.
-    #[test]
-    fn the_overview_is_loaded_on_demand_and_freed_on_kill() {
-        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
-
-        assert!(launcher.overview.is_none());
-
-        launcher.update(Message::Open(OVERVIEW));
-        assert!(launcher.overview.is_some());
-        assert_eq!(launcher.screen, Screen::App(OVERVIEW));
-        assert!(
-            launcher.overview().readings().battery.is_some(),
-            "opening it reads the board rather than waiting for the first tick"
-        );
-
-        // The pump reaches the app only while it is the app that is up.
-        launcher.update(Message::Back);
-        assert_eq!(launcher.screen, Screen::Grid);
-        assert!(launcher.overview.is_some(), "backgrounding keeps it");
-
-        launcher.update(Message::Exit);
-        assert!(launcher.overview.is_none(), "killing frees it");
-    }
-
-    /// The overview's own message goes to the overview, and only to it: the launcher is a router for
-    /// fourteen apps and the wrong one of them reacting is the one bug a router can have.
-    #[test]
-    fn the_overviews_messages_reach_the_overview() {
-        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
-
-        launcher.update(Message::Overview(overview::Message::CheckAgain));
-
-        assert!(launcher.overview.is_some(), "which creates it if it was not up");
-        assert!(
-            launcher.overview().looking(),
-            "and the app is the one that handled it"
-        );
-    }
-
     /// The file manager is loaded on demand like the rest, kept while it is only backgrounded, and
-    /// freed on exit — the same life the overview has, and the one that matters here because a
+    /// freed on exit — the same life the clock has, and the one that matters here because a
     /// browsing session is a working directory the person expects to come back to.
     #[test]
     fn the_files_app_is_loaded_on_demand_and_freed_on_kill() {

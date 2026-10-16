@@ -3,7 +3,8 @@
 //!
 //! # What the page is for
 //!
-//! Every other page on this box reads the battery *now* — the status bar's icon, the overview's card.
+//! Every other page on this box reads the battery *now* — the status bar's icon, the settings page's
+//! battery card.
 //! This is the page that reads it *over time*, and it exists because the three questions people
 //! actually ask about a battery are all about a shape rather than a number. "Is it going down?" is a
 //! slope. "How long have I got?" is that slope carried forward. "Is something wrong with it?" is a
@@ -320,7 +321,7 @@ impl PowerLog {
     ///
     /// Each backend is asked once and its lock released before the next is taken: the power backend is
     /// one lock taken four times rather than four locks held at once, which is what keeps this from
-    /// being the deadlock the overview's first draft was.
+    /// being the deadlock this page's own first draft was.
     fn look(&self) -> Option<Sample> {
         let percent = self.board.power().battery_percent().ok()?;
         let charging = self.board.power().is_charging().unwrap_or(false);

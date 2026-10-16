@@ -98,7 +98,6 @@ dependencies = [
  "image",
  "music-player",
  "nas-monitor",
- "overview",
  "pomelo-hal",
  "pomelo-material-symbols",
  "pomelo-widgets",
@@ -2251,17 +2250,6 @@ checksum = "5df339f526ea9a60e371768d50efc2f2508c7203290731565d1f7a6f71d21747"
 dependencies = [
  "libc",
  "libredox",
-]
-
-[[package]]
-name = "overview"
-version = "0.1.0"
-dependencies = [
- "iced",
- "iced_test",
- "pomelo-hal",
- "pomelo-material-symbols",
- "pomelo-widgets",
 ]
 
 [[package]]
