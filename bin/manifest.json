@@ -1,0 +1,15 @@
+{
+  "generated": "2026-10-16T02:28:52Z",
+  "firmware": {
+    "version": "v0.9.0-20261016",
+    "file": "hivebox-firmware-v0.9.0-20261016.bin",
+    "size": 6031584,
+    "sha256": "41475e3e3838c745e1c5e445f58834051e1b23341520b8ed601c36be0d13162b"
+  },
+  "font": {
+    "version": "v1",
+    "file": "hivebox-font-24px-v1.bin",
+    "size": 239637,
+    "sha256": "3fecf55124121811a6d33f00bffea987c99bfd40db1244c118b0a1918efedd98"
+  }
+}
