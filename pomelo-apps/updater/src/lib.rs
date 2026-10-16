@@ -40,14 +40,15 @@
 //! names is the font the interface is drawn with, because both are asking the one question of the one
 //! scan.
 //!
-//! # The glyph table downloads; the image does not yet
+//! # Both rows download, and neither download passes through here
 //!
-//! The two rows' presses are not the same size. A table is a file on a card, so fetching one is
-//! [`HttpBackend::start_to`] with a [`Sink::File`] — the bytes go to the card as they arrive and are
-//! never on this side of the network stack, which is what makes a quarter megabyte a thing this board
-//! can take. An image is a *flash write*, into the app slot it is not running from, and that is a
-//! backend [`HttpBackend`] is not: [`Status::Unsupported(Kind::Firmware)`](Status::Unsupported) is what
-//! that row's press draws until it exists.
+//! The two rows' presses are the same size of thing and go to two different places, which is the whole
+//! of what [`Sink`] is for. A table is a file on a card, so fetching one is [`HttpBackend::start_to`]
+//! with a [`Sink::File`] — the bytes go to the card as they arrive and are never on this side of the
+//! network stack, which is what makes a quarter megabyte a thing this board can take. An image is a
+//! *flash write* into the app slot this image is not running from, so the same call goes out with a
+//! [`Sink::Ota`] and five megabytes go into the slot without a copy in RAM. Which slot that is, and
+//! what makes one bootable, is the backend's business and not this page's: see [`Sink::Ota`].
 //!
 //! A press on the table's row can be *two* requests, because a font that covers more than the image's
 //! subset is two files: the wider face, and the table baked from it. They are one install and not two —
@@ -142,19 +143,21 @@ pub enum Status {
     Failed(HttpFault),
     /// Something answered, and it was not a manifest this page could read.
     Unreadable,
-    /// A button was pressed that this image cannot honour yet: the OTA write is what this page is
-    /// waiting on, and until it exists the honest drawing of that press is the sentence that says so
-    /// rather than a progress bar that never moves. Also the glyph table's press on a box with no card,
-    /// which is a refusal about the *box* rather than about the code — see [`Words::unsupported_line`].
+    /// A button was pressed that this box cannot honour, and the reason is the box rather than the code:
+    /// a glyph table with no card to write it to, which is the one press left that cannot be answered.
+    /// The sentence says which card and why — see [`Words::no_card`].
     Unsupported(Kind),
     /// A download is out, and [`Updater::download`] is how far along it is.
     Downloading(Kind),
-    /// A download finished and the file it wrote is where the interface will read it.
+    /// A download finished and what it wrote is where it was asked to go, with the version this page can
+    /// name it by.
     ///
     /// Not the same as [`Status::Answered`], which is what the rows look like once a *check* has
-    /// answered: this is a press that changed something, and the rows have been re-read since, so the
-    /// version in the row is the one that just landed.
-    Installed(Kind),
+    /// answered: this is a press that changed something. The version is read *after* the write and not
+    /// kept from the press — off the card for a table, and out of the manifest for an image, whose slot
+    /// is the one thing on this board that the running code cannot ask what version it holds. See
+    /// [`Updater::landed`].
+    Installed(Kind, Version),
     /// A download did not become an install, and this is why.
     DownloadFailed(Kind, DownloadFault),
 }
@@ -192,13 +195,26 @@ pub struct Download {
     /// one's address is the manifest's answer about a name that is not this one — see
     /// [`Updater::install_font`].
     pub(crate) url: String,
-    /// The file's name on the repository — what the prompt says is being fetched. Not the path, which
-    /// is [`FONT_DIR`] plus this and is nobody's business but the write's.
+    /// The file's name on the repository — what the prompt says is being fetched. Not where it goes: a
+    /// table's path is [`FONT_DIR`] plus this and is nobody's business but the write's, and an image has
+    /// no name where it goes at all.
     pub(crate) file: String,
-    /// Where the bytes are going, kept so that the finished size can be read off the card.
-    pub(crate) path: String,
-    /// How many bytes the manifest said the file is; `0` when it did not say, in which case the
-    /// finished size is not checked against anything.
+    /// Where the bytes are going. Kept for two reasons and not one: a failure has to be able to name
+    /// what it leaves behind — see [`discard`] — and the measure taken when a download finishes is a
+    /// *file's* measure, because a file is the one of the two that can be looked at afterwards. See
+    /// [`Updater::finish_download`].
+    pub(crate) sink: Sink,
+    /// The version this file's *name* carries, read once, here.
+    ///
+    /// The one thing that can name what landed when nothing can be read back: a table is re-read off the
+    /// card when it arrives, and an image cannot be, because it is in the slot the *boot* is not using
+    /// and the running code has no way to ask that slot anything. The name is the same name the manifest's
+    /// version was read from in the first place — see [`Release::of`] — so the two cannot disagree about
+    /// which release this is.
+    pub(crate) version: Option<Version>,
+    /// How many bytes the manifest said the file is; `0` when it did not say. The bar's first
+    /// denominator, and — for a table — the length the landed file is held up against. Neither applies
+    /// to an image, whose slot cannot be measured from here; see [`Updater::finish_download`].
     pub(crate) expected: u64,
     /// How many have arrived so far.
     pub(crate) received: u64,
@@ -225,10 +241,32 @@ impl Download {
     /// the name on the repository is the name the card gets, and a manifest that named a path would put
     /// a table somewhere the interface does not scan. See [`FONT_DIR`].
     pub(crate) fn of(url: &str, file: &str, dir: &str, size: u64, next: Option<Box<Download>>) -> Self {
+        Self::aimed(
+            url,
+            file,
+            Sink::File(format!("{}/{}", dir.trim_end_matches('/'), file)),
+            size,
+            next,
+        )
+    }
+
+    /// One image of a press: the same three names, with the card swapped for the app slot this image is
+    /// not running from.
+    ///
+    /// No directory, because where an image goes is not a path this page has any say in — see
+    /// [`Sink::Ota`] — and no [`Download::next`], because an image is one file: a release is one
+    /// artifact and there is no second half that could be left behind by a press abandoned between two.
+    pub(crate) fn to_slot(url: &str, file: &str, size: u64) -> Self {
+        Self::aimed(url, file, Sink::Ota, size, None)
+    }
+
+    /// The one constructor the two above are: three names, a size, and the list behind it.
+    fn aimed(url: &str, file: &str, sink: Sink, size: u64, next: Option<Box<Download>>) -> Self {
         Self {
             url: url.to_string(),
             file: file.to_string(),
-            path: format!("{}/{}", dir.trim_end_matches('/'), file),
+            sink,
+            version: Version::from_file_name(file),
             expected: size,
             received: 0,
             // The manifest's size to begin with, so that the bar has an end before the server's headers
@@ -329,8 +367,12 @@ pub(crate) fn size_text(bytes: u64) -> String {
 ///
 /// A file that is not there is not a fault. The device's client removes its own half-written file, so
 /// there are two ends that may have got there first, and the one that arrives second has nothing to do.
-fn discard(path: Option<&str>) {
-    let Some(path) = path else { return };
+///
+/// A *slot* is nothing this function could remove even if it wanted to: the client that wrote it drops a
+/// partial image itself — the boot partition is only moved by a write that finished, so what is left in a
+/// slot after a failure is bytes nobody starts from. See [`Sink::Ota`].
+fn discard(sink: Option<&Sink>) {
+    let Some(Sink::File(path)) = sink else { return };
 
     if let Err(error) = std::fs::remove_file(path) {
         if error.kind() != std::io::ErrorKind::NotFound {
@@ -585,10 +627,16 @@ impl Updater {
     ///
     /// The request coming back is not the same as the file being there, and so there are three things
     /// to check rather than one. A `404` is an answer, and its body is a page — which lands in the file
-    /// as readily as a table does, and would then be the newest table the interface read. And the size:
-    /// the C side refuses to leave a half-written file behind, so a short file here would mean the two
-    /// ends disagree about which file this is, which is worth saying rather than discovering as a table
-    /// the interface draws half of.
+    /// as readily as a table does, and would then be the newest table the interface read. And the size,
+    /// for a *table*: the C side refuses to leave a half-written file behind, so a short file here would
+    /// mean the two ends disagree about which file this is, which is worth saying rather than
+    /// discovering as a table the interface draws half of.
+    ///
+    /// An image is not measured, and that is a difference in the *write* rather than a thing left
+    /// undone: a slot is not a place this side can look into, and it does not need to be, because the
+    /// write that filled it verified the body whole before it pointed the boot at it — see [`Sink::Ota`].
+    /// A body that is not a whole image is a *failed* request and not a short download, which is how it
+    /// arrives here and how it is drawn.
     ///
     /// Every way this can fail ends the same way — [`discard`] — because the file is the thing that
     /// makes the failure dangerous and not the status: see that function.
@@ -601,51 +649,86 @@ impl Updater {
     fn finish_download(&mut self, answer: Result<pomelo_hal::HttpResponse, HalError>) {
         let kind = self.downloading_kind();
         let download = self.download.take();
-        let path = download.as_ref().map(|download| download.path.clone());
+        let sink = download.as_ref().map(|download| download.sink.clone());
+        let version = download
+            .as_ref()
+            .and_then(|download| download.version.clone());
 
         self.status = match answer {
             Ok(response) if response.ok() => {
-                let written = path
-                    .as_deref()
-                    .and_then(|path| std::fs::metadata(path).ok())
-                    .map(|meta| meta.len());
+                // Only a file can be held up against the manifest's size, and `None` here is not "no
+                // check happened" but "this is not a thing size is the question for": a slot is filled
+                // by a write that already refused anything short of a whole image.
+                let written = match &sink {
+                    Some(Sink::File(path)) => std::fs::metadata(path).ok().map(|meta| meta.len()),
+                    _ => None,
+                };
                 let expected = download.as_ref().map(|it| it.expected).unwrap_or(0);
 
                 match written {
                     Some(written) if expected != 0 && written != expected => {
-                        discard(path.as_deref());
+                        discard(sink.as_ref());
 
                         Status::DownloadFailed(kind, DownloadFault::Incomplete)
                     }
                     _ => match download.and_then(|download| download.next) {
-                        Some(next) => self.start_half(*next, kind),
-                        None => {
-                            // Re-read, so that the row's version is the one that just landed rather
-                            // than the one the last check found. This is the whole reason the page can
-                            // say "updated" without keeping a version of its own: the card is the
-                            // record.
-                            let installed = read_installed(&self.board, &self.font_dir);
-                            self.installed = installed;
-
-                            Status::Installed(kind)
-                        }
+                        Some(next) => self.start_install(*next, kind),
+                        None => self.landed(kind, version),
                     },
                 }
             }
             Ok(_) => {
-                discard(path.as_deref());
+                discard(sink.as_ref());
 
                 Status::DownloadFailed(kind, DownloadFault::NotFound)
             }
             Err(_) => {
-                discard(path.as_deref());
+                discard(sink.as_ref());
 
                 Status::DownloadFailed(kind, DownloadFault::Http(HttpFault::Unreachable))
             }
         };
     }
 
-    /// Starts the file that follows one that landed, and answers what the page is drawing now.
+    /// What the box holds now, as this page can read it, after a write that landed: the version to name
+    /// the install by, or the failure that says there is nothing to name.
+    ///
+    /// The one place the two rows stop looking alike, and the reason is where the write went. A table is
+    /// on the card in front of this page, so its version is *re-read* — by the same scan the row uses, so
+    /// that the sentence and the row cannot disagree about which font the box has. An image is not on the
+    /// card and not in the running image either: it is in the slot the *boot* is not using, and nothing
+    /// this side of a reset can read a version out of that. What can name it is the manifest it came
+    /// from, which is where [`Download::version`] was read, and the release named there is the one the
+    /// row was offering.
+    ///
+    /// The third case is a table that landed and cannot be read back: nothing was installed and this page
+    /// will not claim otherwise — the nearest true sentence is the one about a write that did not take,
+    /// and it is drawn from [`Status::DownloadFailed`] rather than from here.
+    fn landed(&mut self, kind: Kind, version: Option<Version>) -> Status {
+        // Re-read, so that the row's version is the one that just landed rather than the one the last
+        // check found. This is the whole reason the page can say "updated" without keeping a version of
+        // its own: the card is the record.
+        self.installed = read_installed(&self.board, &self.font_dir);
+
+        let landed = match kind {
+            Kind::Font => self.installed_version(Kind::Font).cloned(),
+            Kind::Firmware => version,
+        };
+
+        match landed {
+            Some(version) => Status::Installed(kind, version),
+            None => Status::DownloadFailed(kind, DownloadFault::Http(HttpFault::Storage)),
+        }
+    }
+
+    /// Asks for the first file of a press, and answers what the page is drawing now.
+    ///
+    /// Used for both rows and for the second half of a package, because the three ways this ends are the
+    /// same three: the request got away; a request is already out, which is the check that found this
+    /// offer — see [`Updater::check`] — so there is nothing to draw, because that answer is the one the
+    /// press was waiting for; or the URL could not be asked for at all, which is a fault of the
+    /// manifest's own contents rather than of the network. There is no fault in the list for "the file it
+    /// named is not fetchable", and the nearest true thing is that nothing answerable was reached.
     ///
     /// A press of two files is *one* install to a person, so the status stays [`Status::Downloading`] and
     /// the bar goes on where it was: a prompt that blinked between the two halves would read as two
@@ -653,22 +736,18 @@ impl Updater {
     /// doing now". What is thrown away is the reading of the request that just ended, because the next
     /// one's progress has not been read yet; the new [`Download`] starts its bar at nothing, which is
     /// where the file it is about is.
-    ///
-    /// A request that does not get away is a press that failed: there is no fault in the list for "the
-    /// second file could not be asked for", and the nearest true thing is the same one a first half that
-    /// could not be asked for gets — nothing answerable was reached. The half that landed is a real file
-    /// and stays, where it changes nothing until its table is there.
-    fn start_half(&mut self, half: Download, kind: Kind) -> Status {
+    fn start_install(&mut self, download: Download, kind: Kind) -> Status {
         match self
             .board
             .http()
-            .start_to(&half.url, Sink::File(half.path.clone()))
+            .start_to(&download.url, download.sink.clone())
         {
             Ok(()) => {
-                self.download = Some(half);
+                self.download = Some(download);
 
                 Status::Downloading(kind)
             }
+            Err(HalError::Busy) => Status::Checking,
             Err(_) => Status::DownloadFailed(kind, DownloadFault::Http(HttpFault::Unreachable)),
         }
     }
@@ -694,12 +773,13 @@ impl Updater {
 
     /// A press on one of the two buttons.
     ///
-    /// The two rows' presses are not the same size, and this is where that is decided: a table is a file
-    /// on a card and the request to fetch one is a request this board already makes, while an image is a
-    /// flash write and the backend for that is still the thing this page is waiting on.
+    /// The two presses fetch the same kind of thing and put it in two different places, and the
+    /// questions they can be asked are not quite the same: a table has a card to be asked about and an
+    /// image has a slot that nobody here can ask about. See [`Updater::install_font`] and
+    /// [`Updater::install_firmware`].
     fn install(&mut self, kind: Kind) {
         match kind {
-            Kind::Firmware => self.status = Status::Unsupported(Kind::Firmware),
+            Kind::Firmware => self.install_firmware(),
             Kind::Font => self.install_font(),
         }
     }
@@ -767,28 +847,35 @@ impl Updater {
             None => table,
         };
 
-        match self
-            .board
-            .http()
-            .start_to(&download.url, Sink::File(download.path.clone()))
-        {
-            Ok(()) => {
-                self.download = Some(download);
-                self.status = Status::Downloading(Kind::Font);
-            }
-            // One request at a time, and the one in flight is the check that found this offer: nothing
-            // to draw, because that answer is the one this press was waiting for.
-            Err(HalError::Busy) => self.status = Status::Checking,
-            // An URL this board cannot fetch is a fault of the manifest's own contents rather than of
-            // the network, and there is no fault in the list for "the file it named is not fetchable".
-            // The nearest true thing to say is that nothing answerable was reached.
-            Err(_) => {
-                self.status = Status::DownloadFailed(
-                    Kind::Font,
-                    DownloadFault::Http(HttpFault::Unreachable),
-                )
-            }
-        }
+        self.status = self.start_install(download, Kind::Font);
+    }
+
+    /// Starts the image's download, or says why it did not start.
+    ///
+    /// Two questions rather than the table's three, because the answer this page cannot ask about an
+    /// image is the card's: an update goes into the flash, and a box with no card in it can still take
+    /// one. The questions left are whether there is something to fetch — no means this press raced the
+    /// check, so ask again — and whether the request got away. The *slot* is not a question either: which
+    /// one an update goes into belongs to the backend, and whether it has room is the write's own answer
+    /// to give — see [`Sink::Ota`], and [`DownloadFault::Http`], which is where a slot without room ends
+    /// up.
+    fn install_firmware(&mut self) {
+        // Taken out of the borrow before anything can make one: the arms below start a request, and a
+        // `Release` borrowed from `self` would be a borrow held across that.
+        let offer = self.offer(Kind::Firmware).cloned();
+        let Some(release) = offer else {
+            // The row's button is only drawn beside an offer, so a press that arrives here is one that
+            // raced the check — or a row whose offer the last answer withdrew. Asking again is what a
+            // person who pressed it wanted, and it is one request on a button that is already there.
+            self.check();
+
+            return;
+        };
+
+        // One file, and no directory to make: an image is not written anywhere this page can name.
+        let download = Download::to_slot(&release.url(), &release.file, release.size);
+
+        self.status = self.start_install(download, Kind::Firmware);
     }
 
     /// Resets the box, which is what the second button on an install's prompt asks for.
@@ -860,7 +947,10 @@ impl Updater {
         match &self.status {
             Status::Unsupported(kind) => {
                 prompt.title = words.name(*kind);
-                prompt.line = words.unsupported_line(*kind, self.card).to_string();
+                // The one press this box cannot honour, and the sentence says which card and why rather
+                // than that the feature is missing: a box with no card is a box this page cannot put a
+                // table in, and the card is the thing the person can do something about.
+                prompt.line = words.no_card.to_string();
             }
             Status::Downloading(kind) => {
                 prompt.title = words.name(*kind);
@@ -873,28 +963,19 @@ impl Updater {
                     prompt.bytes = download.bytes_line();
                 }
             }
-            Status::Installed(kind) => {
+            Status::Installed(kind, version) => {
                 prompt.title = words.name(*kind);
-
-                match self.installed_version(*kind) {
-                    // The version is on the box and not yet in use, so the report is also a question:
-                    // restart now, or later. The page's only second button, and the only place where
-                    // what a person does *next* is one of two things rather than one.
-                    Some(version) => {
-                        prompt.line = words.installed_ok_line(*kind, version);
-                        prompt.button = words.later;
-                        prompt.confirm = Some(words.restart);
-                    }
-                    // The file landed and the *scan* did not find it, so there is no version to name.
-                    // Nothing was installed and this page will not claim otherwise: the nearest true
-                    // sentence is the one about a write that did not take — and there is nothing to
-                    // restart *into*, so no second button either.
-                    None => prompt.line = words.fault_line(HttpFault::Storage).to_string(),
-                }
+                // The version is on the box and not yet in use — which is the same thing as saying it is
+                // waiting for a reset, for both rows — so the report is also a question: restart now, or
+                // later. The page's only second button, and the only place where what a person does
+                // *next* is one of two things rather than one.
+                prompt.line = words.installed_ok_line(*kind, version);
+                prompt.button = words.later;
+                prompt.confirm = Some(words.restart);
             }
             Status::DownloadFailed(kind, fault) => {
                 prompt.title = words.name(*kind);
-                prompt.line = words.download_fault_line(*fault).to_string();
+                prompt.line = words.download_fault_line(*kind, *fault).to_string();
             }
             Status::Idle
             | Status::Checking
@@ -1122,7 +1203,9 @@ pub(crate) struct Words {
     pub(crate) available: &'static str,
     pub(crate) install: &'static str,
     pub(crate) unreadable: &'static str,
-    pub(crate) unsupported: &'static str,
+    /// The one press this box cannot honour: a glyph table with no card to put it on. The last word in
+    /// the table that is about the *box* rather than about a request — and now the only one, since both
+    /// rows' presses are wired to a download.
     pub(crate) no_card: &'static str,
     /// A download on its way. The sentence above the bar, and the only thing the page says while one is
     /// out that is not a number.
@@ -1160,7 +1243,6 @@ impl Words {
                 available: "可更新到",
                 install: "下载并安装",
                 unreadable: "仓库没有可读的版本清单，稍后再试。",
-                unsupported: "这一步还没接通：新固件要写进第二个分区，新字库要写进 SD 卡。",
                 no_card: "字库更新需要 SD 卡：内置 flash 装不下。",
                 downloading: "正在下载…",
                 close: "关闭",
@@ -1184,7 +1266,6 @@ impl Words {
                 available: "Update to",
                 install: "Download and install",
                 unreadable: "The repository has no manifest this page can read. Try again later.",
-                unsupported: "This step is not wired up yet: a new firmware needs a second app slot, and a new glyph table needs the card.",
                 no_card: "A glyph table needs the SD card: the internal flash cannot hold one beside the images.",
                 downloading: "Downloading…",
                 close: "Close",
@@ -1220,28 +1301,14 @@ impl Words {
         format!("{} {}", self.available, release.version.text())
     }
 
-    /// The sentence for a press this image cannot honour: why it did nothing, and what it would take.
-    ///
-    /// The glyph table's press has two answers and the image's has one, because the two rows are
-    /// waiting on two different things. A new image is waiting on a second app slot, which is on the
-    /// flash whether a card is in the box or not — so there is nothing else to say. A new table is
-    /// waiting on a write that does not exist *and* on a place to put the file, and which of those a
-    /// person is told is [`Words::no_card`]'s question and not this one's: a box with no card has
-    /// nowhere to put a table even once the write is built, and a box with one is only ever waiting
-    /// on the code.
-    pub(crate) fn unsupported_line(&self, kind: Kind, card: bool) -> &'static str {
-        match (kind, card) {
-            (Kind::Font, false) => self.no_card,
-            _ => self.unsupported,
-        }
-    }
-
     /// What a download that finished says: which version is on the box now, and what it takes to use it.
     ///
-    /// The version is the row's own re-read and not a number kept from the press, so this sentence
-    /// cannot say a version the card does not have — and the second half is not decoration: the
-    /// interface draws from the table the *boot* loaded, so a table that just landed is one the box has
-    /// and is not yet one it is using.
+    /// The version is one the page read *after* the write and not a number kept from the press, so this
+    /// sentence cannot say a version the box does not have — off the card for a table, and out of the
+    /// manifest for an image, whose version is in the slot the boot is not using. The second half is not
+    /// decoration either, and it is the same second half for both rows for the same reason: the interface
+    /// draws from the table the *boot* loaded and runs the image the *boot* loaded, so what just landed
+    /// is something the box has and is not yet something it is using.
     pub(crate) fn installed_ok_line(&self, kind: Kind, version: &Version) -> String {
         let (name, version) = (self.name(kind), version.text());
 
@@ -1258,17 +1325,31 @@ impl Words {
     /// did everything right and a file that is not there, and a short file is a request that came back
     /// whole as far as the socket is concerned. Telling them with [`Words::fault_line`] would send a
     /// person to look at the network for a file the repository does not have.
-    pub(crate) fn download_fault_line(&self, fault: DownloadFault) -> &'static str {
-        match (fault, self.chinese) {
-            (DownloadFault::Http(fault), _) => self.fault_line(fault),
-            (DownloadFault::NotFound, false) => {
+    ///
+    /// The kind is here for one word only, and it is the one where the two rows' writes have nothing in
+    /// common: "there was no room / it would not take" is a question about the card for a table and about
+    /// the app slot for an image, and a person sent to look at the wrong one of those cannot fix it.
+    /// Every other fault is the same sentence whichever row it is under, because every other fault
+    /// happened on the way *to* the board and not at the place it was going.
+    pub(crate) fn download_fault_line(&self, kind: Kind, fault: DownloadFault) -> &'static str {
+        match (fault, kind, self.chinese) {
+            (DownloadFault::Http(HttpFault::Storage), Kind::Firmware, false) => {
+                "The image would not go into the second app slot — try again, or flash it over USB."
+            }
+            (DownloadFault::Http(HttpFault::Storage), Kind::Firmware, true) => {
+                "新镜像没能写进第二个分区，请重试，或用 USB 线刷机。"
+            }
+            (DownloadFault::Http(fault), _, _) => self.fault_line(fault),
+            (DownloadFault::NotFound, _, false) => {
                 "The repository has no such file — it may not be published yet."
             }
-            (DownloadFault::NotFound, true) => "仓库上没有这个文件，可能还没有发布。",
-            (DownloadFault::Incomplete, false) => {
+            (DownloadFault::NotFound, _, true) => "仓库上没有这个文件，可能还没有发布。",
+            (DownloadFault::Incomplete, _, false) => {
                 "The file did not arrive whole, so it was not kept. Try again."
             }
-            (DownloadFault::Incomplete, true) => "文件没有完整下载，已经放弃这次更新，请重试。",
+            (DownloadFault::Incomplete, _, true) => {
+                "文件没有完整下载，已经放弃这次更新，请重试。"
+            }
         }
     }
 

@@ -57,6 +57,11 @@ static volatile uint32_t s_te_count = 0;
 static bool s_te_active = false;
 static int64_t s_last_frame_start_us = 0;
 static bool s_display_active = false;
+/* Whether this image has told the bootloader it came up, so that an over-the-air update is no longer
+ * on probation. A flag of its own rather than `s_display_active`: that one is also what the idle
+ * sleep and the page's power control drive, so a frame arriving after a wake would find it already
+ * true and the confirmation would never be sent. See `board_hal_confirm_boot()`. */
+static bool s_boot_confirmed = false;
 /* Panel brightness, 0-255. Remembered so that waking the display does not silently slam it back to
  * full, and so a page can read back what it set. */
 static uint8_t s_brightness = 255;
@@ -709,6 +714,16 @@ void hal_display_draw_bitmap(int32_t x1, int32_t y1, int32_t x2, int32_t y2, con
         esp_lcd_panel_io_tx_param(s_io_handle, lcd_cmd, &s_brightness, 1);
         s_display_active = true;
         ESP_LOGI(TAG, "AMOLED display output enabled on first frame.");
+    }
+
+    // A frame is on the glass, so the box is up: this is where an image that arrived over the air
+    // stops being on probation. Everything an update can break has run by now — the board comes up,
+    // the fonts behind the text are where they should be, the renderer draws, and the panel takes the
+    // frame — and an image that died anywhere earlier never reaches this line, which is exactly what
+    // makes it a rollback. Once per boot; see `board_hal_confirm_boot()`.
+    if (!s_boot_confirmed) {
+        s_boot_confirmed = true;
+        board_hal_confirm_boot();
     }
 }
 

@@ -19,8 +19,8 @@
 //!
 //! # The version is in the file name
 //!
-//! `hivebox-firmware-v0.7.0.bin`, `hivebox-font-24px-v1.bin`: a file name that says what is inside it is
-//! a file a person can read off a directory listing, and it is what makes the check a *comparison*
+//! `hivebox-ota-v0.7.0.bin`, `hivebox-font-24px-v1.bin`: a file name that says what is inside it is a
+//! file a person can read off a directory listing, and it is what makes the check a *comparison*
 //! rather than a download — the page decides whether it wants the file before it asks for a byte of it.
 //! [`Version::from_file_name`] is that read, and [`Manifest::parse`] prefers it to any separate
 //! `"version"` field, so that the name on the repository's own page and the version this box compares

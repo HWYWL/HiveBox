@@ -38,8 +38,8 @@ pub trait HttpBackend: Send + Sync {
     /// Returns at once; the answer arrives when it arrives. This is the whole of a *document* — a
     /// forecast, a manifest, a page of JSON — and the bound that goes with it is
     /// [`HttpResponse::MAX_BODY_BYTES`][crate::types::HttpResponse::MAX_BODY_BYTES], with an answer
-    /// over it reported as [`HttpFault::TooLarge`][crate::types::HttpFault::TooLarge]. A *file* is
-    /// megabytes and goes to [`HttpBackend::start_to`] instead.
+    /// over it reported as [`HttpFault::TooLarge`][crate::types::HttpFault::TooLarge]. Anything that
+    /// is megabytes — a file, an image — goes to [`HttpBackend::start_to`] instead.
     fn start(&mut self, url: &str) -> Result<(), HalError> {
         self.start_to(url, Sink::Memory)
     }
@@ -48,18 +48,19 @@ pub trait HttpBackend: Send + Sync {
     ///
     /// The general form of [`HttpBackend::start`], which is this with
     /// [`Sink::Memory`][crate::types::Sink::Memory]. The sink is worth its own parameter because the
-    /// two answers are not the same kind of thing: the buffer is bounded and a file is not, and only
-    /// the caller knows which it asked for.
+    /// answers are not the same kind of thing: the buffer is bounded and a file is not, and only the
+    /// caller knows which it asked for.
     ///
     /// The URL *is* the request: this is a `GET`, and the schemes it accepts are `http` and `https`.
     /// A request with a body or a method of its own is not needed by anything on this board yet, and
     /// a parameter carrying both would be a parameter every implementation has to look at to find
     /// out it is empty.
     ///
-    /// A [`Sink::File`][crate::types::Sink::File] answer is *not* in the [`HttpResponse`] that
-    /// [`HttpBackend::take_result`] hands over — that one's body is empty — but in the file the sink
-    /// named, whose length is the answer's length. Remembering the sink between the two calls is the
-    /// caller's job, and it is the only thing that says where to look.
+    /// A [`Sink::File`][crate::types::Sink::File] or [`Sink::Ota`][crate::types::Sink::Ota] answer
+    /// is *not* in the [`HttpResponse`] that [`HttpBackend::take_result`] hands over — that one's body
+    /// is empty — but where the sink put it: a file whose length is the answer's length, or a slot
+    /// the box is now set to start from. Remembering the sink between the two calls is the caller's
+    /// job, and it is the only thing that says where to look.
     ///
     /// [`HalError::Busy`] while a request is already in flight, and [`HalError::InvalidArg`] for
     /// something that is not an URL this backend can fetch, or a sink it cannot use. Neither is a
@@ -84,11 +85,11 @@ pub trait HttpBackend: Send + Sync {
     /// says so through [`HttpBackend::state`], and has no result to hand over.
     fn take_result(&mut self) -> Result<HttpResponse, HalError>;
 
-    /// How far a [`Sink::File`] request has got, or `None` when there is none to read.
+    /// How far a request that is going somewhere has got, or `None` when there is none to read.
     ///
     /// Cheap, like [`HttpBackend::state`], and asked once a frame by the page that is waiting: a
     /// minute of downloading is a minute somebody is watching, and the only thing that says the box
-    /// has not hung is a number that moves. `None` before a file request has been made, and again
+    /// has not hung is a number that moves. `None` before such a request has been made, and again
     /// once its answer has been taken or cancelled — including the frames a *buffer* request is
     /// running, whose progress is real but is not a bar anybody draws.
     ///

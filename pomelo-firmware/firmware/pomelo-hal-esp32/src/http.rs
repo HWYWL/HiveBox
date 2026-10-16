@@ -11,6 +11,12 @@
 //! it to the path with `fopen` as the bytes arrive, and hands back a NULL body. The length is still
 //! the answer's, and the file is the only place its bytes are.
 //!
+//! A [`Sink::Ota`] request is the other: `esp_ota_write` takes the bytes into the app slot this image
+//! is not running from, and the NULL body that comes back is the same shape. The one thing this side
+//! has to know about it is that it is not asked for by a *path* — which partition is `esp_ota_ops`'s
+//! answer and not a caller's, so the C side is handed no path at all. See `board_http.c` for what
+//! makes a slot bootable, and for why a request that fails leaves the boot partition where it was.
+//!
 //! # Why not Rust
 //!
 //! The NAS backend ([`crate::nas`]) served itself over `std::net` + `sunset` — SSH written in Rust,
@@ -46,6 +52,7 @@ mod ffi {
     /// `HAL_HTTP_SINK_*`, from `board_hal.h`.
     pub const SINK_MEMORY: c_int = 0;
     pub const SINK_FILE: c_int = 1;
+    pub const SINK_OTA: c_int = 2;
 
     /// `HAL_HTTP_FAULT_*`, from `board_hal.h`.
     ///
@@ -134,6 +141,9 @@ impl HttpBackend for EspHttp {
                 ffi::SINK_FILE,
                 Some(CString::new(path.as_str()).map_err(|_| HalError::InvalidArg)?),
             ),
+            // No path, and not because one was forgotten: which slot an update goes into is the C
+            // side's to pick, since only it can ask the partition table which one is not in use.
+            Sink::Ota => (ffi::SINK_OTA, None),
         };
         let raw_path = path.as_ref().map_or(ptr::null(), |path| path.as_ptr());
 

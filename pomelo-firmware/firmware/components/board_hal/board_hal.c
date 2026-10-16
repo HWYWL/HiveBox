@@ -1,5 +1,6 @@
 #include "board_hal_internal.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include <sys/stat.h>
 
 static const char *TAG = "board_hal";
@@ -55,4 +56,21 @@ esp_err_t board_hal_init(void)
     }
 
     return ESP_OK;
+}
+
+esp_err_t board_hal_confirm_boot(void)
+{
+    // One call, and the answer read rather than assumed: an image flashed over USB is already valid
+    // in its slot's OTA data, and this then finds it valid and changes nothing — ESP_OK either way.
+    // The failure worth saying out loud is an image that is *not* confirmable at all, which is what a
+    // board with no app partitions reports.
+    esp_err_t ret = esp_ota_mark_app_valid_cancel_rollback();
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Boot confirmed: the running image will not be rolled back.");
+    } else {
+        ESP_LOGW(TAG, "Boot confirmation refused (%s): an update that did not confirm itself would be "
+                      "rolled back on the next reset.",
+                 esp_err_to_name(ret));
+    }
+    return ret;
 }

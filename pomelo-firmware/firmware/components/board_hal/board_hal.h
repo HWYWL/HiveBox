@@ -23,6 +23,30 @@ extern "C" {
 esp_err_t board_hal_init(void);
 
 /**
+ * @brief Tell the bootloader this image boots: cancel the rollback it is on probation for.
+ *
+ * Only means anything for an image that arrived over the air. `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`
+ * makes `esp_ota_set_boot_partition` leave the newly written slot in the "pending verify" state, and
+ * the bootloader then boots it on the understanding that the image will confirm itself: without that
+ * confirmation the next reset goes back to the slot the box came from. This is the confirmation.
+ *
+ * Called once, from `board_display.c`, when the first frame reaches the panel — the point at which
+ * everything an update can break has run to the end: the board comes up, the fonts are where they
+ * should be, the renderer draws, and the panel takes the frame. An image that faults before it gets
+ * there never calls this, and is rolled back.
+ *
+ * A no-op for an image flashed over USB: the bootloader finds an empty `otadata` and marks such an
+ * image valid itself, so this finds it already valid. Harmless with the rollback feature off, too,
+ * where the state it would set is the one that never changes.
+ *
+ * @return
+ *      - ESP_OK once the image is marked valid, or was already
+ *      - ESP_ERR_NOT_SUPPORTED when the running partition is not one the OTA layer knows
+ *      - what `esp_ota_mark_app_valid_cancel_rollback` gave, if it refused
+ */
+esp_err_t board_hal_confirm_boot(void);
+
+/**
  * @brief Draw RGB565 bitmap to display bounding box [x1, y1) to [x2, y2).
  * Handles Big-Endian byte swap required by CO5300 and DMA chunking.
  *
@@ -356,6 +380,7 @@ esp_err_t hal_time_sync(void);
 /** Where an answer's bytes go as they arrive, as `Sink` mirrors. */
 #define HAL_HTTP_SINK_MEMORY 0
 #define HAL_HTTP_SINK_FILE   1
+#define HAL_HTTP_SINK_OTA    2
 
 /** Why a request did not come back, as the closed list `HttpFault` mirrors. */
 #define HAL_HTTP_FAULT_NONE        0
@@ -374,8 +399,20 @@ esp_err_t hal_time_sync(void);
  * buffer this file owns, where `HAL_HTTP_BODY_MAX` is the bound and an answer over it is
  * `HAL_HTTP_FAULT_TOO_LARGE`; that is the whole of a document. `HAL_HTTP_SINK_FILE` streams it into
  * `path` as it arrives, so the answer may be any size the filesystem has room for — a glyph table or a
- * firmware image, which is a megabyte and more — and nothing is left behind if it does not finish:
- * a cancelled or failed download removes what it wrote.
+ * font, which is a megabyte and more — and nothing is left behind if it does not finish: a cancelled
+ * or failed download removes what it wrote.
+ *
+ * `HAL_HTTP_SINK_OTA` streams it into *flash* instead, as a firmware image: the bytes go through
+ * `esp_ota_write` into the app slot `esp_ota_get_next_update_partition` picks — the one this image is
+ * not running from, which is why no path is taken and why the caller cannot aim an update at the slot
+ * in use. A slot is only made bootable by a request that finishes: `esp_ota_end` validates the image
+ * and `esp_ota_set_boot_partition` is what points the next boot at it, and a request that fails or is
+ * cancelled calls `esp_ota_abort`, which leaves the boot partition pointing where it pointed — the box
+ * goes on starting from what it started from. An answer that is not a 2xx is never written at all, so
+ * a `404` page cannot land in a slot. Failures here — no slot, a write that would not take, a body
+ * that is not an image this chip can boot, a slot without room — are all `HAL_HTTP_FAULT_STORAGE`,
+ * since all of them are "the answer could not be written where it was asked to go" and none is the
+ * network's.
  *
  * Nothing is sent until the worker task runs, so a URL that is obviously unfetchable is refused here
  * rather than reported as a network fault: an argument error, a URL that does not fit, and a request
@@ -384,7 +421,8 @@ esp_err_t hal_time_sync(void);
  * are waiting in `hal_http_get_state()` before the first byte of anything is sent.
  *
  * @param url  The URL to fetch.
- * @param sink `HAL_HTTP_SINK_MEMORY`, or `HAL_HTTP_SINK_FILE` to write `path`.
+ * @param sink `HAL_HTTP_SINK_MEMORY`, `HAL_HTTP_SINK_FILE` to write `path`, or `HAL_HTTP_SINK_OTA` to
+ *             install an image into the app slot that is not in use.
  * @param path The file to write when the sink is `HAL_HTTP_SINK_FILE`; ignored otherwise. Its
  *             directories must already exist — this opens a file, and making the path to it is the
  *             caller's.
@@ -392,7 +430,7 @@ esp_err_t hal_time_sync(void);
  * @return
  *      - ESP_OK when the request has been taken (including the two faults above)
  *      - ESP_ERR_INVALID_ARG for NULL, "", a URL over `HAL_HTTP_URL_MAX`, a scheme that is neither
- *        `http` nor `https`, a sink that is neither of the two, or a `HAL_HTTP_SINK_FILE` request with
+ *        `http` nor `https`, a sink that is none of the three, or a `HAL_HTTP_SINK_FILE` request with
  *        no path or one over `HAL_HTTP_PATH_MAX`
  *      - ESP_ERR_INVALID_STATE while another request is in flight
  *      - ESP_ERR_NO_MEM when the worker task could not be created

@@ -70,6 +70,12 @@ idf_component_register(
     PRIV_REQUIRES
         spi_flash
         esp_partition
+        # The other app slot, and the calls that make one bootable: `esp_ota_get_next_update_partition`,
+        # `esp_ota_begin/write/end` and `esp_ota_set_boot_partition` in `board_http.c`, and the one that
+        # takes a new image off probation, `esp_ota_mark_app_valid_cancel_rollback`, in `board_hal.c`.
+        # Private like the two above — `board_hal.h` describes the second sink in plain C, and no other
+        # component names `esp_ota_ops.h`.
+        app_update
         # The root bundle HTTP client's TLS is verified against (`esp_crt_bundle_attach`, in
         # `board_http.c`). Private for the same reason as the two above: no other component names it,
         # and the roots themselves are a build setting rather than an API.

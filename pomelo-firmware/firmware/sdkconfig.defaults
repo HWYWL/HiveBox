@@ -26,6 +26,20 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 
+# Application rollback: an over-the-air update that does not come up goes back.
+#
+# The two app slots are `ota_0` and `ota_1` with nothing behind them (see `partitions.csv`), so a
+# newly written image is the only thing to boot and a bad one has nowhere to fall back to — unless
+# this is on. With it on, `esp_ota_set_boot_partition` leaves the new image in the "pending verify"
+# state, the bootloader boots it, and only the image's own word makes that stick: the app calls
+# `board_hal_confirm_boot()` once it has proved it came up (the first frame reaching the panel, see
+# `board_display.c`). Without that word — a panic before the first frame, a board init that does not
+# finish — the next reset finds the image still pending and boots the *previous* one instead.
+#
+# A USB flash is not this case: with an empty `otadata` the bootloader marks the image valid itself,
+# so the board that is flashed over the cable never waits on anything.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
 # FreeRTOS
 CONFIG_FREERTOS_HZ=1000
 

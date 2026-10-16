@@ -24,23 +24,35 @@ tools/publish_bin.py
 写进 `esp_app_desc_t.version`（见 `pomelo-firmware/firmware/CMakeLists.txt`），这里因此
 优先问镜像自己，问不到才退回 `git describe`。
 
-**要问的是应用镜像，不是要发布的那份合并镜像。**`bin/` 里放的是合并镜像（刷机写 `0x0`
-用），而 `esptool image-info` 读不了它 —— 合并镜像是一串首尾相接的独立镜像（bootloader、
-分区表、应用……），esptool 只认第一个，给的是一句"没有应用镜像描述"。能读出
-`esp_app_desc_t` 的只有同一次构建的 `build/firmware.bin`，也就是 app 分区里那份。两者在
-同一个 `build/` 目录下，所以这里顺着 `--firmware` 旁边去找它。找不到（构建目录被清过）
-才退回 `git describe`，并且**把这件事说出来** —— 退回之后拿到的不是"镜像自报的版本"，
-而是"工作区离最近的 tag 有多远"，两者只在要发布的那次提交正好打着 tag 时才相等。
+**一次构建出两份镜像，发布的也是两份，清单指的是其中一份。**两者在同一个 `build/` 里，只差
+一次 `merge-bin`：
+
+- `merged-binary.bin` —— **合并镜像**：bootloader + 分区表 + 应用，首尾相接。刷机时写 `0x0`，
+  一条命令写完不用管偏移，发给**用 USB 刷机**的人（README 3.1 那条命令）。
+- `firmware.bin` —— **应用镜像**：一个 app 槽的内容，也是 `esp_ota_begin` 要的东西。
+
+**更新页下的必须是应用镜像。**在线更新做的正是"把一份镜像写进另一个槽"，而槽里放的从来不是
+一整片 flash 的开头，只是一个应用：把合并镜像塞进去，`esp_ota_end` 会拒收，而那个槽这时已经被
+写过了。所以两份都进 `bin/`，名字不同 —— `hivebox-firmware-<版本>.bin` 是合并镜像（这个名字
+README 与发布工作流都指着它，不能改），`hivebox-ota-<版本>.bin` 是应用镜像，**清单里的
+`firmware.file` 指的是后者**。
+
+版本也**只能问应用镜像**：`esptool image-info` 读的是 `esp_app_desc_t`，而合并镜像是一串首尾
+相接的独立镜像，esptool 只认第一个（bootloader），给的是一句"没有应用镜像描述"。这里因此顺着
+`--firmware` 旁边去找 `firmware.bin`（`--app` 可以另外指一个）。找不到（构建目录被清过）才
+退回 `git describe`，并且**把这件事说出来** —— 退回之后拿到的不是"镜像自报的版本"，而是
+"工作区离最近的 tag 有多远"，两者只在要发布的那次提交正好打着 tag 时才相等。
 
 每种产物只留最新的一份：`bin/` 里旧版本的固件/字库会被删掉，和这个仓库的做法一致 ——
 每次提交删掉旧的、只提交最新的。
 
 用法：
 
-    python tools/publish_bin.py                      # 固件取默认构建产物，字库用 --card-dir 给
+    python tools/publish_bin.py                      # 两份镜像取默认构建产物，字库用 --card-dir 给
     python tools/publish_bin.py --card-dir ui-framework/pomelo-font/dist/card
     python tools/publish_bin.py --font /path/to/hivebox-font-24px-v1.bin
     python tools/publish_bin.py --version v0.7.0 --font-version 1
+    python tools/publish_bin.py --app build/firmware.bin   # 应用镜像不在合并镜像旁边时
     python tools/publish_bin.py --dry-run            # 只打印会做什么
 
 `--font` 与 `--card-dir` 只能给一个（清单里 `font` 只有一项，而包是两者里更强的那种），
@@ -65,12 +77,13 @@ import sys
 WORKSPACE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # 1. 默认输入：ESP-IDF 的合并镜像（`idf.py merge-bin` 的产物，见发布工作流）。
+#    这是刷机用的那一份，也是发布工作流从 `bin/` 里挑出来的那一份。
 DEFAULT_FIRMWARE = os.path.join(
     WORKSPACE_ROOT, "pomelo-firmware", "firmware", "build", "merged-binary.bin"
 )
 
-# 1b. 同一个 `build/` 里能读出 `esp_app_desc_t` 的那一份：app 分区里的应用镜像。
-#     它是**问版本**的对象，而不是**发布**的对象 —— 合并镜像读不出描述（见文件头）。
+# 1b. 同一个 `build/` 里的应用镜像：**在线更新下的那一份**（清单的 `firmware.file`），
+#     也是唯一能读出 `esp_app_desc_t` 的一份 —— 合并镜像读不出描述（见文件头）。
 APP_IMAGE_NAME = "firmware.bin"
 
 # 2. 输出目录：仓库根下的 `bin/`，也正是更新页读取的路径
@@ -78,7 +91,12 @@ APP_IMAGE_NAME = "firmware.bin"
 DEFAULT_BIN_DIR = os.path.join(WORKSPACE_ROOT, "bin")
 
 # 3. 产物文件名，插进去的是版本号本身（版本号已含前缀 `v`）。
+#
+#    固件两个名字，**都不能省**：合并镜像给 USB 刷机的人，OTA 镜像给板子自己下（见文件头）。
+#    两个名字必须互不匹配（`hivebox-ota-*` 不落在 `hivebox-firmware-*` 里），否则发布工作流
+#    里那句 `ls bin/hivebox-firmware-*.bin` 会挑出两个文件，`ARTIFACT` 就成了一串多行。
 FIRMWARE_TEMPLATE = "hivebox-firmware-{version}.bin"
+OTA_TEMPLATE = "hivebox-ota-{version}.bin"
 FONT_TEMPLATE = "hivebox-font-24px-{version}.bin"
 
 # 4. 清旧版本时用的匹配式：只动这一类文件，免得把别的东西删掉。
@@ -87,6 +105,7 @@ FONT_TEMPLATE = "hivebox-font-24px-{version}.bin"
 #    命名规则（`hivebox-font-24px-vN.bin`），占的也是清单里同一个 `font` 项（见文件头），
 #    所以在发布的那份就是留下的那份，上一版这时才真的是「旧的」。
 FIRMWARE_GLOB = re.compile(r"^hivebox-firmware-.*\.bin$")
+OTA_GLOB = re.compile(r"^hivebox-ota-.*\.bin$")
 FONT_GLOB = re.compile(r"^hivebox-font-.*\.bin$")
 
 # 5. 字体包里另一半（烘出那张表的那份字体）的命名规则。
@@ -221,33 +240,34 @@ def firmware_version_from_git():
     return result.stdout.strip() or None
 
 
-def app_image_beside(artifact):
-    """`artifact` 旁边那份应用镜像，没有则返回 None。
+def find_app_image(artifact, override):
+    """要发布的那份**应用镜像**，找不到则 None。
 
-    就是同一个 `build/` 目录里的 `firmware.bin`：`idf.py build merge-bin` 先编出它，再把
-    bootloader、分区表和它拼成合并镜像，所以两者的版本是同一个。
-
-    `artifact` 自己就叫 `firmware.bin` 时返回 None —— 那说明调用方给的正是能读的那一份，
-    没有"旁边"可找。
+    默认是 `artifact` 旁边那份 `build/firmware.bin`：`idf.py build merge-bin` 先编出它，再把
+    bootloader、分区表和它拼成合并镜像，所以两者在同一个 `build/` 里、版本也是同一个。给的
+    `artifact` 自己就叫 `firmware.bin` 时就是它自己，没有"旁边"可找。`--app` 给了一个不存在的
+    路径时也返回 None —— 让调用方去说"找不到"，而不是这里悄悄换一个来源。
     """
+    if override:
+        return override if os.path.isfile(override) else None
+
     if os.path.basename(artifact) == APP_IMAGE_NAME:
-        return None
+        return artifact
 
     beside = os.path.join(os.path.dirname(os.path.abspath(artifact)), APP_IMAGE_NAME)
     return beside if os.path.isfile(beside) else None
 
 
-def resolve_firmware_version(artifact, override):
+def resolve_firmware_version(app_image, override):
     """固件版本的来源顺序：命令行 > 应用镜像自报 > git describe。
 
-    `artifact` 是**要发布的那一份**（合并镜像）；**要问的是它旁边那份应用镜像**，见
-    `app_image_beside` —— 合并镜像读不出 `esp_app_desc_t`。给的就是应用镜像时问它自己。
+    `app_image` 已经在手上（`find_app_image` 找到的那份）：**能读出 `esp_app_desc_t` 的只有
+    它**，合并镜像给的是一句"没有应用镜像描述"（见文件头）。
     """
     if override:
         print(f"[*] 命令行给的版本：{override}")
         return override
 
-    app_image = app_image_beside(artifact) or artifact
     from_image = firmware_version_from_image(app_image)
     if from_image:
         print(f"[*] 镜像自报的版本：{from_image}（读的是 {display_path(app_image)}）")
@@ -405,8 +425,13 @@ def main():
     parser.add_argument(
         "--firmware",
         default=DEFAULT_FIRMWARE,
-        help=f"要发布的固件镜像（默认 {os.path.relpath(DEFAULT_FIRMWARE, WORKSPACE_ROOT)}）；"
-        f"版本从同一个 build/ 里的 {APP_IMAGE_NAME} 读",
+        help=f"要发布的**合并镜像**（默认 {os.path.relpath(DEFAULT_FIRMWARE, WORKSPACE_ROOT)}）；"
+        f"USB 刷机写 0x0 用的就是它，而清单指的是它旁边那份 {APP_IMAGE_NAME}（见 --app）",
+    )
+    parser.add_argument(
+        "--app",
+        help=f"要发布的**应用镜像**（清单里的 firmware.file，在线更新下的那一份）；"
+        f"不给则取 --firmware 旁边那份 {APP_IMAGE_NAME}（同一个 build/）",
     )
     parser.add_argument(
         "--font",
@@ -425,8 +450,18 @@ def main():
     args = parser.parse_args()
 
     if not os.path.isfile(args.firmware):
-        print(f"[!] 找不到固件镜像：{args.firmware}")
+        print(f"[!] 找不到合并镜像：{args.firmware}")
         print("    先构建它（idf.py build merge-bin），或用 --firmware 指定。")
+        return 1
+
+    # 应用镜像**先找到再往下走**：清单写的是它，版本问的也是它，缺了它这一版就没有可下的固件
+    # —— 而这是发布里最容易悄悄少掉的一件（构建目录被清过、或者只 merge-bin 没 build）。
+    app_image = find_app_image(args.firmware, args.app)
+    if not app_image:
+        print(f"[!] 找不到应用镜像：{args.app or APP_IMAGE_NAME + '（在 ' + display_path(args.firmware) + ' 旁边）'}")
+        print(f"    要发布的是它旁边那份 {APP_IMAGE_NAME} —— 在线更新把一个应用写进一个槽，")
+        print(f"    合并镜像（bootloader + 分区表 + 应用）不是槽里的东西。先 `idf.py build`，")
+        print(f"    或用 --app 指定。")
         return 1
 
     if args.font and not os.path.isfile(args.font):
@@ -455,7 +490,7 @@ def main():
             return 1
 
     # ---- 版本号 ---------------------------------------------------------------
-    firmware_version = resolve_firmware_version(args.firmware, args.version)
+    firmware_version = resolve_firmware_version(app_image, args.version)
     if not firmware_version:
         print("[!] 读不出固件版本：镜像里没有，git 也说不出。用 --version 直接给一个。")
         return 1
@@ -477,6 +512,7 @@ def main():
 
     # ---- 文件名 ---------------------------------------------------------------
     firmware_name = FIRMWARE_TEMPLATE.format(version=firmware_version)
+    ota_name = OTA_TEMPLATE.format(version=firmware_version)
 
     # 包里的表名是它自己的（版本已由 `card_pair` 从名字里读过并核对过），单独一张表才按模板拼。
     font_name = None
@@ -489,8 +525,14 @@ def main():
         os.makedirs(args.bin, exist_ok=True)
 
     # ---- 落盘与清理 -----------------------------------------------------------
-    firmware_size, firmware_sha = place(args.firmware, args.bin, firmware_name, args.dry_run)
+    #
+    # 两份镜像都落盘：合并镜像是给 USB 刷机的人的（README 3.1），而**清单指的是 OTA 那份**
+    # ——更新页 `esp_ota_begin` 要的是一个应用的镜像，不是一整片 flash 的开头（见文件头）。
+    place(args.firmware, args.bin, firmware_name, args.dry_run)
     prune(args.bin, FIRMWARE_GLOB, firmware_name, args.dry_run)
+
+    ota_size, ota_sha = place(app_image, args.bin, ota_name, args.dry_run)
+    prune(args.bin, OTA_GLOB, ota_name, args.dry_run)
 
     manifest = {
         "generated": datetime.datetime.now(datetime.timezone.utc)
@@ -499,9 +541,9 @@ def main():
         .replace("+00:00", "Z"),
         "firmware": {
             "version": firmware_version,
-            "file": firmware_name,
-            "size": firmware_size,
-            "sha256": firmware_sha,
+            "file": ota_name,
+            "size": ota_size,
+            "sha256": ota_sha,
         },
     }
 
@@ -519,7 +561,10 @@ def main():
 
     write_manifest(args.bin, manifest, args.dry_run)
 
-    published = [firmware_name]
+    published = [
+        f"{firmware_name}（合并镜像，USB 刷 0x0）",
+        f"{ota_name}（应用镜像，清单的 firmware.file 指的就是它）",
+    ]
     if card:
         published.append(f"{font_name} + {os.path.basename(card[0])}（{card[2]} 的一对）")
     elif font_name:

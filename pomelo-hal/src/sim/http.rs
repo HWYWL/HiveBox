@@ -11,6 +11,12 @@
 //! to the path with `std::fs`, because a desktop *has* a filesystem and the job is then the same job
 //! rather than an impression of it. A path that will not open fails as [`HttpFault::Storage`], the way
 //! a card that is not in the slot does.
+//!
+//! A [`Sink::Ota`] request is the other place, and it is the one destination a desktop does *not*
+//! have: a process has no second app slot and no boot partition to point at one. What the simulator
+//! has instead is a buffer, [`SimHttp::slot`], standing where the partition stands — enough for a test
+//! to see that the bytes went where the page said they should, which is the half of an update a
+//! desktop can hold; the half that reboots a board is the device's and is not impersonated here.
 
 use crate::error::HalError;
 use crate::traits::HttpBackend;
@@ -50,6 +56,10 @@ pub struct SimHttp {
     /// denominator: the answer's length, known before it is delivered because a script is not a
     /// socket.
     pending_total: u64,
+    /// What the last [`Sink::Ota`] request put in the slot, standing in for a partition a desktop does
+    /// not have. Empty until one has landed, and left as it was by a request that was not a success —
+    /// a slot is only written to by an answer that is one, which is the device's rule too.
+    slot: Vec<u8>,
 }
 
 /// One answer in a [`SimHttp`] script: what a request is answered with, status and body together.
@@ -106,6 +116,7 @@ impl SimHttp {
             last_url: None,
             last_sink: None,
             pending_total: 0,
+            slot: Vec::new(),
         }
     }
 
@@ -174,6 +185,15 @@ impl SimHttp {
     /// The last sink a request was asked to put its answer in.
     pub fn last_sink(&self) -> Option<&Sink> {
         self.last_sink.as_ref()
+    }
+
+    /// What the last update put in the slot.
+    ///
+    /// Kept for the same reason as [`SimHttp::last_sink`]: a page that installs an image is a page
+    /// whose *write* is half of what it has to get right, and a test that could only see where the
+    /// request was aimed would pass on a client that dropped the bytes on the floor.
+    pub fn slot(&self) -> &[u8] {
+        &self.slot
     }
 }
 
@@ -282,7 +302,8 @@ impl HttpBackend for SimHttp {
 }
 
 impl SimHttp {
-    /// Hands over the script's next answer: into the buffer, or into the file a sink named.
+    /// Hands over the script's next answer: into the buffer, into the file a sink named, or into the
+    /// slot.
     fn settle(&mut self) -> HttpState {
         // One answer per request, taken from the script and then stepped over: the answer is cloned out
         // before the index moves so that the body outlives the borrow of the script it came from.
@@ -290,39 +311,48 @@ impl SimHttp {
         self.next += 1;
         let body = answer.body.into_bytes();
 
-        let Some(path) = self.file_sink() else {
-            self.result = Some(HttpResponse {
-                status: answer.status,
-                body,
-            });
-            return HttpState::Done;
-        };
+        // The sink is cloned out rather than borrowed, so that the arms below are free to write to
+        // `self` while they read where the answer goes.
+        match self.last_sink.clone() {
+            // The answer lands in the file and not in the buffer, exactly as the device's client leaves
+            // it: a page that downloaded a glyph table has the file and no copy in memory, which is the
+            // point of asking for one. A write that fails is the card's fault and not the network's.
+            Some(Sink::File(path)) => match std::fs::write(&path, &body) {
+                Ok(()) => {
+                    self.result = Some(HttpResponse {
+                        status: answer.status,
+                        body: Vec::new(),
+                    });
+                    HttpState::Done
+                }
+                Err(_) => {
+                    self.result = None;
+                    HttpState::Failed(HttpFault::Storage)
+                }
+            },
+            // Into the slot, and only for an answer that is a *success*: the device's client does not
+            // begin a flash write for a server that says `404`, because a slot holding half a release
+            // is worse than one holding the last good image. A body that arrived with something else
+            // for a status is dropped, and the slot keeps what it had — nothing here is erased.
+            Some(Sink::Ota) => {
+                if (200..300).contains(&answer.status) {
+                    self.slot = body;
+                }
 
-        // The answer lands in the file and not in the buffer, exactly as the device's client leaves it:
-        // a page that downloaded a glyph table has the file and no copy in memory, which is the point of
-        // asking for one. A write that fails is the card's fault and not the network's.
-        match std::fs::write(&path, &body) {
-            Ok(()) => {
                 self.result = Some(HttpResponse {
                     status: answer.status,
                     body: Vec::new(),
                 });
                 HttpState::Done
             }
-            Err(_) => {
-                self.result = None;
-                HttpState::Failed(HttpFault::Storage)
+            // Into the buffer, which is every other request there is.
+            _ => {
+                self.result = Some(HttpResponse {
+                    status: answer.status,
+                    body,
+                });
+                HttpState::Done
             }
-        }
-    }
-
-    /// The path a file sink asked for, if the last request was given one.
-    ///
-    /// Cloned out rather than borrowed so that the caller is free to write to `self` afterwards.
-    fn file_sink(&self) -> Option<String> {
-        match &self.last_sink {
-            Some(Sink::File(path)) => Some(path.clone()),
-            _ => None,
         }
     }
 }

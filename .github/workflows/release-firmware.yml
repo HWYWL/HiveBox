@@ -181,6 +181,13 @@ jobs:
       # 的那个必须是同一个，否则机器会把自己认成另一个版本，更新页要么反复提示、要么永不提示
       # —— 所以版本由 `publish_bin.py` 自己问镜像（`esptool image-info`），而不是从 tag 拼。
       #
+      # 固件是**两份**，而清单指的是 OTA 那份：`hivebox-firmware-*.bin` 是合并镜像（USB 刷
+      # 0x0 用，README 3.1 那条命令，也是下面 ASSET/ARTIFACT 挑出来的那一份），
+      # `hivebox-ota-*.bin` 是应用镜像 —— 在线更新把一个应用写进一个槽，`esp_ota_begin` 要的
+      # 就是这个。塞合并镜像进去会被 `esp_ota_end` 拒收，而那个槽这时已经被写过了。
+      #
+      # `ls bin/hivebox-firmware-*.bin` 必须只挑出一个文件，所以新名字不能也落在那个通配里。
+      #
       # 字库给的是卡上那一对（烘焙脚本直接产出的 `dist/card/`）：表当 `font` 的 `file`、字体当
       # 它的 `face`，发布脚本把两件**平铺**进 `bin/` 并记进同一个 `font` 项 —— 更新页按
       # `face` → `file` 的顺序把两件都下到 `/sdcard/fonts`，而它把一个名字既当下载地址又当落盘
@@ -231,8 +238,13 @@ jobs:
           #
           # 字库里那一对（字体与烘它出来的表）挂在同一页上，正是更新页会下到卡上的那两个文件：
           # 两条路都通 —— 让板子自己下，或者从这儿下到电脑、拷进 SD 卡。
+          #
+          # 固件同样是两份，也一起挂：`hivebox-firmware-*` 给人用 USB 刷（README 3.1），
+          # `hivebox-ota-*` 给板子在更新页里自己下 —— 少挂哪一份都有人拿不到他要的东西，而
+          # 拿错那一份的后果是把应用镜像往 `0x0` 刷，板子起不来。
           files: |
             bin/hivebox-firmware-*.bin
+            bin/hivebox-ota-*.bin
             bin/hivebox-font-*.bin
             bin/hivebox-face-*.otf
             bin/manifest.json

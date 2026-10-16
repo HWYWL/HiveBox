@@ -634,3 +634,76 @@ fn sim_http_refuses_a_file_sink_with_no_path() {
     assert_eq!(http.state(), HttpState::Idle);
 }
 
+/// A slot sink puts the bytes where a partition would be, and the response comes back with an empty
+/// body — the same shape as a file's, because neither of those two is the buffer.
+///
+/// The slot is a stand-in for the second app partition, which a desktop process does not have. What can
+/// be shown here is that the bytes a page asked to *install* reached the destination rather than the
+/// answer, which is the half of an update that can be tested off the board.
+#[test]
+fn sim_http_an_ota_sink_puts_the_body_in_the_slot() {
+    use pomelo_hal::sim::SimHttp;
+    use pomelo_hal::{HttpBackend, Sink};
+
+    let mut http = SimHttp::answering("a whole image");
+    assert!(http.slot().is_empty(), "nothing has been installed yet");
+
+    http.start_to("https://example.com/fw.bin", Sink::Ota)
+        .unwrap();
+
+    // Kept and not merely used: the sink is what says *where* the answer was aimed, and which slot is
+    // not a caller's to name — see `Sink::Ota`.
+    assert_eq!(http.last_sink(), Some(&Sink::Ota));
+
+    for _ in 0..8 {
+        http.tick();
+    }
+
+    let response = http.take_result().unwrap();
+    assert_eq!(response.status, 200);
+    assert!(
+        response.body.is_empty(),
+        "a slot sink's bytes are in the slot, not the buffer"
+    );
+    assert_eq!(http.slot(), "a whole image".as_bytes());
+}
+
+/// A slot is written to by a *success* and by nothing else.
+///
+/// The rule the device's client keeps, and the reason it is worth keeping here: a slot holding the
+/// `404` page's HTML is worse than one holding the last good image, because the next boot starts from
+/// whatever the boot partition points at. So the body of an answer that is not a success is dropped,
+/// and the slot keeps what it had.
+#[test]
+fn sim_http_an_ota_sink_is_not_written_from_a_failure() {
+    use pomelo_hal::sim::SimHttp;
+    use pomelo_hal::{HttpBackend, Sink};
+
+    let mut http = SimHttp::answering("the previous image").then((404u16, "<html>gone</html>"));
+
+    http.start_to("https://example.com/fw.bin", Sink::Ota)
+        .unwrap();
+    for _ in 0..8 {
+        http.tick();
+    }
+    let response = http.take_result().unwrap();
+    assert_eq!(response.status, 200);
+    assert_eq!(http.slot(), "the previous image".as_bytes());
+
+    // The next request is answered with the not-found page, which is an answer and not a fault: the
+    // status is carried up, and it is the *slot* the status decides for.
+    http.start_to("https://example.com/fw.bin", Sink::Ota)
+        .unwrap();
+    for _ in 0..8 {
+        http.tick();
+    }
+
+    let response = http.take_result().unwrap();
+    assert_eq!(response.status, 404, "the status is the answer's to carry");
+    assert_eq!(
+        http.slot(),
+        "the previous image".as_bytes(),
+        "and the status is the slot's to judge, so nothing was written"
+    );
+}
+

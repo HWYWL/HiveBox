@@ -294,7 +294,7 @@ fn notice<'a>(
         // height, so the rows above it do not jump when a prompt is opened and closed over it.
         Status::Unsupported(_)
         | Status::Downloading(_)
-        | Status::Installed(_)
+        | Status::Installed(..)
         | Status::DownloadFailed(_, _) => (String::new(), style::muted(theme)),
     };
 
@@ -322,7 +322,7 @@ fn prompt_overlay<'a>(
     theme: ThemeMode,
 ) -> Element<'a, Message> {
     let (glyph, ink) = match status {
-        Status::Installed(_) => (Icon::CHECK_CIRCLE, style::good()),
+        Status::Installed(..) => (Icon::CHECK_CIRCLE, style::good()),
         Status::DownloadFailed(_, _) => (Icon::ERROR, style::bad()),
         Status::Unsupported(_) => (Icon::WARNING, style::bad()),
         _ => (Icon::DOWNLOADING, style::accent()),

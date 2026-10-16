@@ -19,15 +19,28 @@
 // `hal_http_take` hands over the bytes and clears the state that said they were
 // there.
 //
-// A body goes one of two ways. `HAL_HTTP_SINK_MEMORY` is a document: it lands in
+// A body goes one of three ways. `HAL_HTTP_SINK_MEMORY` is a document: it lands in
 // the one buffer this file owns and `HAL_HTTP_BODY_MAX` is the bound on it, which
 // is what stops a page that asked for something unbounded from taking the heap
-// with it. `HAL_HTTP_SINK_FILE` is a file — a glyph table, a firmware image — and
-// is written out as it arrives through the same buffer used as a staging area, so
+// with it. `HAL_HTTP_SINK_FILE` is a file — a glyph table, a font — and is
+// written out as it arrives through the same buffer used as a staging area, so
 // its size is the filesystem's problem rather than this board's memory. A
 // download that ends any way but successfully removes what it wrote: half a glyph
 // table reads as a font with some of its characters missing, and that is a
 // failure which surfaces a long way from its cause.
+//
+// `HAL_HTTP_SINK_OTA` is the third, and the only one whose destination this file
+// chooses: `esp_ota_get_next_update_partition` picks the app slot this image is
+// not running from, and the body is a firmware image going into it. Two rules
+// come with that and neither has an analogue in the other two sinks. A slot is
+// only written to by an answer that *is* a success — a `404` page landing there
+// would erase an image to put a web page in its place. And a slot is only
+// *bootable* once the request has finished: `esp_ota_end` is what says the bytes
+// are an image this chip can start, `esp_ota_set_boot_partition` is what points
+// the next boot at it, and anything that leaves before those two — a cancel, a
+// read that dies mid-body, a full slot — calls `esp_ota_abort`, which leaves the
+// boot partition where it was. So the worst a failed update does is fill a slot
+// nobody boots from, and the next attempt erases it again.
 // =============================================================================
 
 #include <stdbool.h>
@@ -41,6 +54,8 @@
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -103,6 +118,13 @@ static int32_t s_sink = HAL_HTTP_SINK_MEMORY;
 
 /** The file a `HAL_HTTP_SINK_FILE` request writes. Same lifetime as `s_url`, and empty otherwise. */
 static char s_path[HAL_HTTP_PATH_MAX];
+
+/** Whether a status code is one an answer's body may be *installed* from. Every 2xx is: what a slot
+ * must never be written from is a page that says the image is somewhere else. */
+static bool status_is_success(int32_t status)
+{
+    return status >= 200 && status < 300;
+}
 
 static inline void lock(void)
 {
@@ -239,6 +261,12 @@ static void http_task(void *arg)
      * path that did not get as far as opening one leaves. */
     FILE *file = NULL;
 
+    /* The same for the write an `HAL_HTTP_SINK_OTA` request makes: the slot it was aimed at and the
+     * handle `esp_ota_write` takes, both up here because `out` has to drop a write that did not
+     * finish. Zero is again "nothing began", and a slot that was not chosen is NULL. */
+    esp_ota_handle_t ota = 0;
+    const esp_partition_t *slot = NULL;
+
     /* The certificate bundle in the image, and the reason HTTPS needs a clock: mbedTLS checks the
      * window on every certificate it is shown, so this only works once `hal_time_sync()` has run. */
     const esp_http_client_config_t cfg = {
@@ -317,10 +345,46 @@ static void http_task(void *arg)
      * the body of a `404` lands in it just as the body of a success does, because the status is the
      * answer's to carry and not this file's to judge. */
     const bool to_file = (s_sink == HAL_HTTP_SINK_FILE);
+    const bool to_ota = (s_sink == HAL_HTTP_SINK_OTA);
+    /* A file and a slot both stage each chunk through the head of the body buffer: it is the read
+     * buffer as much as it is the body buffer, and neither of them needs the bytes kept twice. */
+    const bool staged = to_file || to_ota;
+
+    /* A slot is the one place where the status *is* this file's to judge, and the reason is what
+     * judging wrongly costs: a `404` page written into a slot erases an image to put a web page
+     * where one used to be. So a body that is not a success is not read at all here — the status is
+     * the whole of the answer, and the caller reads it as the fault it is. */
+    if (to_ota && !status_is_success(status)) {
+        ESP_LOGW(TAG, "%s -> %d, nothing written to a slot", s_url, (int)status);
+        goto out;
+    }
+
     if (to_file) {
         file = fopen(s_path, "wb");
         if (file == NULL) {
             ESP_LOGW(TAG, "cannot write %s", s_path);
+            fault = HAL_HTTP_FAULT_STORAGE;
+            goto out;
+        }
+    }
+
+    if (to_ota) {
+        /* Which slot is not this file's to be told: the one the running image is not in, which
+         * `esp_ota_ops` knows and a caller with a path in hand cannot say. */
+        slot = esp_ota_get_next_update_partition(NULL);
+        if (slot == NULL) {
+            ESP_LOGW(TAG, "no app slot to install into");
+            fault = HAL_HTTP_FAULT_STORAGE;
+            goto out;
+        }
+
+        /* The declared length is what lets `esp_ota_begin` erase exactly as much of the slot as the
+         * image needs; a server that declared nothing — a chunked body — gets `OTA_SIZE_UNKNOWN`,
+         * which erases as the bytes arrive. A slot too small for the image fails here, before a
+         * byte of it has been fetched. */
+        const esp_err_t began = esp_ota_begin(slot, (total > 0) ? total : OTA_SIZE_UNKNOWN, &ota);
+        if (began != ESP_OK) {
+            ESP_LOGW(TAG, "esp_ota_begin(%s): %s", slot->label, esp_err_to_name(began));
             fault = HAL_HTTP_FAULT_STORAGE;
             goto out;
         }
@@ -338,17 +402,17 @@ static void http_task(void *arg)
         }
 
         /* `used` is the answer's length either way, but only the buffered one is bounded by it: a file
-         * has somewhere else to put the rest. */
-        if (!to_file && used >= HAL_HTTP_BODY_MAX - 1) {
+         * and a slot have somewhere else to put the rest. */
+        if (!staged && used >= HAL_HTTP_BODY_MAX - 1) {
             ESP_LOGW(TAG, "answer over %d bytes: %s", HAL_HTTP_BODY_MAX, s_url);
             fault = HAL_HTTP_FAULT_TOO_LARGE;
             goto out;
         }
 
-        /* A file stages each chunk through the head of the same buffer: it is the read buffer as much
-         * as it is the body buffer, and there is no reason for this file to own a second one. */
-        uint8_t *const into = to_file ? s_body : s_body + used;
-        const int room = (int)(HAL_HTTP_BODY_MAX - 1 - (to_file ? 0 : used));
+        /* A staged chunk goes into the head of the same buffer, and only a document is accumulated
+         * past it — see `staged` above. */
+        uint8_t *const into = staged ? s_body : s_body + used;
+        const int room = (int)(HAL_HTTP_BODY_MAX - 1 - (staged ? 0 : used));
 
         const int read = esp_http_client_read(client, (char *)into, room);
         if (read < 0) {
@@ -374,6 +438,14 @@ static void http_task(void *arg)
             goto out;
         }
 
+        /* A chunk into the slot. A flash write that will not take is the board's fault and not the
+         * network's — see `HAL_HTTP_FAULT_STORAGE` — and the way out drops the write whole. */
+        if (to_ota && esp_ota_write(ota, into, (size_t)read) != ESP_OK) {
+            ESP_LOGW(TAG, "esp_ota_write into %s failed", slot->label);
+            fault = HAL_HTTP_FAULT_STORAGE;
+            goto out;
+        }
+
         used += (size_t)read;
 
         /* Per chunk and not per frame: the frame loop reads this while the worker writes it, and a
@@ -394,6 +466,33 @@ static void http_task(void *arg)
             goto out;
         }
         ESP_LOGI(TAG, "%s -> %d, %u bytes to %s", s_url, (int)status, (unsigned)used, s_path);
+    } else if (to_ota) {
+        /* The image is whole, and whole is what makes a slot an *update*. `esp_ota_end` is what says
+         * these bytes are an image this chip can start — a release built for another chip, or a body
+         * that is a web page after all, is refused here rather than pointed at by the next boot — and
+         * `esp_ota_set_boot_partition` is what points it there. Until both have said yes the slot
+         * holds bytes and nothing more, and every way out of this function drops them. */
+        const esp_ota_handle_t handle = ota;
+        ota = 0;
+
+        const esp_err_t ended = esp_ota_end(handle);
+        if (ended != ESP_OK) {
+            ESP_LOGW(TAG, "%s: not an image this board can start: %s", slot->label,
+                     esp_err_to_name(ended));
+            fault = HAL_HTTP_FAULT_STORAGE;
+            goto out;
+        }
+
+        const esp_err_t pointed = esp_ota_set_boot_partition(slot);
+        if (pointed != ESP_OK) {
+            ESP_LOGW(TAG, "esp_ota_set_boot_partition(%s): %s", slot->label,
+                     esp_err_to_name(pointed));
+            fault = HAL_HTTP_FAULT_STORAGE;
+            goto out;
+        }
+
+        ESP_LOGI(TAG, "%s -> %d, %u bytes into %s, which the next boot starts from", s_url,
+                 (int)status, (unsigned)used, slot->label);
     } else {
         /* A NUL just past the end, so that a `printf` of a body is not a buffer overrun. The Rust side
          * carries the length and does not depend on it. */
@@ -407,6 +506,13 @@ out:
          * missing, which is a failure that surfaces a long way from here. */
         fclose(file);
         remove(s_path);
+    }
+
+    if (ota != 0) {
+        /* A slot with half an image in it, dropped rather than left in a state somebody might boot
+         * from: the boot partition was never moved, so this is the box going on with what it has. The
+         * next attempt erases the slot again on its way in. */
+        esp_ota_abort(ota);
     }
 
     if (client != NULL) {
@@ -451,7 +557,9 @@ esp_err_t hal_http_start_to(const char *url, int32_t sink, const char *path)
         if (path_length >= HAL_HTTP_PATH_MAX) {
             return ESP_ERR_INVALID_ARG;
         }
-    } else if (sink != HAL_HTTP_SINK_MEMORY) {
+    } else if (sink != HAL_HTTP_SINK_MEMORY && sink != HAL_HTTP_SINK_OTA) {
+        /* `HAL_HTTP_SINK_OTA` takes no path: which slot an update goes into is this file's to pick a
+         * moment from now, and a caller that passed one has the wrong idea about the sink. */
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -564,14 +672,15 @@ esp_err_t hal_http_take(int32_t *out_status, const uint8_t **out_body, size_t *o
     }
 
     *out_status = s_snap.status;
-    /* A file sink's bytes went to the file as they arrived and are not in this buffer at all: the
-     * length still says how many there were, which is what a caller checking a download against a
-     * manifest's size wants, and a NULL pointer is the honest answer for "there is no buffer".
+    /* A file's bytes went to the file as they arrived and a slot's went into flash, and neither is in
+     * this buffer at all: the length still says how many there were, which is what a caller checking a
+     * download against a manifest's size wants, and a NULL pointer is the honest answer for "there is
+     * no buffer".
      *
      * `s_sink` and not a field of the snapshot: the sink is a property of the *request*, and it is
      * read here rather than copied into the snapshot because a request that had already been taken
      * would have cleared one and left the other saying where the bytes went. */
-    *out_body = (s_sink == HAL_HTTP_SINK_FILE) ? NULL : s_body;
+    *out_body = (s_sink == HAL_HTTP_SINK_MEMORY) ? s_body : NULL;
     *out_length = s_snap.length;
 
     /* Taken: the answer belongs to the caller now and the client is free for the next request. The

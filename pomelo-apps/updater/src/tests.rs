@@ -271,19 +271,24 @@ fn the_page_and_the_boot_read_the_same_font() {
 
 /// Pressing a row's button answers about *that* row, and the two rows' answers are not the same one.
 ///
-/// The image's press has one thing to say, because what it waits on — a second app slot — is on the
-/// flash whether there is a card in the box or not. The table's press has two, and which is drawn is
-/// the slot's answer; the box *with* a card is the one whose press goes on to the card, which is where
-/// the download tests below take it up.
+/// The table's press has one thing to say about the *box* — a card with nowhere to put a table is the
+/// one press this page cannot honour — and the image's press has nothing to say about it at all: a
+/// second app slot is in the flash whether there is a card in the box or not. So the very same empty
+/// slot refuses one row and leaves the other going after its file, which is the whole reason the two
+/// presses are allowed to differ.
 #[test]
 fn a_press_says_which_row_it_was_for() {
-    let mut image = Updater::new(board_with_slot(true));
-    image.update(Message::Install(Kind::Firmware));
-    assert_eq!(image.status, Status::Unsupported(Kind::Firmware));
-
     let mut table = Updater::new(board_with_slot(false));
     table.update(Message::Install(Kind::Font));
     assert_eq!(table.status, Status::Unsupported(Kind::Font));
+
+    let mut image = Updater::new(board_with_slot(false));
+    image.update(Message::Install(Kind::Firmware));
+    assert_ne!(
+        image.status,
+        Status::Unsupported(Kind::Firmware),
+        "an image goes into the flash, and the flash is not on the card"
+    );
 }
 
 /// A board whose slot holds what the caller says it does.
@@ -342,35 +347,33 @@ fn the_glyphs_press_asks_the_slot() {
     assert!(!empty_slot.card, "the slot answered, and the answer was no card");
 }
 
-/// The refusal a person reads is the one that is true of *their* box: a slot with no card is told
-/// what a glyph table needs, and a box that has one is told that the step is not built.
+/// The one refusal a person can read is about *their* box and not about the code: no card is nowhere
+/// to put a glyph table, and that is the thing its owner can do something about.
 ///
-/// Two sentences and not one, because a box with no card has nowhere to put a table even once the
-/// write exists — and telling that box "this is not wired up yet" would send its owner away to wait
-/// for a release that would not fix it.
+/// There is only one now, and it is the one sentence that used to share the page with "not wired up
+/// yet" — that second sentence is gone with the second press, because both rows' buttons now fetch a
+/// file. What is left is the box's answer, and it is the box's for one row only.
 #[test]
-fn a_refusal_says_which_of_the_two_things_is_missing() {
-    let english = Words::of(Language::English);
-    let chinese = Words::of(Language::Chinese);
+fn the_one_refusal_is_about_the_card() {
+    let mut page = Updater::new(board_with_slot(false));
 
-    assert_eq!(
-        english.unsupported_line(Kind::Firmware, true),
-        english.unsupported
-    );
-    assert_eq!(
-        english.unsupported_line(Kind::Firmware, false),
-        english.unsupported,
-        "whether there is a card has nothing to do with where an image goes"
-    );
+    page.update(Message::Install(Kind::Font));
+    assert_eq!(page.status, Status::Unsupported(Kind::Font));
 
-    assert_eq!(english.unsupported_line(Kind::Font, true), english.unsupported);
-    assert_eq!(english.unsupported_line(Kind::Font, false), english.no_card);
-    assert_eq!(chinese.unsupported_line(Kind::Font, true), chinese.unsupported);
-    assert_eq!(chinese.unsupported_line(Kind::Font, false), chinese.no_card);
+    for language in [Language::English, Language::Chinese] {
+        let words = Words::of(language);
+        let prompt = page.prompt(&words).expect("a refusal is a prompt");
 
+        assert_eq!(prompt.title, words.name(Kind::Font));
+        assert_eq!(prompt.line, words.no_card, "the sentence is the card's");
+        assert_eq!(prompt.confirm, None, "and a refusal has nothing to confirm");
+    }
+
+    assert!(!Words::of(Language::English).no_card.is_empty());
     assert_ne!(
-        english.unsupported, english.no_card,
-        "the two sentences are the two reasons, so they have to be two sentences"
+        Words::of(Language::English).no_card,
+        Words::of(Language::Chinese).no_card,
+        "one box, two languages"
     );
 }
 
@@ -413,7 +416,7 @@ fn an_install_asks_whether_to_restart_and_a_report_does_not() {
     let words = Words::of(Language::Chinese);
     let mut page = app(MANIFEST, Some("v0.6.0"), Some("v2"));
 
-    page.status = Status::Installed(Kind::Font);
+    page.status = Status::Installed(Kind::Font, Version::parse("v2").unwrap());
 
     let question = page.prompt(&words).expect("an install is a prompt");
 
@@ -503,7 +506,7 @@ fn the_restart_button_resets_the_box_and_puts_the_question_away() {
     let mut page = Updater::new(board);
 
     page.manifest = Manifest::parse(MANIFEST);
-    page.status = Status::Installed(Kind::Font);
+    page.status = Status::Installed(Kind::Font, Version::parse("v2").unwrap());
 
     page.update(Message::Restart);
 
@@ -541,21 +544,34 @@ fn every_fault_has_a_sentence_in_both_languages() {
     }
 }
 
-/// Every way a *download* fails has a sentence in both languages too, and the two that are not HTTP
-/// faults are the two worth having: they send a person to look somewhere other than the network.
+/// Every way a *download* fails has a sentence in both languages too, for each row, and the two that
+/// are not HTTP faults are the two worth having: they send a person to look somewhere other than the
+/// network.
+///
+/// The write's own fault is in the list because it is the one sentence that depends on the *row*: a
+/// slot that will not take an image and a card that will not take a table are two places to go, and a
+/// person told the wrong one cannot fix it.
 #[test]
 fn every_download_fault_has_a_sentence_in_both_languages() {
     use pomelo_hal::HttpFault;
 
     let faults = [
         DownloadFault::Http(HttpFault::NoNetwork),
+        DownloadFault::Http(HttpFault::Storage),
         DownloadFault::NotFound,
         DownloadFault::Incomplete,
     ];
 
-    for fault in faults {
-        assert!(!Words::of(Language::English).download_fault_line(fault).is_empty());
-        assert!(!Words::of(Language::Chinese).download_fault_line(fault).is_empty());
+    for language in [Language::English, Language::Chinese] {
+        let words = Words::of(language);
+
+        for kind in [Kind::Firmware, Kind::Font] {
+            for fault in faults {
+                let line = words.download_fault_line(kind, fault);
+
+                assert!(!line.is_empty(), "{kind:?}/{fault:?} has no sentence");
+            }
+        }
     }
 }
 
@@ -568,6 +584,10 @@ const TABLE_FILE: &str = "hivebox-font-24px-v2.bin";
 
 /// The same, for the other half of a package: the face the table above was baked from.
 const FACE_FILE: &str = "hivebox-face-v2.otf";
+
+/// The name a release image has on the repository. Its version is the one the row reports after an
+/// install, because a slot cannot be asked what it holds — see [`Updater::landed`].
+const IMAGE_FILE: &str = "hivebox-firmware-v0.7.0.bin";
 
 /// A frame, which is the clock the page reads a request on — see [`Updater::subscription`].
 ///
@@ -601,6 +621,13 @@ fn face_body() -> String {
     "an OTF, and not a glyph table either".repeat(24)
 }
 
+/// The body of the image every firmware test below fetches. Not an image a chip could start — nothing
+/// on a desktop is — and that is the one thing about it this page never looks at: whether the bytes are
+/// a bootable image is the *write*'s question, and it is answered where the write happens.
+fn image_body() -> String {
+    "an app image, and not a glyph table or an OTF".repeat(64)
+}
+
 /// A manifest naming one table of exactly `bytes` bytes, and nothing else: a font that stands on its
 /// own, baked from the face the image carries.
 ///
@@ -617,6 +644,11 @@ fn manifest_with_package(face: usize, table: usize) -> String {
         r#"{{"font":{{"file":"{TABLE_FILE}","size":{table},"sha256":"",
              "face":{{"file":"{FACE_FILE}","size":{face},"sha256":""}}}}}}"#
     )
+}
+
+/// A manifest naming one *image*, and nothing else: a release of the box's own software.
+fn manifest_with_image(bytes: usize) -> String {
+    format!(r#"{{"firmware":{{"file":"{IMAGE_FILE}","size":{bytes},"sha256":""}}}}"#)
 }
 
 /// A page over a board whose client answers `script`, and the board itself.
@@ -669,7 +701,10 @@ fn the_tables_press_writes_the_table_to_the_card() {
     let path = dir.join(TABLE_FILE);
     assert!(path.is_file(), "the bytes went to the card and not through memory");
     assert_eq!(std::fs::read(&path).unwrap().len(), body.len());
-    assert_eq!(page.status, Status::Installed(Kind::Font));
+    assert_eq!(
+        page.status,
+        Status::Installed(Kind::Font, Version::parse("v2").unwrap())
+    );
     assert_eq!(
         page.installed.font.as_ref().map(Version::text),
         Some("v2"),
@@ -725,7 +760,10 @@ fn a_packages_press_fetches_both_halves_and_installs_the_pair() {
 
     settle(&board, &mut page);
 
-    assert_eq!(page.status, Status::Installed(Kind::Font));
+    assert_eq!(
+        page.status,
+        Status::Installed(Kind::Font, Version::parse("v2").unwrap())
+    );
     assert_eq!(
         std::fs::read(dir.join(TABLE_FILE)).expect("the table landed").len(),
         table.len()
@@ -903,6 +941,77 @@ fn a_file_that_is_not_the_size_it_was_named_is_not_kept() {
         Status::DownloadFailed(Kind::Font, DownloadFault::Incomplete)
     );
     assert!(!dir.join(TABLE_FILE).exists());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The image's press fetches the release into the second app slot, and the sentence names the version
+/// the manifest did.
+///
+/// What can be seen from here is the *decision* and not the slot: no desktop has a second app
+/// partition, so where the bytes ended up is [`SimHttp`]'s own business — see its `slot` — and what this
+/// page is asked to get right is that the press went after the release at all, and that the version it
+/// reports is the release's rather than the card's, which is where the other row reads its own.
+///
+/// The row and the sentence say two different things on purpose, and both are true: the box is
+/// *running* the image it booted, and it now *has* the newer one in the slot the boot is not using.
+/// That gap is exactly what the second button is for.
+#[test]
+fn the_images_press_installs_the_release_and_names_its_version() {
+    let dir = scratch("firmware");
+    let body = image_body();
+    let script = SimHttp::answering(manifest_with_image(body.len())).then(body);
+    let (board, mut page) = answered_page(&dir, script);
+
+    assert_eq!(page.status, Status::Answered);
+    assert!(
+        page.offer(Kind::Firmware).is_some(),
+        "the manifest's release against the image the box booted"
+    );
+
+    page.update(Message::Install(Kind::Firmware));
+    assert_eq!(page.status, Status::Downloading(Kind::Firmware));
+
+    settle(&board, &mut page);
+
+    assert_eq!(
+        page.status,
+        Status::Installed(Kind::Firmware, Version::parse("v0.7.0").unwrap())
+    );
+    assert_eq!(
+        page.installed.firmware.as_ref().map(Version::text),
+        Some("v0.1.0"),
+        "and the box is still running what it booted, until it is reset"
+    );
+
+    let words = Words::of(Language::English);
+    let line = page.prompt(&words).expect("an install is a prompt").line;
+    assert!(line.contains("v0.7.0"), "{line} names the release that landed");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An image the repository does not have is not installed: a `404` is an answer, and what it answered
+/// with is a page rather than a release.
+///
+/// The slot makes this the more dangerous of the two rows to get wrong — an error page written into
+/// one erases the image that was there — so the refusal is drawn from the *status* and nothing is
+/// thrown at the slot at all.
+#[test]
+fn an_image_that_is_not_there_is_not_installed() {
+    let dir = scratch("firmware-missing");
+    let body = image_body();
+    let script = SimHttp::answering(manifest_with_image(body.len()))
+        .then((404u16, "<html>not found</html>"));
+    let (board, mut page) = answered_page(&dir, script);
+
+    page.update(Message::Install(Kind::Firmware));
+    settle(&board, &mut page);
+
+    assert_eq!(
+        page.status,
+        Status::DownloadFailed(Kind::Firmware, DownloadFault::NotFound)
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -490,13 +490,14 @@ impl WebStatus {
 
 /// Where an answer's bytes go as they arrive.
 ///
-/// This is the one thing about a request that a caller cannot leave unsaid, because the two answers
+/// This is the one thing about a request that a caller cannot leave unsaid, because the answers
 /// differ by an order of magnitude: a document — a forecast, a manifest, a page of JSON — is a few
 /// kilobytes and belongs in memory, where `HttpResponse::MAX_BODY_BYTES` is the bound that keeps a
-/// surprising one from eating the heap; a *file* — a glyph table, a picture, a firmware image — is
-/// megabytes and belongs on a filesystem, where its size is the filesystem's problem and not the
-/// board's memory. The same request with the wrong sink is an out-of-memory reboot or a needless
-/// write to the card, so the choice is made by the caller that knows what it asked for.
+/// surprising one from eating the heap; a *file* — a glyph table, a picture, a font — is megabytes
+/// and belongs on a filesystem, where its size is the filesystem's problem and not the board's
+/// memory; and an *image* is megabytes whose destination is a partition this trait picks and a
+/// caller cannot name. The same request with the wrong sink is an out-of-memory reboot or a
+/// needless write to the card, so the choice is made by the caller that knows what it asked for.
 ///
 /// The path rides along with the choice rather than being a second argument to the backend: which
 /// request writes where is one decision, and a backend that took the two separately would be a
@@ -513,14 +514,25 @@ pub enum Sink {
     /// them on the way). A download that fails part way leaves nothing behind — see
     /// [`HttpFault::Storage`], which is the failure, and the removal that goes with it.
     File(String),
+    /// Into the app slot this box is *not* running from, as the image it boots next.
+    ///
+    /// A slot and not a path, because which partition an update goes into is the partition table's
+    /// answer and not a caller's: a backend picks the one the running image is not in, so a request
+    /// can be aimed at *an* image without anything above this trait being able to aim at the one in
+    /// use. The bytes are a flash write rather than a file, so a body of any size the slot has room
+    /// for is an update — and it is only an update once the *whole* of it has landed: a slot half
+    /// written to is not made bootable, and the box goes on starting from what it started from. See
+    /// [`HttpFault::Storage`], which is that failure and the one this may hit for room.
+    Ota,
 }
 
 /// How much of a file has arrived, for the bar a page draws while it waits.
 ///
 /// A second question about a request, beside [`HttpState`], and a separate one because it is asked by
 /// a different caller: a page waiting on a *document* waits a second and draws a spinner, while a page
-/// waiting on a *file* waits a minute and has to show the minute passing. Only a
-/// [`Sink::File`] request has one worth reading — the buffer's progress is a number nothing draws.
+/// waiting on a *file* waits a minute and has to show the minute passing. A [`Sink::File`] or
+/// [`Sink::Ota`] request is the kind with one worth reading — a document's progress is a number
+/// nothing draws.
 ///
 /// `total` is what the server said in `Content-Length`, and `0` when it said nothing: a chunked
 /// answer has no length until it is over, and a bar that invented one would be a bar that lied. A
@@ -582,9 +594,15 @@ pub enum HttpFault {
     /// rather than of the network — the bytes were arriving — and the one to tell apart from
     /// [`HttpFault::Unreachable`], because what a person does about it is look at the card.
     ///
+    /// A [`Sink::Ota`] write lands here too, and for everything that can go wrong with one: no second
+    /// app slot in the partition table, a slot with no room for the image, a flash write that would
+    /// not take, and an answer that turned out not to be an image this chip can start. All four are
+    /// "the bytes did not become what was asked for", and none of them is the network's.
+    ///
     /// Nothing is left behind: a half-written file is removed rather than kept, since a truncated
     /// glyph table reads as a font with some of its characters missing, which is a failure that
-    /// surfaces far from its cause.
+    /// surfaces far from its cause — and a half-written *slot* is dropped rather than made bootable,
+    /// so the box goes on starting from the image it started from.
     Storage,
     /// This board cannot make requests at all: its image has no HTTP client in it. Not a fault of the
     /// network, and the answer while a backend is still a placeholder — the same note
@@ -597,6 +615,11 @@ pub enum HttpFault {
 pub struct HttpResponse {
     /// The status code as the server wrote it. Carried rather than judged: a `404` with a body in it
     /// is an answer, and what a page does with one is the page's business.
+    ///
+    /// The one backend that judges it is a [`Sink::Ota`] write, which will not put the body of a
+    /// non-2xx answer into a slot: erasing an image to install a web page into its place is a worse
+    /// failure than the one being reported. The status is still carried, and the caller still reads
+    /// it as the fault it is.
     pub status: u16,
     /// The body, exactly as it arrived.
     ///
