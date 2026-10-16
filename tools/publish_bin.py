@@ -12,6 +12,14 @@ tools/publish_bin.py
 写进 `esp_app_desc_t.version`（见 `pomelo-firmware/firmware/CMakeLists.txt`），这里因此
 优先问镜像自己，问不到才退回 `git describe`。
 
+**要问的是应用镜像，不是要发布的那份合并镜像。**`bin/` 里放的是合并镜像（刷机写 `0x0`
+用），而 `esptool image-info` 读不了它 —— 合并镜像是一串首尾相接的独立镜像（bootloader、
+分区表、应用……），esptool 只认第一个，给的是一句"没有应用镜像描述"。能读出
+`esp_app_desc_t` 的只有同一次构建的 `build/firmware.bin`，也就是 app 分区里那份。两者在
+同一个 `build/` 目录下，所以这里顺着 `--firmware` 旁边去找它。找不到（构建目录被清过）
+才退回 `git describe`，并且**把这件事说出来** —— 退回之后拿到的不是"镜像自报的版本"，
+而是"工作区离最近的 tag 有多远"，两者只在要发布的那次提交正好打着 tag 时才相等。
+
 每种产物只留最新的一份：`bin/` 里旧版本的固件/字库会被删掉，和这个仓库的做法一致 ——
 每次提交删掉旧的、只提交最新的。
 
@@ -44,6 +52,10 @@ DEFAULT_FIRMWARE = os.path.join(
     WORKSPACE_ROOT, "pomelo-firmware", "firmware", "build", "merged-binary.bin"
 )
 
+# 1b. 同一个 `build/` 里能读出 `esp_app_desc_t` 的那一份：app 分区里的应用镜像。
+#     它是**问版本**的对象，而不是**发布**的对象 —— 合并镜像读不出描述（见文件头）。
+APP_IMAGE_NAME = "firmware.bin"
+
 # 2. 输出目录：仓库根下的 `bin/`，也正是更新页读取的路径
 #    （`release::MANIFEST_URL` = `<repo>/raw/main/bin/manifest.json`）。
 DEFAULT_BIN_DIR = os.path.join(WORKSPACE_ROOT, "bin")
@@ -55,6 +67,18 @@ FONT_TEMPLATE = "hivebox-font-24px-{version}.bin"
 # 4. 清旧版本时用的匹配式：只动这一类文件，免得把别的东西删掉。
 FIRMWARE_GLOB = re.compile(r"^hivebox-firmware-.*\.bin$")
 FONT_GLOB = re.compile(r"^hivebox-font-.*\.bin$")
+
+
+def display_path(path):
+    """给人看的路径：在仓库里就写相对路径，不在就写绝对路径。
+
+    Windows 上跨盘符 `os.path.relpath` 会抛 `ValueError`（C: 到 E: 之间没有相对路径），
+    而 `--firmware` 指到另一个盘是完全正常的用法 —— 打印一行路径不该因此崩掉。
+    """
+    try:
+        return os.path.relpath(path, WORKSPACE_ROOT)
+    except ValueError:
+        return os.path.abspath(path)
 
 
 def sha256_of(path):
@@ -128,6 +152,9 @@ def firmware_version_from_image(path):
 
     这是唯一不会说谎的来源：文件名的版本就是要和它一致。需要 esptool，且是
     ESP-IDF 的 Python 环境里那一份；本机没有就退回去问 git。
+
+    `path` 必须是**应用镜像**（`build/firmware.bin`）：合并镜像里第一个镜像是
+    bootloader，没有应用描述，esptool 会以非零退出，这里就成了"读不出来"。
     """
     try:
         result = subprocess.run(
@@ -168,15 +195,42 @@ def firmware_version_from_git():
     return result.stdout.strip() or None
 
 
-def resolve_firmware_version(image, override):
-    """固件版本的来源顺序：命令行 > 镜像自报 > git describe。"""
+def app_image_beside(artifact):
+    """`artifact` 旁边那份应用镜像，没有则返回 None。
+
+    就是同一个 `build/` 目录里的 `firmware.bin`：`idf.py build merge-bin` 先编出它，再把
+    bootloader、分区表和它拼成合并镜像，所以两者的版本是同一个。
+
+    `artifact` 自己就叫 `firmware.bin` 时返回 None —— 那说明调用方给的正是能读的那一份，
+    没有"旁边"可找。
+    """
+    if os.path.basename(artifact) == APP_IMAGE_NAME:
+        return None
+
+    beside = os.path.join(os.path.dirname(os.path.abspath(artifact)), APP_IMAGE_NAME)
+    return beside if os.path.isfile(beside) else None
+
+
+def resolve_firmware_version(artifact, override):
+    """固件版本的来源顺序：命令行 > 应用镜像自报 > git describe。
+
+    `artifact` 是**要发布的那一份**（合并镜像）；**要问的是它旁边那份应用镜像**，见
+    `app_image_beside` —— 合并镜像读不出 `esp_app_desc_t`。给的就是应用镜像时问它自己。
+    """
     if override:
+        print(f"[*] 命令行给的版本：{override}")
         return override
 
-    from_image = firmware_version_from_image(image)
+    app_image = app_image_beside(artifact) or artifact
+    from_image = firmware_version_from_image(app_image)
     if from_image:
-        print(f"[*] 镜像自报的版本：{from_image}")
+        print(f"[*] 镜像自报的版本：{from_image}（读的是 {display_path(app_image)}）")
         return from_image
+
+    # 读不出来就说清楚，而不是悄悄换一个来源 —— 这两个来源不总是相等。
+    print(f"[!] 读不出 {display_path(app_image)} 的版本，改问 git describe。")
+    print("    两者不等价：git 给的是「工作区离最近的 tag 有多远」，只有在要发布的这次")
+    print("    提交正好打着 tag 时，它才等于镜像自报的版本。先 `idf.py build`，或用 --version。")
 
     from_git = firmware_version_from_git()
     if from_git:
@@ -240,10 +294,11 @@ def main():
     parser.add_argument(
         "--firmware",
         default=DEFAULT_FIRMWARE,
-        help=f"固件镜像（默认 {os.path.relpath(DEFAULT_FIRMWARE, WORKSPACE_ROOT)}）",
+        help=f"要发布的固件镜像（默认 {os.path.relpath(DEFAULT_FIRMWARE, WORKSPACE_ROOT)}）；"
+        f"版本从同一个 build/ 里的 {APP_IMAGE_NAME} 读",
     )
     parser.add_argument("--font", help="字库文件；不给则清单里不写 font，更新页那一行就没有可下的东西")
-    parser.add_argument("--version", help="固件版本号；不给则问镜像，再不给则问 git describe")
+    parser.add_argument("--version", help="固件版本号；不给则问应用镜像，再不给则问 git describe")
     parser.add_argument("--font-version", help="字库版本号；不给则从字库文件名里读")
     parser.add_argument("--bin", default=DEFAULT_BIN_DIR, help="输出目录（默认仓库根的 bin/）")
     parser.add_argument("--dry-run", action="store_true", help="只打印会做什么，不落盘")
