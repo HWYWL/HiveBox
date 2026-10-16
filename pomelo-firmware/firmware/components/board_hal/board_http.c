@@ -62,6 +62,10 @@ static const char *TAG = "board_http";
 /** What this board calls itself to a server. Servers log it, and a few refuse a request without one. */
 #define HAL_HTTP_USER_AGENT "HiveBox/1.0"
 
+/** How many redirects one request follows before its last 3xx is handed back as the answer. The
+ * number is only a place to stop: a chain that loops would otherwise eat the whole timeout. */
+#define HAL_HTTP_MAX_REDIRECTS 4
+
 // ---- State ------------------------------------------------------------------
 typedef struct {
     int32_t state;
@@ -232,20 +236,52 @@ static void http_task(void *arg)
         goto out;
     }
 
-    esp_err_t err = esp_http_client_open(client, 0);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "open %s: %s", s_url, esp_err_to_name(err));
-        /* No cleanup here: `out` closes and frees the client once. Cleaning up as well would free it
-         * twice, and the second walk of the transport list calls whatever the freed handle now
-         * holds — the reboot a failed HTTPS open used to end in. */
-        fault = fault_of(err, tls);
-        goto out;
-    }
+    /* A 3xx is followed here, because the library only follows one on the path this is not. The
+     * config's auto-redirect reads as if that were handled, but `disable_auto_redirect` is consulted
+     * inside `esp_http_client_perform()` — and that is the one call this request cannot use, since it
+     * hands the whole body back at once, while this one writes a file as the bytes arrive and looks
+     * for a cancel between chunks. Driven by hand, nothing looks at the status, so a redirect's own
+     * page is what a caller reads: Gitee answers a raw path with a 302 to `raw.giteeusercontent.com`,
+     * and its redirect page would be parsed as a manifest. `Location` is kept while the headers are
+     * parsed, and `esp_http_client_set_redirection` turns it into the next URL — before the next
+     * `open`, which walks `esp_http_client_prepare` and frees it. */
+    for (int hop = 0; ; hop++) {
+        esp_err_t err = esp_http_client_open(client, 0);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "open %s: %s", s_url, esp_err_to_name(err));
+            /* No cleanup here: `out` closes and frees the client once. Cleaning up as well would free
+             * it twice, and the second walk of the transport list calls whatever the freed handle now
+             * holds — the reboot a failed HTTPS open used to end in. */
+            fault = fault_of(err, tls);
+            goto out;
+        }
 
-    /* Headers first, so the status code is known before the body is read: a 404 is an answer with a
-     * body in it and not a fault, and a page gets to see both. */
-    (void)esp_http_client_fetch_headers(client);
-    status = (int32_t)esp_http_client_get_status_code(client);
+        /* Headers first, so the status code is known before the body is read: a 404 is an answer with
+         * a body in it and not a fault, and a page gets to see both. */
+        (void)esp_http_client_fetch_headers(client);
+        status = (int32_t)esp_http_client_get_status_code(client);
+
+        if (status < 300 || status >= 400) {
+            /* Not a redirect: this is the answer, and what is read below is its body. */
+            break;
+        }
+        if (hop >= HAL_HTTP_MAX_REDIRECTS) {
+            ESP_LOGW(TAG, "over %d redirects: %s", HAL_HTTP_MAX_REDIRECTS, s_url);
+            break;
+        }
+        if (esp_http_client_set_redirection(client) != ESP_OK) {
+            /* No `Location` to go to, or one that leaves https. Either way the 3xx is all there is,
+             * and handing it up beats answering with something invented. */
+            ESP_LOGW(TAG, "%s -> %d, nowhere to follow", s_url, (int)status);
+            break;
+        }
+
+        ESP_LOGI(TAG, "%s -> %d, following", s_url, (int)status);
+        /* `close` puts the state back to INIT and drops the socket; the next `open` connects again —
+         * to another host, which is what this one is. Nothing read the redirect's body: it is not the
+         * answer, and `used` counts only what the caller is given. */
+        esp_http_client_close(client);
+    }
 
     /* Where the bytes go. A file is opened before the first chunk, so that a path that cannot be
      * written is the request's own answer rather than a mystery at the end of a long download — and
