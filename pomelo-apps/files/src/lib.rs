@@ -33,6 +33,7 @@ use iced::{Subscription, Theme};
 
 use pomelo_hal::{Board, VolumeInfo};
 use pomelo_widgets::preferences::SystemPreferences;
+use pomelo_widgets::touch_keyboard::{KeyAction, KeyboardMode};
 
 use entry::Entry;
 
@@ -57,8 +58,8 @@ pub enum Message {
     Copy,
     /// Copy what has been kept into the directory that is up.
     Paste,
-    /// The name in the prompt changed.
-    Name(String),
+    /// A key of the prompt's keyboard: a character, a backspace, a space, return, or a page change.
+    Key(KeyAction),
     /// The prompt's button: do the thing it is asking about.
     Confirm,
     /// Put the prompt away and do nothing.
@@ -82,6 +83,10 @@ enum Asking {
 struct Prompt {
     asking: Asking,
     text: String,
+    /// Which page the keyboard under a name is on: the letters, the capitals, or one of the two rows
+    /// of signs. The prompt's and not the app's, because a keyboard exists only while a name is being
+    /// asked for — and every prompt that asks for one starts on the letters.
+    keyboard: KeyboardMode,
 }
 
 /// The app.
@@ -304,6 +309,36 @@ impl Files {
         self.reload();
     }
 
+    /// One key of the prompt's keyboard.
+    ///
+    /// The app owns the string, as the terminal owns its input line and the settings app owns its
+    /// password: `iced::widget::text_input` takes its focus from a physical keyboard and a focus
+    /// system, and this panel has neither — the keys under the prompt *are* the keyboard.
+    fn key(&mut self, action: KeyAction) {
+        match action {
+            KeyAction::Char(character) => self.type_name(character),
+            KeyAction::Space => self.type_name(' '),
+            KeyAction::Backspace => {
+                if let Some(prompt) = self.prompt.as_mut() {
+                    prompt.text.pop();
+                }
+            }
+            KeyAction::SwitchMode(mode) => {
+                if let Some(prompt) = self.prompt.as_mut() {
+                    prompt.keyboard = mode;
+                }
+            }
+            KeyAction::Enter => self.confirm(),
+        }
+    }
+
+    /// One character into the name the prompt is asking for, and nothing when nothing is being asked.
+    fn type_name(&mut self, character: char) {
+        if let Some(prompt) = self.prompt.as_mut() {
+            prompt.text.push(character);
+        }
+    }
+
     /// Put what is selected on the clipboard, to be copied somewhere else.
     fn copy(&mut self) {
         self.clipboard = self.selected().map(|entry| entry.path.clone());
@@ -336,6 +371,7 @@ impl Files {
                 self.prompt = Some(Prompt {
                     asking: Asking::NewFolder,
                     text: String::new(),
+                    keyboard: KeyboardMode::Lower,
                 });
             }
             Message::Rename => {
@@ -343,6 +379,7 @@ impl Files {
                     self.prompt = Some(Prompt {
                         asking: Asking::Rename(entry.path.clone()),
                         text: entry.name.clone(),
+                        keyboard: KeyboardMode::Lower,
                     });
                 }
             }
@@ -351,16 +388,13 @@ impl Files {
                     self.prompt = Some(Prompt {
                         asking: Asking::Delete(entry.path.clone(), entry.is_dir()),
                         text: String::new(),
+                        keyboard: KeyboardMode::Lower,
                     });
                 }
             }
             Message::Copy => self.copy(),
             Message::Paste => self.paste(),
-            Message::Name(text) => {
-                if let Some(prompt) = &mut self.prompt {
-                    prompt.text = text;
-                }
-            }
+            Message::Key(action) => self.key(action),
             Message::Confirm => self.confirm(),
             Message::Cancel => self.prompt = None,
         }

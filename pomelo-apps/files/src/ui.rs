@@ -8,14 +8,20 @@
 //! The three surfaces are stacked in the order a finger meets them: the toolbar says *where*, the
 //! list says *what*, and the action bar says *what can be done*. A prompt, when there is one, covers
 //! all three, because while a name is being typed nothing else on the page is a target.
+//!
+//! The two prompts that ask for a name carry the shared on-screen keyboard at their foot, and the
+//! name is drawn by this page rather than given to a `text_input`: that widget takes its focus from a
+//! physical keyboard and a focus system, and the panel has neither — the band under the prompt *is*
+//! the keyboard, exactly as it is in the terminal and the settings app.
 
 use iced::theme::Palette;
 use iced::widget::button::Status;
-use iced::widget::{button, column, container, row, scrollable, text, text_input, Column, Row, Space};
+use iced::widget::{button, column, container, row, scrollable, text, Column, Row, Space};
 use iced::{Alignment, Border, Color, Element, Length, Shadow, Theme};
 
 use pomelo_material_symbols::Icon;
 use pomelo_widgets::preferences::ThemeMode;
+use pomelo_widgets::touch_keyboard;
 
 use crate::entry::{self, Entry};
 use crate::style::{self, Sizes};
@@ -374,7 +380,9 @@ fn action_style(status: Status, mode: ThemeMode, enabled: bool, danger: bool) ->
 /// The box over the list: a title, a name when there is one to type, and two buttons.
 ///
 /// A question about a removal has no box to type in, and that is the whole of the difference between
-/// the three prompts: they are the same dialog, and only one of them is asking for a name.
+/// the three prompts: they are the same dialog, and only one of them is asking for a name. A prompt
+/// that asks for a name also carries the keyboard it is typed on — the shared band, at the foot of
+/// the panel, as tall as the terminal's and the settings app's on the same screen.
 fn prompt_layer<'a>(files: &Files, sizes: Sizes, mode: ThemeMode, words: Words) -> Element<'a, Message> {
     let Some(prompt) = files.prompt.as_ref() else {
         return Space::new().height(0).into();
@@ -393,13 +401,7 @@ fn prompt_layer<'a>(files: &Files, sizes: Sizes, mode: ThemeMode, words: Words) 
         .push(text(title).size(sizes.heading).color(style::ink(mode)));
 
     if typing {
-        card = card.push(
-            text_input(words.hint, &prompt.text)
-                .on_input(Message::Name)
-                .on_submit(Message::Confirm)
-                .size(sizes.text)
-                .padding(style::GAP),
-        );
+        card = card.push(name_line(&prompt.text, words.hint, sizes, mode));
     }
 
     card = card.push(
@@ -424,13 +426,92 @@ fn prompt_layer<'a>(files: &Files, sizes: Sizes, mode: ThemeMode, words: Words) 
             ..container::Style::default()
         });
 
-    container(boxed)
+    // The card takes whatever the band under it does not, so a name is asked for *above* its keys
+    // rather than behind them — and a question with no keys keeps the middle of the page to itself.
+    let mut layer = column![container(boxed)
+        .width(Length::Fill)
+        .height(Length::Fill)
         .center_x(Length::Fill)
-        .center_y(Length::Fill)
+        .center_y(Length::Fill)]
+    .width(Length::Fill)
+    .height(Length::Fill);
+
+    if typing {
+        layer = layer.push(
+            container(touch_keyboard::band_with_theme(
+                prompt.keyboard,
+                Message::Key,
+                mode,
+            ))
+            .width(Length::Fill)
+            .height(Length::Fixed(style::keyboard_height())),
+        );
+    }
+
+    container(layer)
         .width(Length::Fill)
         .height(Length::Fill)
         .style(|_theme| container::Style {
             background: Some(Color::from_rgba8(0, 0, 0, 0.45).into()),
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// The name being typed, on the slab it is typed into, with the bar that says where the next
+/// character lands.
+///
+/// Drawn rather than handed to a `text_input`: that widget takes focus from a physical keyboard this
+/// panel has no way to give it, and it would keep the string to itself — here the app owns the name,
+/// as the terminal owns its input line and the settings app owns its password. The hint stands in
+/// place of the name while there is none, in the muted colour, so the empty box still says what it
+/// wants.
+fn name_line<'a>(
+    name: &str,
+    hint: &'static str,
+    sizes: Sizes,
+    mode: ThemeMode,
+) -> Element<'a, Message> {
+    let (label, colour) = if name.is_empty() {
+        (hint.to_string(), style::muted(mode))
+    } else {
+        (name.to_string(), style::ink(mode))
+    };
+
+    let line = row![
+        text(label).size(sizes.text).color(colour),
+        Space::new().width(Length::Fixed(style::CARET_GAP)),
+        caret(sizes),
+    ]
+    .align_y(Alignment::Center);
+
+    container(line)
+        .width(Length::Fill)
+        .height(Length::Fixed(sizes.row))
+        .align_y(Alignment::Center)
+        .padding([0.0, style::GAP])
+        .style(move |_theme| container::Style {
+            background: Some(style::surface(mode).into()),
+            border: Border {
+                radius: style::RADIUS.into(),
+                width: 1.0,
+                color: style::muted(mode),
+            },
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// The bar standing where the next character of a name goes.
+///
+/// Painted, not typed: the font is a Latin and Chinese subset with no block in it, which is the same
+/// reason the terminal paints its cursor and the settings app paints its password dots.
+fn caret<'a>(sizes: Sizes) -> Element<'a, Message> {
+    container(Space::new())
+        .width(Length::Fixed(style::CARET_W))
+        .height(Length::Fixed(sizes.text))
+        .style(|_theme| container::Style {
+            background: Some(style::accent().into()),
             ..container::Style::default()
         })
         .into()

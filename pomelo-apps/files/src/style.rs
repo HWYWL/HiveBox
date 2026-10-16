@@ -23,6 +23,19 @@ pub const GAP: f32 = 6.0;
 /// The corner of everything on this page that has one: the rows, the toolbar and the prompt.
 pub const RADIUS: f32 = 12.0;
 
+/// The bar that marks where the next character of a prompt's name lands, and the room kept for it.
+pub const CARET_W: f32 = 2.0;
+pub const CARET_GAP: f32 = 4.0;
+
+/// The name prompt's keyboard: the band's height for this panel.
+///
+/// The formula lives with the keyboard — `pomelo_widgets::touch_keyboard::band_height` — so this band
+/// is the same one the terminal draws and the settings app draws for a Wi-Fi password on the same
+/// screen. A prompt that sized its own keyboard would be a second opinion on how big a keyboard is.
+pub fn keyboard_height() -> f32 {
+    pomelo_widgets::touch_keyboard::band_height(PANEL)
+}
+
 /// Everything the page measures with, from one base font size.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sizes {
