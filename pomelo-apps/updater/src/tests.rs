@@ -11,11 +11,12 @@
 //! asserted is what a person would see: the file on the card, the bar while it is still coming, and
 //! the sentence when it does not arrive.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use pomelo_hal::sim::SimHttp;
-use pomelo_hal::Board;
+use pomelo_hal::sim::{SimHttp, SimPower};
+use pomelo_hal::{Board, HalError, PowerBackend};
 use pomelo_widgets::preferences::Language;
 
 use crate::release::{Kind, Manifest, Version};
@@ -403,6 +404,119 @@ fn what_is_installed_is_drawn_differently_from_what_could_not_be_read() {
     assert_eq!(english.installed_line(None, Kind::Font), "not installed");
     assert_eq!(chinese.installed_line(None, Kind::Font), "未安装");
     assert_eq!(english.installed_line(None, Kind::Firmware), "unknown");
+}
+
+/// An install leaves a *question* on the page, and a question is the one thing here with two answers:
+/// restart now, or later. Every other press is a report, and a report has nothing to choose between.
+#[test]
+fn an_install_asks_whether_to_restart_and_a_report_does_not() {
+    let words = Words::of(Language::Chinese);
+    let mut page = app(MANIFEST, Some("v0.6.0"), Some("v2"));
+
+    page.status = Status::Installed(Kind::Font);
+
+    let question = page.prompt(&words).expect("an install is a prompt");
+
+    assert_eq!(
+        question.button, words.later,
+        "the first button is the answer that is not now"
+    );
+    assert_eq!(
+        question.confirm,
+        Some(words.restart),
+        "and the second one resets the box"
+    );
+
+    // The other three presses: the download (a bar), the refusal, and the fault. None of them is a
+    // question, so none of them is drawn with a second button.
+    for status in [
+        Status::Downloading(Kind::Font),
+        Status::Unsupported(Kind::Font),
+        Status::DownloadFailed(Kind::Font, DownloadFault::NotFound),
+    ] {
+        // Named before it is handed over: `Status` is not `Copy`, and the name is what the message
+        // below has to say when one of these three grows a second button it should not have.
+        let what = format!("{status:?}");
+
+        page.status = status;
+
+        let report = page.prompt(&words).expect("a press is a prompt");
+
+        assert_eq!(report.confirm, None, "{what} is a report");
+    }
+}
+
+/// The simulator's power backend with a count of how often it was asked to restart.
+///
+/// The simulator's own `restart` is a no-op by necessity — a desktop process has no board to reset — so
+/// a test that wants to see the *call* has to be the thing that sees it. Everything else this backend
+/// reports is the simulator's, so what the page reads here is what the desktop reads.
+struct CountingPower {
+    sim: SimPower,
+    restarts: Arc<AtomicUsize>,
+}
+
+impl PowerBackend for CountingPower {
+    fn init(&mut self) -> Result<(), HalError> {
+        self.sim.init()
+    }
+
+    fn battery_percent(&self) -> Result<u8, HalError> {
+        self.sim.battery_percent()
+    }
+
+    fn is_charging(&self) -> Result<bool, HalError> {
+        self.sim.is_charging()
+    }
+
+    fn battery_voltage_mv(&self) -> Result<u32, HalError> {
+        self.sim.battery_voltage_mv()
+    }
+
+    fn chip_temperature_c(&self) -> Result<f32, HalError> {
+        self.sim.chip_temperature_c()
+    }
+
+    /// The one thing this backend does on its own: remember that it was asked.
+    fn restart(&self) -> Result<(), HalError> {
+        self.restarts.fetch_add(1, Ordering::SeqCst);
+
+        Ok(())
+    }
+}
+
+/// The second button resets the box, which is the whole of what it is for: a file that has landed is not
+/// a file in use until the box has been reset, so this is the last step of the install and not a detour.
+///
+/// The prompt goes with the press, because on a host the call *returns* — the box that answered is not
+/// the box that would restart — and a page still asking whether to reset a machine that has already
+/// answered would be a page that did not believe its own call.
+#[test]
+fn the_restart_button_resets_the_box_and_puts_the_question_away() {
+    let restarts = Arc::new(AtomicUsize::new(0));
+    let board = Arc::new(
+        Board::simulated().with_power(Box::new(CountingPower {
+            sim: SimPower::new(),
+            restarts: Arc::clone(&restarts),
+        })),
+    );
+    let mut page = Updater::new(board);
+
+    page.manifest = Manifest::parse(MANIFEST);
+    page.status = Status::Installed(Kind::Font);
+
+    page.update(Message::Restart);
+
+    assert_eq!(
+        restarts.load(Ordering::SeqCst),
+        1,
+        "the box was asked to reset, once"
+    );
+    assert_eq!(
+        page.status,
+        Status::Answered,
+        "and the question is over, so the rows are the page again"
+    );
 }
 
 /// A fault is a sentence in the page's own language, and every fault in the list has one.

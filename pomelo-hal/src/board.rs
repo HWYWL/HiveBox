@@ -132,6 +132,17 @@ impl Board {
         self
     }
 
+    /// The same board with a different power backend in it.
+    ///
+    /// The desktop's second seam, and for the same reason as [`Board::with_http`]: the simulator's own
+    /// `restart` cannot do anything — a desktop process is not the board — so a test that wants to see a
+    /// page *ask* for a reset has to be the thing that counts the asking.
+    #[cfg(not(target_os = "espidf"))]
+    pub fn with_power(mut self, power: Box<dyn PowerBackend>) -> Self {
+        self.power = Mutex::new(power);
+        self
+    }
+
     /// Initialize every backend that requires explicit setup.
     ///
     /// Idempotent and best-effort: errors are ignored so a missing optional

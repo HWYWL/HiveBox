@@ -113,6 +113,16 @@ pub fn accent() -> Color {
     Color::from_rgb8(0x3F, 0x51, 0xB5)
 }
 
+/// The accent under a finger.
+///
+/// A shade of its own, because the one button drawn in the accent is *always* drawn in it: every other
+/// button on this page changes its fill when it is pressed, and a press has to be visible on a fill that
+/// does not change. Darker rather than lighter, which is the direction a press already goes on the two
+/// buttons that swap the accent in.
+pub fn accent_pressed() -> Color {
+    Color::from_rgb8(0x33, 0x42, 0x94)
+}
+
 /// Something is up to date: a row that has nothing to offer.
 ///
 /// Green, and drawn with it only when a check has *said* so: a row that draws the same green before
@@ -175,5 +185,12 @@ mod tests {
         assert_ne!(good(), bad());
         assert_ne!(bad(), accent());
         assert_eq!(colours.len(), 3);
+    }
+
+    /// The accent's pressed shade is a shade of the accent, so that a press shows on the one button
+    /// whose fill does not otherwise change.
+    #[test]
+    fn the_accent_has_a_pressed_shade_of_its_own() {
+        assert_ne!(accent(), accent_pressed());
     }
 }

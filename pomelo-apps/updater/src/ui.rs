@@ -21,8 +21,8 @@
 //! arrived under two rows they were not looking at.
 //!
 //! The prompt is [`crate::Prompt`]'s description and not this file's invention — which sentence, whether
-//! there is a bar, and what the one button says are decided where a test can hold them up. This file
-//! decides where the ink comes from.
+//! there is a bar, and what each of its buttons says are decided where a test can hold them up. This
+//! file decides where the ink comes from.
 //!
 //! # What is not in the row
 //!
@@ -383,28 +383,60 @@ fn prompt_overlay<'a>(
         );
     }
 
-    // One button, and what it says is which of the two things pressing it does: stop the download, or
-    // put the sentence away. It is never disabled, because there is nothing here that cannot be left.
-    children.push(
-        button(
-            container(text(prompt.button).size(sizes.small).color(style::ink(theme)))
-                .width(Length::Fill)
-                .center_x(Length::Fill),
-        )
-        .on_press(Message::Dismiss)
-        .width(Length::Fill)
-        .padding([8.0, 10.0])
-        .style(move |_theme: &Theme, status: button::Status| {
-            let fill = if is_pressed(status) {
-                style::accent()
-            } else {
-                style::surface(theme)
-            };
+    // The first button, and what it says is which of the things pressing it does: stop the download,
+    // put a report away, or answer "not now" to the question an install leaves. It is never disabled,
+    // because there is nothing here that cannot be left.
+    let away = button(
+        container(text(prompt.button).size(sizes.small).color(style::ink(theme)))
+            .width(Length::Fill)
+            .center_x(Length::Fill),
+    )
+    .on_press(Message::Dismiss)
+    .width(Length::Fill)
+    .padding([8.0, 10.0])
+    .style(move |_theme: &Theme, status: button::Status| {
+        let fill = if is_pressed(status) {
+            style::accent()
+        } else {
+            style::surface(theme)
+        };
 
-            button_style(fill, style::ink(theme), style::RADIUS / 2.0)
-        })
-        .into(),
-    );
+        button_style(fill, style::ink(theme), style::RADIUS / 2.0)
+    });
+
+    // The second button, for the one sentence on this page that is a question, and drawn *filled* where
+    // everything else here is a surface: it is what the page expects a person to press next, and the
+    // accent is the colour this page already uses for the thing to be taken. White ink on it rather than
+    // the theme's, because the fill does not follow the theme — see [`style::accent`].
+    // Spelled out for the reason the row's own action is: the two arms are two different widgets, and
+    // `into` has nothing to infer from until they are both `Element`s.
+    let answers: Element<'a, Message> = match prompt.confirm {
+        None => away.into(),
+        Some(confirm) => {
+            let reset: Element<'a, Message> = button(
+                container(text(confirm).size(sizes.small).color(Color::WHITE))
+                    .width(Length::Fill)
+                    .center_x(Length::Fill),
+            )
+            .on_press(Message::Restart)
+            .width(Length::Fill)
+            .padding([8.0, 10.0])
+            .style(move |_theme: &Theme, status: button::Status| {
+                let fill = if is_pressed(status) {
+                    style::accent_pressed()
+                } else {
+                    style::accent()
+                };
+
+                button_style(fill, Color::WHITE, style::RADIUS / 2.0)
+            })
+            .into();
+
+            row![away, reset].spacing(style::GAP).into()
+        }
+    };
+
+    children.push(answers);
 
     let panel = container(Column::with_children(children).spacing(style::GAP))
         .width(Length::Fixed(style::PROMPT))

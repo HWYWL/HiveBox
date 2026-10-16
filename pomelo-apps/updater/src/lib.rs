@@ -63,6 +63,14 @@
 //! A press is per-row and its outcome is modal — [`Prompt`] — while the *check* is page-wide and its
 //! state is the line at the bottom. The two are drawn apart because they are asked apart: one manifest
 //! answers for both rows, and a person who pressed one button is being told about that button.
+//!
+//! # An install is not finished until the box has been reset
+//!
+//! A file that has just landed is not a file in use: the interface draws from the table the *boot*
+//! loaded, and an image written into the second slot is not the image running. So the sentence that
+//! reports an install is the page's one *question* — restart now, or later — and the one place here
+//! where two buttons are honest, because there is something to choose between and the box cannot use
+//! what it has just taken until it has been reset. See [`Message::Restart`].
 
 mod json;
 mod release;
@@ -105,11 +113,18 @@ pub enum Message {
     Check,
     /// The button on a row that has something to fetch.
     Install(Kind),
-    /// The one button on the prompt: put it away — and abandon the download, when what it is covering
-    /// is one. There is one button and never two, because the two things a person might want while a
-    /// bar moves (let it finish, stop it) are the same button at different moments: there is nothing to
-    /// confirm and nothing to choose, only this to be rid of.
+    /// The prompt's first button: put it away — and abandon the download, when what it is covering is
+    /// one. The two things a person might want while a bar moves (let it finish, stop it) are the same
+    /// button at different moments: there is nothing to confirm and nothing to choose, only this to be
+    /// rid of. It is also the answer to the restart question that is *not* now — see [`Words::later`].
     Dismiss,
+    /// The prompt's second button, and the only second button on the page: reset the box, which is the
+    /// one way the file that has just landed becomes the file the box is using.
+    ///
+    /// On the board this does not return: the SoC goes back to its bootloader and the frame that would
+    /// have drawn the prompt away is never drawn. What is left to handle is a backend that cannot reset
+    /// it, and that case says so rather than going on as if the machine had restarted.
+    Restart,
 }
 
 /// What the page has to draw.
@@ -275,10 +290,14 @@ pub(crate) struct Prompt {
     pub(crate) progress: Option<f32>,
     /// How far along, in bytes. Empty when there is no download.
     pub(crate) bytes: String,
-    /// What the one button says: [`Words::cancel`] while a download is out and [`Words::close`] for
-    /// everything else — the same button at the two moments a person could want it, which is *now* and
-    /// *whenever*. There is never a second button, because there is nothing here to choose between.
+    /// What the first button says: [`Words::cancel`] while a download is out, [`Words::later`] when the
+    /// sentence is a question, and [`Words::close`] for everything else — the same button at the three
+    /// moments a person could want it, which is *now*, *not yet* and *whenever*.
     pub(crate) button: &'static str,
+    /// What the second button says, when there is one: [`Words::restart`] for an install, which is the
+    /// one thing on this page a person is expected to do next. `None` everywhere else, because a second
+    /// button is only honest where there is something to choose between — see this module's header.
+    pub(crate) confirm: Option<&'static str>,
 }
 
 /// A number of bytes as a person reads one: `228 KB`, `5.8 MB`, `12 B`.
@@ -669,6 +688,7 @@ impl Updater {
             }
             Message::Install(kind) => self.install(kind),
             Message::Dismiss => self.dismiss(),
+            Message::Restart => self.restart(),
         }
     }
 
@@ -771,6 +791,27 @@ impl Updater {
         }
     }
 
+    /// Resets the box, which is what the second button on an install's prompt asks for.
+    ///
+    /// The one thing this page can ask for that it cannot undo, and the point of installing anything:
+    /// the file has landed and nothing is using it yet. On the board the call does not return — the SoC
+    /// is back in its bootloader — so what is left to get right is the host's case, where there is no
+    /// board to reset: the prompt goes away, because a page still asking whether to restart a machine
+    /// that has already answered would be a page that did not believe its own call.
+    ///
+    /// A backend that *refuses* is the other case, and there the prompt stays up: the sentence is still
+    /// true — the version is on the box and not in use — and pressing again is the answer.
+    fn restart(&mut self) {
+        // The lock is taken and given back before the prompt is touched: the answer is a `Result` and
+        // not a borrow of the board, and `dismiss` wants the page to itself.
+        let asked = self.board.power().restart();
+
+        match asked {
+            Ok(()) => self.dismiss(),
+            Err(error) => eprintln!("[updater] the board could not be restarted: {error}"),
+        }
+    }
+
     /// Puts the prompt away, abandoning the download if that is what it was covering.
     ///
     /// The status goes back to what the rows were saying before the press, which is
@@ -813,6 +854,7 @@ impl Updater {
             progress: None,
             bytes: String::new(),
             button: words.close,
+            confirm: None,
         };
 
         match &self.status {
@@ -833,13 +875,22 @@ impl Updater {
             }
             Status::Installed(kind) => {
                 prompt.title = words.name(*kind);
-                prompt.line = match self.installed_version(*kind) {
-                    Some(version) => words.installed_ok_line(*kind, version),
-                    // The file landed and the scan did not find it, so there is no version to name.
+
+                match self.installed_version(*kind) {
+                    // The version is on the box and not yet in use, so the report is also a question:
+                    // restart now, or later. The page's only second button, and the only place where
+                    // what a person does *next* is one of two things rather than one.
+                    Some(version) => {
+                        prompt.line = words.installed_ok_line(*kind, version);
+                        prompt.button = words.later;
+                        prompt.confirm = Some(words.restart);
+                    }
+                    // The file landed and the *scan* did not find it, so there is no version to name.
                     // Nothing was installed and this page will not claim otherwise: the nearest true
-                    // sentence is the one about a write that did not take.
-                    None => words.fault_line(HttpFault::Storage).to_string(),
-                };
+                    // sentence is the one about a write that did not take — and there is nothing to
+                    // restart *into*, so no second button either.
+                    None => prompt.line = words.fault_line(HttpFault::Storage).to_string(),
+                }
             }
             Status::DownloadFailed(kind, fault) => {
                 prompt.title = words.name(*kind);
@@ -1076,11 +1127,17 @@ pub(crate) struct Words {
     /// A download on its way. The sentence above the bar, and the only thing the page says while one is
     /// out that is not a number.
     pub(crate) downloading: &'static str,
-    /// The prompt's one button when nothing is in flight behind it: put this away.
+    /// The prompt's first button when nothing is in flight behind it: put this away.
     pub(crate) close: &'static str,
-    /// The prompt's one button while a download *is* in flight behind it: put this away, and stop the
+    /// The prompt's first button while a download *is* in flight behind it: put this away, and stop the
     /// download with it. A different word for a different thing, though it is the same button.
     pub(crate) cancel: &'static str,
+    /// The prompt's first button when the sentence is a question about a restart: *not now*. A word of
+    /// its own rather than [`Words::close`], because a question is answered and a report is dismissed.
+    pub(crate) later: &'static str,
+    /// The prompt's second button, and the only second button on the page: reset the box, so that what
+    /// has just landed is what the box is running.
+    pub(crate) restart: &'static str,
 }
 
 impl Words {
@@ -1108,6 +1165,8 @@ impl Words {
                 downloading: "正在下载…",
                 close: "关闭",
                 cancel: "取消",
+                later: "稍后",
+                restart: "立即重启",
             },
             Language::English => Self {
                 chinese: false,
@@ -1130,6 +1189,8 @@ impl Words {
                 downloading: "Downloading…",
                 close: "Close",
                 cancel: "Cancel",
+                later: "Later",
+                restart: "Restart now",
             },
         }
     }
