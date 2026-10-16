@@ -95,83 +95,149 @@ pub extern "C" fn rust_main_entry() {
     }
 }
 
-/// The most a glyph table may be, in bytes, before this boot refuses to read it.
+/// The most a glyph table read off the card may be, in bytes, before this boot refuses to read it.
 ///
-/// The 24 px table this image carries is 234 KiB, so this is several times the real thing and still
-/// leaves room for a table baked over a much wider charset — which is the whole point of reading one off
-/// a card. It is a bound on a *surprising* file rather than on the real one, and it is here because of
-/// where these bytes come from: a card, written by a download. A boot that read whatever size a file
-/// claimed is a boot that one bad file could take the heap with, and not reading it is the honest answer
-/// to "this is not a glyph table".
-const FONT_TABLE_MAX: u64 = 2 * 1024 * 1024;
+/// The table this image carries is 234 KiB, and the widest one a card is meant to hold — the one baked
+/// over a GB2312-level-1 charset, 4536 glyphs — is 2.3 MB, so this is that size with room to spare. It
+/// is a bound on a *surprising* file rather than on the real one, and it is here because of where these
+/// bytes come from: a card, written by a download. A boot that read whatever size a file claimed is a
+/// boot that one bad file could take the heap with, and not reading it is the honest answer to "this is
+/// not a glyph table".
+const FONT_TABLE_MAX: u64 = 3 * 1024 * 1024;
 
-/// Draws from the newest glyph table on the card, if there is one, instead of the one in this image.
+/// The most a font read off the card may be, for the same reason as the table above and against the same
+/// file: the face of the GB2312-level-1 package is 1.9 MB. Both halves are read into memory at once, so
+/// a bound that is generous about one of them is not generous about the two of them together.
+const FONT_FACE_MAX: u64 = 3 * 1024 * 1024;
+
+/// Draws with the newest font on the card, if there is one, instead of the one in this image.
 ///
-/// The image carries a 24 px table covering exactly the characters this source tree writes, which is what
-/// lets a box with no card draw its own interface. That is enough for the interface and not for
-/// everything that reaches the panel: a file name read off a card, a Wi-Fi name, a line of text from a
-/// server — characters nobody wrote into the source — have no glyph in the subset, and draw as boxes.
+/// The image carries a 24 px table covering exactly the characters this source tree writes, and a subset
+/// of a font to match, which is what lets a box with no card draw its own interface. That is enough for
+/// the interface and not for everything that reaches the panel: a file name read off a card, a Wi-Fi
+/// name, a line of text from a server — characters nobody wrote into the source — have no glyph in the
+/// subset, and draw as boxes.
 ///
-/// A card carrying a table baked over a wider charset is how those get drawn without a reflash: the
-/// update page writes newer tables to `updater::FONT_DIR`, and this is the line that makes the newest of
-/// them the one the interface is drawn with.
+/// A *table* alone cannot fix that, which is worth saying twice because the update page publishes little
+/// else: a table is a cache of glyph masks keyed by glyph number, the numbers are the numbers of the font
+/// that was rasterised, and this image's subset has 528 characters to number. A card that wants to draw a
+/// character the subset never had has to bring the font too. So there are two shapes here and one
+/// decision — `updater::card_font`, where the decision is made, and which both this boot and that page
+/// read:
 ///
-/// Every way this can fail ends with the baked table still in place: no card, no table on it, a file too
-/// big to be one, bytes that are not a table at all. That is not politeness. The boot has a panel to
-/// bring up and somebody watching it, and "there is no font" is not among the things worth doing about a
-/// file — the interface that draws the wrong glyphs is a worse boot than the one that draws the ones it
-/// shipped with, but only just, and neither is worth a panic here.
+/// - **a face and the table baked from it**, put on the card together: the face is installed as the
+///   interface's font, and the table is bound to it because the header says it was baked from that face.
+///   This is the shape that draws the characters the subset never had;
+/// - **a table on its own**, which is coverage for the face in this image: newer masks for the same 528
+///   characters, and the shape the update page writes.
 ///
-/// The bytes are read into memory and leaked, and that is a real cost: a table is borrowed by the
-/// renderer for as long as the program runs, a card has no `mmap` to borrow from, and the baked table is
-/// the only one that costs no RAM at all because it is read in place out of flash. A quarter of a
-/// megabyte, once per boot, is what drawing from the card costs today — and the table on the card is what
-/// decides that number, so a download is the one thing that can make this boot allocate more.
+/// Every way this can fail ends with the image's own font still in place: no card, no font on it, a file
+/// too big to be one, bytes that are not a font at all, a table that was not baked from the face beside
+/// it. That is not politeness. The boot has a panel to bring up and somebody watching it, and "there is
+/// no font" is not among the things worth doing about a file — the interface that draws the wrong glyphs
+/// is a worse boot than the one that draws the ones it shipped with, but only just, and neither is worth
+/// a panic here.
+///
+/// The bytes are read into memory and leaked, and that is a real cost: a font is borrowed by the renderer
+/// for as long as the program runs, a card has no `mmap` to borrow from, and the baked font is the only
+/// one that costs no RAM at all because it is read in place out of flash. A quarter of a megabyte, once
+/// per boot, is what drawing from the card costs a box with no font on its card — and the files on the
+/// card are what decide that number, so a download is the one thing that can make this boot allocate
+/// more.
 fn prefer_card_font() {
-    let Some((_, path)) = updater::newest_font_table() else {
-        // No card, or nothing on it. The common case for a box that has never been given a table, and
-        // not worth a line: the baked one is what this image was built with either way.
+    let Some(font) = updater::card_font() else {
+        // No card, or nothing on it. The common case for a box that has never been given a font, and not
+        // worth a line: the baked one is what this image was built with either way.
         return;
     };
 
-    let Ok(metadata) = std::fs::metadata(&path) else {
-        eprintln!("[font] {path} cannot be read");
-        return;
+    let updater::CardFont {
+        version: _,
+        face,
+        table,
+    } = font;
+
+    // The face first, and both read before either is handed over: they are one font, and a table whose
+    // face could not be read is coverage for a font that is not going to be installed.
+    let face_bytes = match &face {
+        Some(path) => match read_card_file(path, FONT_FACE_MAX) {
+            Some(bytes) => Some(bytes),
+            None => return,
+        },
+        None => None,
     };
 
-    if metadata.len() > FONT_TABLE_MAX {
-        eprintln!(
-            "[font] {path} is {} B, over the {FONT_TABLE_MAX} B a glyph table may be",
-            metadata.len()
-        );
+    let Some(table_bytes) = read_card_file(&table, FONT_TABLE_MAX) else {
         return;
-    }
-
-    // Asked for before it is filled rather than grown into: a `Vec` that reallocates on the way does so
-    // by aborting when it cannot, and this is the one allocation in the boot that a file's size chooses.
-    let mut bytes: Vec<u8> = Vec::new();
-    if bytes.try_reserve_exact(metadata.len() as usize).is_err() {
-        eprintln!(
-            "[font] no room for the {} B of {path}; drawing from the built-in table",
-            metadata.len()
-        );
-        return;
-    }
-
-    if let Err(error) = std::fs::File::open(&path).and_then(|mut file| file.read_to_end(&mut bytes)) {
-        eprintln!("[font] {path} cannot be read: {error}");
-        return;
-    }
+    };
 
     // Leaked because that is what "as long as the program runs" costs: the renderer holds the table by
     // reference and reads a glyph out of it for every glyph it draws.
-    let bytes: &'static [u8] = Box::leak(bytes.into_boxed_slice());
-    let tables: &'static [&'static [u8]] = Box::leak(vec![bytes].into_boxed_slice());
+    let tables: &'static [&'static [u8]] = Box::leak(vec![table_bytes].into_boxed_slice());
 
-    match iced_pomelo_winit::fonts::prefer_tables(tables) {
-        Ok(()) => println!("[font] drawing from {path} ({} B)", metadata.len()),
-        Err(error) => {
-            eprintln!("[font] {path} is not a glyph table ({error}); drawing from the built-in one")
-        }
+    // Preferred before the face is installed, and refused here rather than left for the first frame, which
+    // is the only reason this is not simply a couple of `install` calls: a file that is not a table is a
+    // file somebody renamed, and the image's own font is still what the box draws with.
+    if let Err(error) = iced_pomelo_winit::fonts::prefer_tables(tables) {
+        eprintln!("[font] {table} is not a glyph table ({error}); drawing from the built-in one");
+        return;
     }
+
+    let Some(face_bytes) = face_bytes else {
+        // A table on its own is coverage for the font in this image — the face that is installed either
+        // way, and the one `fonts` binds it to if the header agrees that it was baked from it.
+        println!("[font] a glyph table on the card: {table}");
+        return;
+    };
+
+    // `install` is what binds the two: it is the one call that knows which face the interface ends up
+    // drawn with, and it asks the table's header whether that is the face it was baked from. A card's
+    // face with a table baked from this image's subset would draw the wrong glyphs rather than none, so
+    // neither is bound — the device rasterises instead, which is slow and correct.
+    iced_pomelo_winit::fonts::install(face_bytes);
+    println!(
+        "[font] drawing from {} with {table}",
+        face.as_deref().unwrap_or_default()
+    );
+}
+
+/// The bytes of a file on the card, if it is there and no bigger than `max`, leaked for the life of the
+/// program.
+///
+/// Leaked because that is what the renderer's borrow costs: it holds a font and its table by reference
+/// and reads a glyph out of them for every glyph it draws, and a card has no `mmap` to borrow from.
+///
+/// Every refusal is a line and a `None`, and none of them is a panic — see [`prefer_card_font`] for why
+/// that is the shape this takes: the box has a panel to bring up, and it has a font already.
+fn read_card_file(path: &str, max: u64) -> Option<&'static [u8]> {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        eprintln!("[font] {path} cannot be read");
+        return None;
+    };
+
+    if metadata.len() > max {
+        eprintln!(
+            "[font] {path} is {} B, over the {max} B this boot reads",
+            metadata.len()
+        );
+        return None;
+    }
+
+    // Asked for before it is filled rather than grown into: a `Vec` that reallocates on the way does so
+    // by aborting when it cannot, and these are the allocations in the boot that a file's size chooses.
+    let mut bytes: Vec<u8> = Vec::new();
+    if bytes.try_reserve_exact(metadata.len() as usize).is_err() {
+        eprintln!(
+            "[font] no room for the {} B of {path}; keeping the font this image came with",
+            metadata.len()
+        );
+        return None;
+    }
+
+    if let Err(error) = std::fs::File::open(path).and_then(|mut file| file.read_to_end(&mut bytes)) {
+        eprintln!("[font] {path} cannot be read: {error}");
+        return None;
+    }
+
+    Some(Box::leak(bytes.into_boxed_slice()))
 }

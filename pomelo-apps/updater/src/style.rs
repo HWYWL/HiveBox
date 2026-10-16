@@ -27,6 +27,21 @@ pub const RADIUS: f32 = 12.0;
 /// could compare — which is the one thing this page is for.
 pub const NAME: f32 = 132.0;
 
+/// How much room a row keeps for its button, whatever the rest of the row is doing.
+///
+/// Fixed rather than "as wide as its label", and this is a *reservation*: everything to the left of it
+/// is a version, and a version is a string whose length this page does not choose — an English "Update
+/// to v0.7.0" is half again as long as the Chinese one. A button that took only what was left would be
+/// a button whose label wrapped onto a second line on the row with the longest neighbour, which is
+/// exactly what the glyph table's row did before this was here.
+pub const ACTION: f32 = 116.0;
+
+/// How wide the prompt is.
+///
+/// Narrower than [`PANEL`], so that the page it is over is still visible around it — a prompt that
+/// covered the panel would be a second page rather than something said about the first one.
+pub const PROMPT: f32 = 316.0;
+
 /// Everything the page measures with, at the base font size [`FONT_BASE`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sizes {
@@ -110,6 +125,25 @@ pub fn good() -> Color {
 /// Something the page could not do: a fault line, and the glyph beside it.
 pub fn bad() -> Color {
     Color::from_rgb8(0xE0, 0x5A, 0x52)
+}
+
+/// The wash over the page while the prompt is up.
+///
+/// Black at less than half, so that the page is dimmed and still *there*: a prompt is something said
+/// about the page under it, and the two rows it is about stay legible enough to be the context of the
+/// sentence. It is also what makes the prompt modal — a press lands on this, and the rows stop being
+/// something that can be pressed twice.
+pub fn backdrop() -> Color {
+    Color::from_rgba8(0, 0, 0, 0.45)
+}
+
+/// The groove a download's bar runs in: a step *below* the prompt it sits on.
+///
+/// Darker than the prompt rather than lighter, and darker in both themes, because the bar drawn in it
+/// is the page's own [`accent`]: a track that was a step up would read as the filled part and leave the
+/// accent looking like the hole.
+pub fn track() -> Color {
+    Color::from_rgba8(0, 0, 0, 0.28)
 }
 
 #[cfg(test)]

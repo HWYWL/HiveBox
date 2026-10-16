@@ -73,6 +73,13 @@ typedef struct {
     int32_t status;
     /** Length of the body in `s_body`, meaningful while the state is DONE. */
     size_t length;
+    /** How many bytes of the body have landed, for the bar a page draws while it waits. Written by
+     * the worker as the chunks arrive and read by `hal_http_get_progress`; it is a count of bytes
+     * *given to the caller*, so a redirect's own page is not in it. */
+    size_t received;
+    /** What the server said the body would be — `Content-Length` — or 0 when it said nothing, which
+     * is every chunked answer and every server that does not bother. See `HttpProgress`. */
+    size_t total;
     /** A worker task is alive. Not the same as RUNNING: a cancel clears the state while the worker is
      * still closing its socket, and the slot is not free until that is done. */
     bool busy;
@@ -193,6 +200,22 @@ static void release(void)
     unlock();
 }
 
+/**
+ * Records how far the body has got, for the bar a page draws while it waits.
+ *
+ * Taken and given back per chunk rather than held across the download: the writer is this task and
+ * the reader is the frame loop, and a lock held for a minute of downloading would be the frame loop
+ * stopped for one. `total` is passed in as well as `received` because the two are written together —
+ * a reader that saw a new `received` beside a stale `total` would draw a bar past its own end.
+ */
+static void report_progress(size_t received, size_t total)
+{
+    lock();
+    s_snap.received = received;
+    s_snap.total = total;
+    unlock();
+}
+
 // =============================================================================
 // The worker
 // =============================================================================
@@ -283,6 +306,12 @@ static void http_task(void *arg)
         esp_http_client_close(client);
     }
 
+    /* What the server said the body would be, read once the final answer's headers are in hand. A
+     * negative answer is "it did not say" — a chunked body, or a server that left the header out — and
+     * 0 is what the progress reader gets then, which is its own way of saying "no percentage here". */
+    const int64_t declared = esp_http_client_get_content_length(client);
+    const size_t total = (declared > 0) ? (size_t)declared : 0;
+
     /* Where the bytes go. A file is opened before the first chunk, so that a path that cannot be
      * written is the request's own answer rather than a mystery at the end of a long download — and
      * the body of a `404` lands in it just as the body of a success does, because the status is the
@@ -296,6 +325,10 @@ static void http_task(void *arg)
             goto out;
         }
     }
+
+    /* Nothing has arrived yet, and the total is now known: the first reading a bar gets, and the one
+     * that turns "downloading" into "downloading one of *this* many bytes". */
+    report_progress(0, total);
 
     for (;;) {
         if (is_cancelled()) {
@@ -342,6 +375,10 @@ static void http_task(void *arg)
         }
 
         used += (size_t)read;
+
+        /* Per chunk and not per frame: the frame loop reads this while the worker writes it, and a
+         * reading taken here is one a bar can move on. */
+        report_progress(used, total);
     }
 
     if (to_file) {
@@ -463,6 +500,10 @@ esp_err_t hal_http_start_to(const char *url, int32_t sink, const char *path)
         s_snap.fault = fault;
         s_snap.status = 0;
         s_snap.length = 0;
+        /* Nothing was asked for over the wire, so there is no progress to report: zeros rather than
+         * the last request's counters, which a page would otherwise draw as its own bar. */
+        s_snap.received = 0;
+        s_snap.total = 0;
         s_snap.state = HAL_HTTP_FAILED;
         unlock();
         ESP_LOGW(TAG, "%s: %s", s_url,
@@ -474,6 +515,10 @@ esp_err_t hal_http_start_to(const char *url, int32_t sink, const char *path)
     s_snap.fault = HAL_HTTP_FAULT_NONE;
     s_snap.status = 0;
     s_snap.length = 0;
+    /* Before the worker starts, so that a page reading progress on the very next frame is told zero of
+     * *this* request rather than the total of the last one. */
+    s_snap.received = 0;
+    s_snap.total = 0;
     s_snap.cancelled = false;
     s_snap.busy = true;
     unlock();
@@ -550,7 +595,28 @@ esp_err_t hal_http_cancel(void)
     s_snap.fault = HAL_HTTP_FAULT_NONE;
     s_snap.status = 0;
     s_snap.length = 0;
+    s_snap.received = 0;
+    s_snap.total = 0;
     unlock();
 
     return ESP_OK;
+}
+
+esp_err_t hal_http_get_progress(size_t *out_received, size_t *out_total)
+{
+    if (out_received == NULL || out_total == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    lock();
+    const bool in_flight = (s_snap.state == HAL_HTTP_RUNNING);
+    *out_received = s_snap.received;
+    *out_total = s_snap.total;
+    unlock();
+
+    /* Only a *running* request has a progress worth drawing, and `INVALID_STATE` is that said out
+     * loud: before one there are no counters, and once its answer has been taken the numbers are the
+     * last request's leftovers. A page reading them as its own would draw a bar that had already
+     * finished before it started. */
+    return in_flight ? ESP_OK : ESP_ERR_INVALID_STATE;
 }

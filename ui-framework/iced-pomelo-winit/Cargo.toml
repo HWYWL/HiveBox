@@ -13,7 +13,7 @@ repository = "https://github.com/pomelos-on-sale/iced-pomelo-winit"
 # it, because a `Program`'s renderer has to be a headless one that can name a compositor -- the
 # `run` that a build without it gets is the compatibility stub in `lib.rs`.
 default = []
-renderer = ["dep:iced-pomelo-gfx", "iced_renderer/pomelo"]
+renderer = ["dep:iced-pomelo-gfx", "dep:sha2", "iced_renderer/pomelo"]
 # One timing line per painted frame, split by phase: the recorded renderer's `profile` module is
 # the counters, so this implies `renderer`. A split of a frame that something else drew would not
 # be a split of anything.
@@ -40,6 +40,12 @@ wayland = []
 # itself, over the same rasteriser.
 pomelo-gfx = { git = "ssh://git@github.com/pomelos-on-sale/pomelo-gfx.git" }
 iced-pomelo-gfx = { git = "ssh://git@github.com/pomelos-on-sale/iced-pomelo-gfx.git", optional = true }
+
+# Only the renderer has glyph tables, and only the renderer has to ask which face one belongs to:
+# a table's header carries the SHA-256 of the font it was baked from, and `fonts` compares that with
+# the face it is installing. The distinction is not bookkeeping -- a table handed to a face it was
+# not baked from draws the wrong glyphs rather than none.
+sha2 = { version = "0.10", optional = true }
 
 # iced. We take the individual crates instead of the `iced` facade, which pulls in `iced_winit` —
 # winit does not build for ESP-IDF. This crate answers to that name; see the crate docs.

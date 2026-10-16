@@ -29,7 +29,7 @@
 //! [`SystemBackend::clock`][crate::traits::SystemBackend::clock], which is where the time comes from.
 
 use crate::error::HalError;
-use crate::types::{HttpResponse, HttpState, Sink};
+use crate::types::{HttpProgress, HttpResponse, HttpState, Sink};
 
 /// Fetching documents over HTTP and HTTPS.
 pub trait HttpBackend: Send + Sync {
@@ -83,6 +83,21 @@ pub trait HttpBackend: Send + Sync {
     /// its answer has already been read. A fault that is *not* here: a request that did not come back
     /// says so through [`HttpBackend::state`], and has no result to hand over.
     fn take_result(&mut self) -> Result<HttpResponse, HalError>;
+
+    /// How far a [`Sink::File`] request has got, or `None` when there is none to read.
+    ///
+    /// Cheap, like [`HttpBackend::state`], and asked once a frame by the page that is waiting: a
+    /// minute of downloading is a minute somebody is watching, and the only thing that says the box
+    /// has not hung is a number that moves. `None` before a file request has been made, and again
+    /// once its answer has been taken or cancelled — including the frames a *buffer* request is
+    /// running, whose progress is real but is not a bar anybody draws.
+    ///
+    /// The default is `None` rather than a made-up zero, because a backend that cannot say has
+    /// nothing honest to say: an implementation with no counters left over from the last request
+    /// reports nothing, and a page falls back on the size its manifest gave it.
+    fn progress(&self) -> Option<HttpProgress> {
+        None
+    }
 
     /// Abandons the request in flight. Nothing to abandon is `Ok(())`.
     ///

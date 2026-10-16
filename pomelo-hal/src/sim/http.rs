@@ -14,7 +14,7 @@
 
 use crate::error::HalError;
 use crate::traits::HttpBackend;
-use crate::types::{HttpFault, HttpResponse, HttpState, Sink};
+use crate::types::{HttpFault, HttpProgress, HttpResponse, HttpState, Sink};
 
 /// How long a simulated request takes to come back, in ticks.
 ///
@@ -46,6 +46,10 @@ pub struct SimHttp {
     /// downloads a glyph table is a page whose *choice of file* is half of what it has to get right,
     /// and a test that could only see the body would pass on a page that wrote to the wrong path.
     last_sink: Option<Sink>,
+    /// How many bytes the request in flight will deliver, so that [`HttpBackend::progress`] has a
+    /// denominator: the answer's length, known before it is delivered because a script is not a
+    /// socket.
+    pending_total: u64,
 }
 
 /// One answer in a [`SimHttp`] script: what a request is answered with, status and body together.
@@ -101,6 +105,7 @@ impl SimHttp {
             result: None,
             last_url: None,
             last_sink: None,
+            pending_total: 0,
         }
     }
 
@@ -217,12 +222,32 @@ impl HttpBackend for SimHttp {
         self.last_url = Some(url.to_string());
         self.last_sink = Some(sink);
         self.answer_ticks_left = ANSWER_TICKS;
+        // The answer's length, read off the script now rather than at the end: a bar needs its
+        // denominator while the download is happening, which is exactly when the body is not there yet.
+        self.pending_total = self.answers[self.next % self.answers.len()].body.len() as u64;
         self.state = HttpState::Running;
         Ok(())
     }
 
     fn state(&self) -> HttpState {
         self.state
+    }
+
+    fn progress(&self) -> Option<HttpProgress> {
+        if self.state != HttpState::Running {
+            return None;
+        }
+
+        // Spread over the ticks the answer takes, so that a desktop demo shows a bar that moves
+        // instead of one that appears full: the same shape the device's counters have, where the
+        // bytes land in chunks and the number is read while they are still landing.
+        let elapsed = u64::from(ANSWER_TICKS - self.answer_ticks_left);
+        let step = self.pending_total / u64::from(ANSWER_TICKS);
+
+        Some(HttpProgress {
+            received: (step * elapsed).min(self.pending_total),
+            total: self.pending_total,
+        })
     }
 
     fn take_result(&mut self) -> Result<HttpResponse, HalError> {
@@ -235,6 +260,7 @@ impl HttpBackend for SimHttp {
         self.state = HttpState::Idle;
         self.answer_ticks_left = 0;
         self.result = None;
+        self.pending_total = 0;
         Ok(())
     }
 

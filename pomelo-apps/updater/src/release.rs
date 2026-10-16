@@ -192,6 +192,22 @@ impl Manifest {
 }
 
 impl Release {
+    /// Where this file is, on the repository.
+    ///
+    /// Derived from [`MANIFEST_URL`] rather than written down, because the manifest and the files it
+    /// names are one directory: a second address here would be a second string to keep in step with
+    /// the branch name, and the branch name is the one thing on this page a rename elsewhere can break
+    /// — see [`MANIFEST_URL`]. Deriving it means the two cannot be on different branches, which is a
+    /// failure that would look like a manifest offering a file that is not there.
+    pub fn url(&self) -> String {
+        let dir = MANIFEST_URL
+            .rsplit_once('/')
+            .map(|(dir, _)| dir)
+            .unwrap_or(MANIFEST_URL);
+
+        format!("{dir}/{}", self.file)
+    }
+
     /// One member of the manifest, if it is there and complete enough to download.
     fn read(document: &str, kind: Kind) -> Option<Self> {
         let object = json::member(document, kind.member())?;

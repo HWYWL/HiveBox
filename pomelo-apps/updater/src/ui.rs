@@ -1,4 +1,5 @@
-//! Everything this page draws: the heading, the two rows, and the line that says what happened.
+//! Everything this page draws: the heading, the two rows, the line that says what happened to the
+//! check, and the prompt that says what happened to a press.
 //!
 //! Two rows of the same shape, because the two things this page updates *are* the same question asked
 //! of two files: what is here, what is there, and which of the two buttons applies. A page that drew the
@@ -10,15 +11,35 @@
 //! Each row is read left to right as a sentence: the glyph says *what*, the name says what it is called,
 //! the line under it says what is installed, and the right-hand line says what the repository has
 //! instead. Delete any of the four and the row stops answering the question that opened the page.
+//!
+//! # Two kinds of news, drawn two ways
+//!
+//! The check is page-wide — one manifest answers for both rows — and its state is the quiet line at the
+//! bottom, where it is always there and never in the way. A *press* is about one row and is drawn as a
+//! prompt over the page, because it is the one thing here that interrupts: a person pressed a button and
+//! is owed an answer, and the answer is a sentence they should have to close rather than a line that
+//! arrived under two rows they were not looking at.
+//!
+//! The prompt is [`crate::Prompt`]'s description and not this file's invention — which sentence, whether
+//! there is a bar, and what the one button says are decided where a test can hold them up. This file
+//! decides where the ink comes from.
+//!
+//! # What is not in the row
+//!
+//! The offered file's *name* is not drawn in the row, though it was once. It is long — longer than the
+//! version it sits under, and long enough to push the row's button into a column of its own glyphs — and
+//! it answers a question the row has already answered twice, since the version is on the line above it.
+//! It lives in the prompt instead, where it is the thing about to be fetched rather than a footnote to
+//! something else.
 
-use iced::widget::{button, container, row, text, Column, Space};
+use iced::widget::{button, container, opaque, progress_bar, row, stack, text, Column, Space};
 use iced::{Alignment, Border, Color, Element, Length, Shadow, Theme};
 
 use pomelo_material_symbols::{self as icons, Icon};
 use pomelo_widgets::preferences::ThemeMode;
 
 use crate::style::{self, Sizes};
-use crate::{Kind, Message, Status, Updater, Words};
+use crate::{Kind, Message, Prompt, Status, Updater, Words};
 
 /// The page.
 pub(crate) fn page(app: &Updater) -> Element<'_, Message> {
@@ -44,7 +65,7 @@ pub(crate) fn page(app: &Updater) -> Element<'_, Message> {
 
     // The panel is 480 px square and a desktop window is not, so the page keeps its width and the space
     // either side of it is the surface's own — the same argument the forecast page makes.
-    container(
+    let page = container(
         container(body)
             .max_width(style::PANEL)
             .width(Length::Fill),
@@ -55,8 +76,18 @@ pub(crate) fn page(app: &Updater) -> Element<'_, Message> {
     .style(move |_theme| container::Style {
         background: Some(style::surface(mode).into()),
         ..container::Style::default()
-    })
-    .into()
+    });
+
+    // The prompt goes *over* the page and never instead of it: the rows are the sentence's context, and
+    // the row it is about is still the thing being answered. `opaque` is what makes it modal — without
+    // it a press would fall through onto the rows underneath, and a person could ask for a second
+    // download while the first one's bar was still moving.
+    let overlay: Element<'_, Message> = match app.prompt(&words) {
+        Some(prompt) => stack([opaque(page), prompt_overlay(&app.status, &prompt, sizes, mode)]).into(),
+        None => page.into(),
+    };
+
+    overlay
 }
 
 /// The head of the page: what this is, and the button that asks the repository again.
@@ -146,28 +177,34 @@ fn row_card<'a>(
         (None, _) => (String::new(), style::muted(theme)),
     };
 
-    let detail = match &offer {
-        Some(release) => release.file.as_str(),
-        None => "",
-    };
-
     // Spelled out because the two arms are two different widgets and `.into()` has nothing to infer
     // from until they are both `Element`s — one arm's `Button` and the other's would otherwise be the
     // type the match had to guess.
+    //
+    // Both arms are [`style::ACTION`] wide, and that is the fix for the button that used to wrap: the
+    // width is a *reservation*, so the row's longest neighbour decides how much room is left for the
+    // version and never how much is left for the button. The content is centred in it by hand, because
+    // a padded row lays its children out from the left and a button wider than its label would
+    // otherwise read as a label that had drifted.
     let action: Element<'a, Message> = match &offer {
         Some(_) => button(
-            row![
-                text(Icon::DOWNLOAD.glyph())
-                    .font(icons::font())
-                    .size(sizes.small)
-                    .color(style::ink(theme)),
-                text(words.install).size(sizes.small).color(style::ink(theme)),
-            ]
-            .spacing(4.0)
-            .align_y(Alignment::Center),
+            container(
+                row![
+                    text(Icon::DOWNLOAD.glyph())
+                        .font(icons::font())
+                        .size(sizes.small)
+                        .color(style::ink(theme)),
+                    text(words.install).size(sizes.small).color(style::ink(theme)),
+                ]
+                .spacing(4.0)
+                .align_y(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .center_x(Length::Fill),
         )
         .on_press(Message::Install(kind))
-        .padding([6.0, 10.0])
+        .width(Length::Fixed(style::ACTION))
+        .padding([6.0, 8.0])
         .style(move |_theme: &Theme, status: button::Status| {
             let fill = if is_pressed(status) {
                 style::accent()
@@ -179,18 +216,23 @@ fn row_card<'a>(
         })
         .into(),
         None => button(
-            row![
-                text(Icon::REFRESH.glyph())
-                    .font(icons::font())
-                    .size(sizes.small)
-                    .color(style::muted(theme)),
-                text(words.check).size(sizes.small).color(style::muted(theme)),
-            ]
-            .spacing(4.0)
-            .align_y(Alignment::Center),
+            container(
+                row![
+                    text(Icon::REFRESH.glyph())
+                        .font(icons::font())
+                        .size(sizes.small)
+                        .color(style::muted(theme)),
+                    text(words.check).size(sizes.small).color(style::muted(theme)),
+                ]
+                .spacing(4.0)
+                .align_y(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .center_x(Length::Fill),
         )
         .on_press_maybe(app.can_check().then_some(Message::Check))
-        .padding([6.0, 10.0])
+        .width(Length::Fixed(style::ACTION))
+        .padding([6.0, 8.0])
         .style(move |_theme: &Theme, status: button::Status| {
             let fill = if is_pressed(status) {
                 style::accent()
@@ -215,12 +257,11 @@ fn row_card<'a>(
         .spacing(2.0)
         .width(Length::Fixed(style::NAME)),
         Space::new().width(Length::Fill),
-        Column::with_children(vec![
-            text(standing).size(sizes.text).color(standing_ink).into(),
-            text(detail).size(sizes.tiny).color(style::muted(theme)).into(),
-        ])
-        .spacing(2.0)
-        .align_x(Alignment::End),
+        // One line at [`Sizes::small`] and not two at [`Sizes::text`]: the offered file's name used to
+        // be here under this, and between the two of them the row ran out of width for its own button.
+        // The offer keeps the row's widest column honest at the smaller size, and the name it used to be
+        // under is in the prompt — see this file's header.
+        text(standing).size(sizes.small).color(standing_ink),
         action,
     ]
     .spacing(style::GAP)
@@ -229,10 +270,14 @@ fn row_card<'a>(
     card(body.into(), theme)
 }
 
-/// The line under the rows: what happened to the last check, in one sentence.
+/// The line under the rows: what happened to the last *check*, in one sentence.
 ///
 /// One line and not a card, because it is not one of the page's two subjects: it is the *state of the
 /// question* that was asked about them, and a card would give it the same weight as a version number.
+///
+/// Nothing about a press is here. A press's outcome is [`crate::Prompt`], over the page, and the arms
+/// below say nothing for those states — a sentence in two places at once would be the page saying it
+/// twice, and the place a person is looking after pressing a button is the one with the bar in it.
 fn notice<'a>(
     app: &Updater,
     words: &Words,
@@ -245,17 +290,148 @@ fn notice<'a>(
         Status::Answered => (String::new(), style::muted(theme)),
         Status::Failed(fault) => (words.fault_line(*fault).to_string(), style::bad()),
         Status::Unreadable => (words.unreadable.to_string(), style::bad()),
-        // The two rows need different things of a person — a new image needs a reboot's worth of flash
-        // and a new table needs the card — and a page that said the same sentence for both would send
-        // them to the wrong place.
-        Status::Unsupported(Kind::Firmware) => (words.unsupported.to_string(), style::bad()),
-        Status::Unsupported(Kind::Font) => (words.no_card.to_string(), style::bad()),
+        // A press, and a press is drawn in the prompt. The line is still *laid out* — it keeps its
+        // height, so the rows above it do not jump when a prompt is opened and closed over it.
+        Status::Unsupported(_)
+        | Status::Downloading(_)
+        | Status::Installed(_)
+        | Status::DownloadFailed(_, _) => (String::new(), style::muted(theme)),
     };
 
     text(line)
         .size(sizes.small)
         .color(ink)
         .width(Length::Fill)
+        .into()
+}
+
+/// The prompt: the sentence about the last press, over a wash over the page.
+///
+/// Centred in the whole surface rather than in the panel, so that it is over the middle of whatever the
+/// box is actually showing — a 480 px panel in a wider window is still where the eye is, and the wash
+/// covers everything either way.
+///
+/// The bar is drawn only when there is something to fill it *with*: a download whose size nothing has
+/// said gets the byte count and no bar, because a bar with no end is a bar that would have to invent
+/// one, and a prompt is the one place on this page that must not guess. The count is there in both
+/// cases, and it is the thing that shows a slow card is still moving.
+fn prompt_overlay<'a>(
+    status: &Status,
+    prompt: &Prompt,
+    sizes: Sizes,
+    theme: ThemeMode,
+) -> Element<'a, Message> {
+    let (glyph, ink) = match status {
+        Status::Installed(_) => (Icon::CHECK_CIRCLE, style::good()),
+        Status::DownloadFailed(_, _) => (Icon::ERROR, style::bad()),
+        Status::Unsupported(_) => (Icon::WARNING, style::bad()),
+        _ => (Icon::DOWNLOADING, style::accent()),
+    };
+
+    let mut children: Vec<Element<'a, Message>> = vec![
+        row![
+            text(glyph.glyph())
+                .font(icons::font())
+                .size(sizes.glyph)
+                .color(ink),
+            text(prompt.title).size(sizes.text).color(style::ink(theme)),
+        ]
+        .spacing(style::GAP)
+        .align_y(Alignment::Center)
+        .into(),
+        text(prompt.line.clone())
+            .size(sizes.small)
+            .color(style::ink(theme))
+            .width(Length::Fill)
+            .into(),
+    ];
+
+    if !prompt.detail.is_empty() {
+        children.push(
+            text(prompt.detail.clone())
+                .size(sizes.tiny)
+                .color(style::muted(theme))
+                .width(Length::Fill)
+                .into(),
+        );
+    }
+
+    if let Some(fraction) = prompt.progress {
+        children.push(
+            progress_bar(0.0..=1.0, fraction)
+                .length(Length::Fill)
+                .girth(8.0)
+                .style(move |_theme| progress_bar::Style {
+                    background: style::track().into(),
+                    bar: style::accent().into(),
+                    border: Border {
+                        radius: (4.0).into(),
+                        ..Border::default()
+                    },
+                })
+                .into(),
+        );
+    }
+
+    if !prompt.bytes.is_empty() {
+        children.push(
+            text(prompt.bytes.clone())
+                .size(sizes.tiny)
+                .color(style::muted(theme))
+                .width(Length::Fill)
+                .into(),
+        );
+    }
+
+    // One button, and what it says is which of the two things pressing it does: stop the download, or
+    // put the sentence away. It is never disabled, because there is nothing here that cannot be left.
+    children.push(
+        button(
+            container(text(prompt.button).size(sizes.small).color(style::ink(theme)))
+                .width(Length::Fill)
+                .center_x(Length::Fill),
+        )
+        .on_press(Message::Dismiss)
+        .width(Length::Fill)
+        .padding([8.0, 10.0])
+        .style(move |_theme: &Theme, status: button::Status| {
+            let fill = if is_pressed(status) {
+                style::accent()
+            } else {
+                style::surface(theme)
+            };
+
+            button_style(fill, style::ink(theme), style::RADIUS / 2.0)
+        })
+        .into(),
+    );
+
+    let panel = container(Column::with_children(children).spacing(style::GAP))
+        .width(Length::Fixed(style::PROMPT))
+        .padding(style::GAP)
+        .style(move |_theme| container::Style {
+            background: Some(style::card(theme).into()),
+            border: Border {
+                radius: style::RADIUS.into(),
+                ..Border::default()
+            },
+            shadow: Shadow {
+                color: Color::from_rgba8(0, 0, 0, 0.35),
+                offset: iced::Vector::new(0.0, 4.0),
+                blur_radius: 16.0,
+            },
+            ..container::Style::default()
+        });
+
+    container(panel)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .style(move |_theme| container::Style {
+            background: Some(style::backdrop().into()),
+            ..container::Style::default()
+        })
         .into()
 }
 

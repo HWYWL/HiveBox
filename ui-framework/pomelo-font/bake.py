@@ -20,7 +20,8 @@ bake.py — 把矢量字体烘成位图字形表，供 iced-pomelo-winit 在嵌�
     └── dist/
         ├── SourceHanSansSC-Regular-Subset.otf         ← 子集（进固件）
         ├── SourceHanSansSC-Regular-Subset-common@24px.bin
-        └── MANIFEST.md                                ← 由本脚本生成
+        ├── MANIFEST.md                                ← 由本脚本生成
+        └── card/                                      ← 字体包，进 SD 卡（见下方 `--card`）
 
 # 首次使用：下载源字体
 
@@ -38,6 +39,22 @@ bake.py — 把矢量字体烘成位图字形表，供 iced-pomelo-winit 在嵌�
 
     python3 bake.py                        # 默认字号：24 px
     python3 bake.py --sizes 24 32          # 指定字号
+
+# 卡上的字体包（让 SD 卡上的文件名、Wi-Fi 名不再画成方框）
+
+    pyftsubset source/source-han-sans-sc-regular.otf \
+        --text-file=source/charset-gb2312.txt \
+        --drop-tables+=DSIG \
+        --output-file=dist/SourceHanSansSC-Regular-Subset-gb2312.otf
+    python3 bake.py \
+        --source dist/SourceHanSansSC-Regular-Subset-gb2312.otf \
+        --charset source/charset-gb2312.txt \
+        --card v3
+
+镜像里那份子集只有 528 个字，屏幕上的文件名与 Wi-Fi 名里用的是它没有的字，所以**换表救不了
+它们**：表里的字形号是字体的字形号，设备端在排版那一步拿到的就已经是 .notdef 了。要让这些字
+画出来，卡上得同时有更宽的**字体**和它的表 —— `--card` 就是按设备端认得的名字把这两个文件写进
+`dist/card/`，拷进 SD 卡的 `/sdcard/fonts`（`updater::FONT_DIR`），重启生效。
 
 字号清单要和设备端实际用到的字号一致：多烘只浪费 flash，少烘只是让那些字号退回在线绘制
 （正确性不受影响）。`dist/MANIFEST.md` 记录当前烘了哪些。
@@ -249,6 +266,31 @@ def shown(path: pathlib.Path) -> str:
         return str(path)
 
 
+def table_stem(source: pathlib.Path, charset: pathlib.Path) -> str:
+    """表名里的字符集标记：`charset-common.txt` → `…-Subset-common`，`charset-gb2312.txt` → `…-gb2312`。
+
+    名字里已经带着这个标记就不重复写：广字集的子集本来就叫
+    `SourceHanSansSC-Regular-Subset-gb2312.otf`，再加一个 `-gb2312` 只会让人以为它是另一份东西。
+    """
+    tag = charset.stem.removeprefix("charset-")
+
+    if source.stem.endswith(f"-{tag}"):
+        return source.stem
+
+    return f"{source.stem}-{tag}"
+
+
+def manifest_name(args) -> str:
+    """这份清单描述的是哪一次烘培：默认字符集仍叫 `MANIFEST.md`，别的字符集带上它的标记。
+
+    一个文件写不下两次结果，而后烘的那一次会静静地把先烘的那一次的记录覆盖掉 —— 于是仓库里
+    写着的那份数字就不再是固件里那份表了。名字分开，两次烘培就都留在 `dist/` 里。
+    """
+    tag = args.charset.stem.removeprefix("charset-")
+
+    return "MANIFEST.md" if tag == CHARSET.stem.removeprefix("charset-") else f"MANIFEST-{tag}.md"
+
+
 def write_manifest(args, chars: list[str], manifest: list, source: bytes) -> None:
     """把「这批表是怎么来的」写成文件，跟产物放在一起。"""
     digest = hashlib.sha256(source).hexdigest()
@@ -289,8 +331,49 @@ def write_manifest(args, chars: list[str], manifest: list, source: bytes) -> Non
         "",
     ]
 
-    (args.output / "MANIFEST.md").write_text("\n".join(lines), encoding="utf-8")
-    print(f"\n写入 {args.output / 'MANIFEST.md'}")
+    written = args.output / manifest_name(args)
+    written.write_text("\n".join(lines), encoding="utf-8")
+    print(f"\n写入 {written}")
+
+
+# 卡上一个「字体包」的名字：字体与它的表同名版本，设备端（`updater::card_font`）就是靠这个认出
+# 两半是一份东西的。名字是协议的一部分 —— 改了这里就要改 `pomelo-apps/updater`。
+CARD_FACE = "hivebox-face-{version}.otf"
+CARD_TABLE = "hivebox-font-24px-{version}.bin"
+# 设备端读卡上字体的目录，即 `updater::FONT_DIR`。
+CARD_DIR = "/sdcard/fonts"
+
+
+def write_card_package(args, manifest: list) -> None:
+    """把这一份字体与它的表按卡认得的名字另存一份，写进 `dist/card/`。
+
+    为什么要有这一步：表里的字形号是**字体**的字形号，所以一张表只对烘它的那份字体有意义。
+    镜像里那份子集只有 528 个字，SD 卡上的文件名、Wi-Fi 名里用的字大多不在其中 —— 而那些字
+    光靠换表是画不出来的：设备端在排版那一步拿到的就已经是 .notdef 了，表里再怎么全也没有
+    它的编号。所以要让卡上的字画出来，卡上得同时有字体和它的表。
+    """
+    if 24 not in args.sizes:
+        raise SystemExit("[!] --card 需要 24 px 那一档：设备端只查这一档")
+
+    version = args.card
+    card = args.output / "card"
+    card.mkdir(parents=True, exist_ok=True)
+
+    face = card / CARD_FACE.format(version=version)
+    table = card / CARD_TABLE.format(version=version)
+
+    face.write_bytes(args.source.read_bytes())
+
+    for name, stats in manifest:
+        if stats["size"] == 24:
+            table.write_bytes((args.output / name).read_bytes())
+            break
+    else:
+        raise SystemExit("[!] 这一批里没有 24 px 的表")
+
+    print(f"\n卡上的字体包 {version}（两个文件一起放进 SD 卡的 {CARD_DIR}）：")
+    print(f"  {face.name}  {face.stat().st_size / 1e6:.2f} MB")
+    print(f"  {table.name}  {table.stat().st_size / 1e6:.2f} MB")
 
 
 def main() -> int:
@@ -302,6 +385,8 @@ def main() -> int:
                         help="字符集文件路径（默认：source/charset-common.txt）")
     parser.add_argument("--output", type=pathlib.Path, default=OUTPUT,
                         help="输出目录（默认：dist/）")
+    parser.add_argument("--card", metavar="VERSION", default=None,
+                        help="另外按卡上的名字存一份字体包（字体 + 表，放 <输出目录>/card/）")
     args = parser.parse_args()
 
     if not args.source.exists():
@@ -348,7 +433,7 @@ def main() -> int:
 
     for size in args.sizes:
         table, stats = bake_size(size, face, chars, source)
-        name = f"{args.source.stem}-common@{size}px.bin"
+        name = f"{table_stem(args.source, args.charset)}@{size}px.bin"
         (args.output / name).write_bytes(table)
 
         print(
@@ -366,6 +451,9 @@ def main() -> int:
             print(f"  {name}: {''.join(stats['missing'])}")
 
     write_manifest(args, chars, manifest, source)
+
+    if args.card:
+        write_card_package(args, manifest)
 
     return 0
 

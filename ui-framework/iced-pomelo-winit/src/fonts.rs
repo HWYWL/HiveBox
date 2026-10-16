@@ -39,10 +39,26 @@
 //! [`Host::new`](crate::Host::new) loads those. They are extra faces to name explicitly
 //! (`Font::with_name`), which is iced's meaning for them, and they do not touch the default family.
 
+//! # A wider face, from the card
+//!
+//! The subset above is what the *image* carries, and it is what a box draws with until somebody
+//! gives it more: a font file and the table baked from it, both on the card. The firmware's boot
+//! names the table with [`prefer_tables`] and installs the face through [`install`], and the two are
+//! matched by the SHA-256 in the table's header — the one the baker wrote down — rather than by the
+//! order the two calls happened in. That matters because a table is not interchangeable: its glyph
+//! numbers are the numbers of the font it was baked from, so the card's table means nothing to this
+//! crate's subset and the baked one means nothing to a face that arrived on a card.
+//!
+//! Nothing else changes: an app that installs a face of its own still gets no tables, and a size no
+//! table covers is still rasterised on the device.
+
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "renderer")]
 use std::sync::OnceLock;
+
+#[cfg(feature = "renderer")]
+use sha2::{Digest, Sha256};
 
 use iced_graphics::text::cosmic_text::fontdb::Family;
 
@@ -79,13 +95,17 @@ const BAKED: &[&[u8]] = &[
 #[cfg(feature = "renderer")]
 static PREFERRED: OnceLock<&'static [&'static [u8]]> = OnceLock::new();
 
-/// Says that [`DEFAULT`]'s glyph tables are `tables`, rather than the ones baked into this image.
+/// Says that the tables to bind are `tables`, rather than the ones baked into this image.
 ///
 /// The one caller is a firmware's boot, and the one reason is size: the 24 px coverage is a couple of
 /// megabytes, which is a couple of megabytes a board that wants two app slots cannot spare — so the
-/// table is published on its own, a box is given a newer one by writing a file, and this is how the
-/// interface is told to draw from it. The bytes are borrowed for as long as the process runs, so the
-/// caller has to hand over memory that lives that long (`Box::leak`; there is one of these per boot).
+/// coverage is published on its own, a box is given a newer one by writing a file, and this is how the
+/// interface is told to draw from it. A face can arrive the same way, with the table that was baked
+/// from it, and the same boot installs that through [`install`] — which is what the SHA-256 in the
+/// table's header is for: it decides which of the two sets belongs to the face that ends up installed,
+/// and a set that belongs to neither is not bound at all. The bytes are borrowed for as long as the
+/// process runs, so the caller has to hand over memory that lives that long (`Box::leak`; there is one
+/// of these per boot).
 ///
 /// Call this **before** anything installs a font — before the first frame, and therefore before
 /// [`install_default`] runs from either entry point. A later call is the same as no call at all:
@@ -113,10 +133,51 @@ pub fn prefer_tables(
     Ok(())
 }
 
-/// The tables to bind to [`DEFAULT`]: the ones a firmware preferred, or the baked ones.
+/// The tables to bind to `bytes`, the face that was just installed: the ones a firmware preferred,
+/// or the ones this image was built with — whichever of the two was baked from *this* face.
+///
+/// The question is the face's and not the caller's, and it is asked of the SHA-256 the baker put in
+/// the table's header. It used to be `std::ptr::eq(bytes, DEFAULT)`, which said the same thing while
+/// the built-in subset was the only face a table could be baked for. A card can bring a face of its
+/// own now, and with it the case that test got wrong in both directions: this image's table is a
+/// stranger to the card's face, and an app's face is a stranger to both.
+///
+/// Nothing matching is an ordinary answer — an app that installs a face of its own rasterises as it
+/// always did — and it is why this returns a slice rather than an `Option`: the caller has to be
+/// able to tell "these are the tables" from "there are none".
 #[cfg(feature = "renderer")]
-fn tables() -> &'static [&'static [u8]] {
-    PREFERRED.get().copied().unwrap_or(BAKED)
+fn tables_for(bytes: &'static [u8]) -> &'static [&'static [u8]] {
+    let digest = Sha256::digest(bytes);
+
+    if let Some(preferred) = PREFERRED.get().copied() {
+        if baked_from(preferred, &digest) {
+            return preferred;
+        }
+    }
+
+    if baked_from(BAKED, &digest) {
+        return BAKED;
+    }
+
+    &[]
+}
+
+/// Whether every table in `tables` was baked from the face whose SHA-256 is `digest`.
+///
+/// All of them and not any: a set of tables is one face's coverage at several sizes, so half of it
+/// matching is a set that was put together wrong, and drawing from the wrong half is worse than
+/// drawing from none.
+///
+/// A table that does not parse counts as not matching. It cannot get this far — [`prefer_tables`]
+/// refuses one at the door, and `include_bytes!` data is a build that should not have shipped — but
+/// the answer here is a fallback rather than a panic, so nothing needs to be said about it twice.
+#[cfg(feature = "renderer")]
+fn baked_from(tables: &'static [&'static [u8]], digest: &[u8]) -> bool {
+    tables.iter().all(|bytes| {
+        iced_pomelo_gfx::baked::Atlas::new(bytes)
+            .map(|table| table.font_hash() == &digest[..16])
+            .unwrap_or(false)
+    })
 }
 
 /// Whether anyone has installed a font yet — an app, a firmware, or [`install_default`] itself.
@@ -148,17 +209,23 @@ pub fn install(bytes: &'static [u8]) {
 
     INSTALLED.store(true, Ordering::Relaxed);
 
-    // The tables are installed by whoever installed the font they were baked from: an app that
+    // The tables are installed by whoever installed the face they were baked from: an app that
     // brings a face of its own gets none of this, and the renderer would refuse them by `font_id`
     // even if it did.
     //
-    // Which tables, and not whether: a firmware that found a newer coverage on a card said so with
-    // [`prefer_tables`], and this is where that is read — once, because a table's glyph numbers only
-    // mean anything against the face they were baked from, and this is the moment that face exists.
+    // Which tables, and not whether: a firmware that found a wider face on a card said so with
+    // [`prefer_tables`] and installed that face through this same call, so this is where the two
+    // halves meet — once, because this is the moment the face and its glyph numbers both exist.
     #[cfg(feature = "renderer")]
-    if std::ptr::eq(bytes, DEFAULT) {
-        if let Some((id, _)) = face {
-            iced_pomelo_gfx::baked::install(id, tables());
+    {
+        let tables = tables_for(bytes);
+
+        // No tables is not an empty install: a face nothing was baked for is a face the renderer
+        // rasterises for, which is what it already does with nothing installed at all.
+        if !tables.is_empty() {
+            if let Some((id, _)) = face {
+                iced_pomelo_gfx::baked::install(id, tables);
+            }
         }
     }
 }

@@ -33,7 +33,7 @@ use std::ffi::CString;
 
 use pomelo_hal::error::HalError;
 use pomelo_hal::traits::HttpBackend;
-use pomelo_hal::types::{HttpFault, HttpResponse, HttpState, Sink};
+use pomelo_hal::types::{HttpFault, HttpProgress, HttpResponse, HttpState, Sink};
 
 mod ffi {
     use core::ffi::{c_char, c_int};
@@ -63,6 +63,7 @@ mod ffi {
         pub fn hal_http_start_to(url: *const c_char, sink: c_int, path: *const c_char) -> c_int;
         pub fn hal_http_get_state() -> c_int;
         pub fn hal_http_get_fault() -> c_int;
+        pub fn hal_http_get_progress(out_received: *mut usize, out_total: *mut usize) -> c_int;
         pub fn hal_http_take(
             out_status: *mut c_int,
             out_body: *mut *const u8,
@@ -156,6 +157,24 @@ impl HttpBackend for EspHttp {
             // "still running" would leave a page waiting for an answer that is never coming.
             _ => HttpState::Failed(fault_from(unsafe { ffi::hal_http_get_fault() })),
         }
+    }
+
+    fn progress(&self) -> Option<HttpProgress> {
+        let mut received: usize = 0;
+        let mut total: usize = 0;
+
+        let code = unsafe { ffi::hal_http_get_progress(&mut received, &mut total) };
+        if code != 0 {
+            // Nothing in flight. The C side says so itself rather than this side guessing from a pair
+            // of zeros, which is also what a download that has *started* but not yet read its headers
+            // looks like — and that one is a `Some(0)` a bar should draw empty.
+            return None;
+        }
+
+        Some(HttpProgress {
+            received: received as u64,
+            total: total as u64,
+        })
     }
 
     fn take_result(&mut self) -> Result<HttpResponse, HalError> {

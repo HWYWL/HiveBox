@@ -405,6 +405,29 @@ int32_t hal_http_get_state(void);
 /** @brief Why it failed: `HAL_HTTP_FAULT_*`. Meaningful while the state is `HAL_HTTP_FAILED`. */
 int32_t hal_http_get_fault(void);
 
+/** @brief How many bytes of the body have arrived, and how many there will be.
+ *
+ * For the bar a page draws while it waits: a download is a minute of somebody watching, and the only
+ * thing that says the box has not hung is a number that moves. `*out_total` is what the server put in
+ * `Content-Length`, and 0 when it said nothing — a chunked answer has no length until it is over —
+ * so a caller with a size of its own (a manifest that already said how big the file is) uses that
+ * instead and reads a 0 here as "not a percentage".
+ *
+ * Both numbers are of *this* request and are cleared when one starts or is cancelled. A redirect's
+ * own page is not in them: what is counted is what the caller is given.
+ *
+ * @param[out] out_received How many bytes of the body have been handed to the caller so far.
+ * @param[out] out_total    The body's declared length, or 0 when the server did not declare one.
+ *
+ * @return
+ *      - ESP_OK while a request is running, which is the only time the numbers mean anything
+ *      - ESP_ERR_INVALID_ARG for NULL out-parameters
+ *      - ESP_ERR_INVALID_STATE when nothing is in flight: before a request, and again once its
+ *        answer has been taken or cancelled — the numbers are leftovers then, and a page that drew
+ *        them would draw a bar that had already finished
+ */
+esp_err_t hal_http_get_progress(size_t *out_received, size_t *out_total);
+
 /** @brief The answer of the request that just finished, and clear it.
  *
  * Hands back a pointer *into the client's own buffer* rather than a copy, so the bytes are valid until

@@ -515,6 +515,25 @@ pub enum Sink {
     File(String),
 }
 
+/// How much of a file has arrived, for the bar a page draws while it waits.
+///
+/// A second question about a request, beside [`HttpState`], and a separate one because it is asked by
+/// a different caller: a page waiting on a *document* waits a second and draws a spinner, while a page
+/// waiting on a *file* waits a minute and has to show the minute passing. Only a
+/// [`Sink::File`] request has one worth reading — the buffer's progress is a number nothing draws.
+///
+/// `total` is what the server said in `Content-Length`, and `0` when it said nothing: a chunked
+/// answer has no length until it is over, and a bar that invented one would be a bar that lied. A
+/// caller with a length of its own from elsewhere — a manifest that already said how big the file is —
+/// uses that instead, and treats `0` here as "this one cannot be a percentage".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HttpProgress {
+    /// How many bytes have arrived so far.
+    pub received: u64,
+    /// How many the answer is, when the server said; `0` when it did not.
+    pub total: u64,
+}
+
 /// How a request is going, as [`HttpBackend`][crate::traits::HttpBackend] reports it.
 ///
 /// The same start-and-poll shape the radio's scan has, for the same reason: a request is a second or
