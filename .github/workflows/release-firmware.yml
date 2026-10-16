@@ -182,16 +182,19 @@ jobs:
       # —— 所以版本由 `publish_bin.py` 自己问镜像（`esptool image-info`），而不是从 tag 拼。
       #
       # 字库是烘焙出来的那张 24 px 字形表；它的名字里是字号（`@24px`）而不是版本，版本读
-      # 它旁边的 `fonts/dist/VERSION`。
-      - name: 归置 bin/（固件、字库与 manifest.json）
+      # 它旁边的 `fonts/dist/VERSION`。卡上那一对是烘焙脚本直接产出的（`dist/card/`），
+      # 版本在它自己的文件名里 —— 它和上面那两件不是一回事（那两件是更新页按清单下载的，
+      # 这一对是给人往 SD 卡里放的），所以只落到 `bin/card/` 这一层子目录里。
+      - name: 归置 bin/（固件、字库、卡上字体包与 manifest.json）
         run: |
           set -eo pipefail
           . "$HOME/esp-idf/export.sh"
 
           font="ui-framework/iced-pomelo-winit/fonts/dist/SourceHanSansSC-Regular-Subset-common@24px.bin"
-          python tools/publish_bin.py --font "${font}"
+          card="ui-framework/pomelo-font/dist/card"
+          python tools/publish_bin.py --font "${font}" --card-dir "${card}"
 
-          ls -l bin/
+          ls -l bin/ bin/card/
           firmware="$(ls bin/hivebox-firmware-*.bin)"
           echo "ASSET=${firmware}" >> "$GITHUB_ENV"
           echo "ARTIFACT=$(basename "${firmware}")" >> "$GITHUB_ENV"
@@ -223,9 +226,13 @@ jobs:
           name: ${{ github.ref_name }}
           # 固件、字库和清单一起发：更新页读的是仓库里的 `bin/manifest.json`，而 Release 是
           # 同一套东西的另一个入口，两边对不上的时候最难查。
+          #
+          # 卡上那一对（`bin/card/` 里的字体与表）挂在同一页上，但它不在清单里 —— 更新页下不到
+          # 它，它也不是一个文件的事：两半必须同版，所以它是**给人拿**的（下载、拷进 SD 卡）。
           files: |
             bin/hivebox-firmware-*.bin
             bin/hivebox-font-*.bin
             bin/manifest.json
+            bin/card/*
           body_path: ${{ steps.notes.outputs.path }}
           generate_release_notes: ${{ steps.notes.outputs.path == '' }}
