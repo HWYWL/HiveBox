@@ -29,22 +29,28 @@ include!(concat!(env!("OUT_DIR"), "/baked_icons.rs"));
 /// serves, what it can be told to do, and how it is set up. The fifth is the one tile that is about the
 /// box's own software rather than about anything that software does: the updater, where a firmware or a
 /// glyph table is replaced, and it sits beside the settings for that reason — both are pages about the
-/// box itself rather than pages about a job. The calculator is next: it is the one app here that has
-/// nothing to do with the box at all, and it closed the page while the page held six. Eight is what it
-/// holds now, so the two that are about the box and the machine beside it — the task viewer, which is
-/// about nothing else, and the NAS monitor, which is about the machine next to it — close it instead.
+/// box itself rather than pages about a job.
+///
+/// The last three of the page are the ones that are about the box and the machine beside it: the task
+/// viewer, which is about nothing else; the server, which is about the machine next to this one; and
+/// the file manager, which is about the two filesystems this box can mount and is the way to move
+/// anything in either. The file manager is the one that arrived last, and eight is what the page
+/// holds: putting it here meant something had to leave, and what left is the calculator — the one app
+/// on this grid that has nothing to do with the box at all, an app that merely happens to be running
+/// on it. It is where a page about the box can do without, and it was the tile that closed the first
+/// page while the page held six, so it is the tile that gives up its place when the page fills up.
+/// It opens the second page instead.
 ///
 /// The second page holds what is left, which is about the box and what is beside it rather than the jobs
-/// it is for: the clock, which is about nothing but the time this box thinks it is, the overview, which
-/// is about the box itself and is the one tile that is about more than one thing, the file manager,
-/// which is about the two filesystems this box can mount and is the way to move anything in either, and
-/// the power log, which is about the battery and is the only tile on the grid that is about *time* — the
-/// overview shows what the battery is, and this one shows what it has been doing. The three the box has
-/// no say in close it: the channel map, which is about the air around the box, which belongs to neither
-/// the box nor the machine beside it; the weather, which is the channel map's subject one layer up — the
-/// sky rather than the air — and is read the same way, over the network, which is why the two are
-/// neighbours; and the games app last, because it is the only tile on the grid whose subject is not the
-/// box at all: it is the person holding it.
+/// it is for: the calculator, which is about neither the box nor anything beside it; the clock, which is
+/// about nothing but the time this box thinks it is; the overview, which is about the box itself and is
+/// the one tile that is about more than one thing; and the power log, which is about the battery and is
+/// the only tile on the grid that is about *time* — the overview shows what the battery is, and this one
+/// shows what it has been doing. The three the box has no say in close it: the channel map, which is
+/// about the air around the box, which belongs to neither the box nor the machine beside it; the
+/// weather, which is the channel map's subject one layer up — the sky rather than the air — and is read
+/// the same way, over the network, which is why the two are neighbours; and the games app last, because
+/// it is the only tile on the grid whose subject is not the box at all: it is the person holding it.
 pub const CATALOGUE: &[Entry] = &[
     // Page 1
     Entry {
@@ -84,21 +90,20 @@ pub const CATALOGUE: &[Entry] = &[
         accent: (63, 81, 181),
     },
     Entry {
-        name: "Calculator",
-        name_zh: "计算器",
-        icon: AppIcon::glyph(Icon::CALCULATE),
-        accent: (246, 158, 34),
-    },
-    Entry {
         name: "Tasks",
-        name_zh: "任务查看器",
+        // Four characters, which is all a tile's name has room for: the label is one line under the
+        // icon and is cut with an ellipsis when it does not fit, and five of them drew `任务查…` on the
+        // panel. See `style::LABEL_MAX_WIDTH`, which a test holds every name in here to.
+        name_zh: "任务详情",
         // A system monitor rather than a list: the list is what it draws, and this is what it *is*.
         icon: AppIcon::glyph(Icon::MONITOR_HEART),
         accent: (0, 168, 190),
     },
     Entry {
         name: "Server",
-        name_zh: "服务器监控",
+        // One word, for the same reason the task viewer's is four characters: `服务器监控` was a
+        // character too long for the tile and read as `服务器…`.
+        name_zh: "服务器",
         // The machine beside this one rather than anything in it: a server-in-a-box is what it draws,
         // and reaching it is what the app is for. Named for what it is and not for what it usually is:
         // what it watches is anything that answers SSH, and whether that box is a NAS is the owner's
@@ -106,7 +111,24 @@ pub const CATALOGUE: &[Entry] = &[
         icon: AppIcon::glyph(Icon::DNS),
         accent: (112, 92, 240),
     },
+    Entry {
+        name: "Files",
+        name_zh: "文件管理",
+        // An open folder rather than a shut one: browsing is what the app is for, and the page it opens
+        // on is a listing, so the picture is the thing that has been gone into rather than the thing
+        // sitting there. The rows inside it draw the shut glyph, so the two are told apart by shape.
+        icon: AppIcon::glyph(Icon::FOLDER_OPEN),
+        // A warm brown, the stretch between the music app's red and the calculator's orange: paper and
+        // cardboard, which is what a file manager is about, and the one warm hue the spread had left.
+        accent: (166, 111, 74),
+    },
     // Page 2
+    Entry {
+        name: "Calculator",
+        name_zh: "计算器",
+        icon: AppIcon::glyph(Icon::CALCULATE),
+        accent: (246, 158, 34),
+    },
     Entry {
         name: "Clock",
         name_zh: "时钟",
@@ -128,17 +150,6 @@ pub const CATALOGUE: &[Entry] = &[
         // The hue left in the middle: the widest gap in the spread is between the calculator's orange
         // and the terminal's green, and a lime is the one colour that is close to neither.
         accent: (104, 159, 56),
-    },
-    Entry {
-        name: "Files",
-        name_zh: "文件管理",
-        // An open folder rather than a shut one: browsing is what the app is for, and the page it opens
-        // on is a listing, so the picture is the thing that has been gone into rather than the thing
-        // sitting there. The rows inside it draw the shut glyph, so the two are told apart by shape.
-        icon: AppIcon::glyph(Icon::FOLDER_OPEN),
-        // A warm brown, the stretch between the music app's red and the calculator's orange: paper and
-        // cardboard, which is what a file manager is about, and the one warm hue the spread had left.
-        accent: (166, 111, 74),
     },
     Entry {
         name: "Power Log",

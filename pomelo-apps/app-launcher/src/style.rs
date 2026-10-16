@@ -96,7 +96,10 @@ pub const GLYPH_GAP: f32 = 8.0;
 /// Which is 113 px, and a page of six was laid out so that the longest name the catalogue has —
 /// "Web Manager", about 151 px at 24 px — fitted inside the 152 its tile and its lean gave it. A quarter
 /// of the panel does not hold that name at that size, so it and the other long English ones are cut;
-/// the Chinese names are four characters at most and are all well inside it.
+/// the Chinese names are four characters at most and are all well inside it, which is [`LABEL`] a
+/// character against this number: four are 96 px and fit, five are 120 px and are drawn as `任务查…`.
+/// Five was what two of them had while the columns were wide enough to hide it, and the launcher's
+/// `every_chinese_name_fits_a_tile_label` is what keeps the next name counted rather than noticed.
 pub const LABEL_MAX_WIDTH: f32 = TILE_WIDTH + GRID_GAP - 4.0;
 
 /// Estimated width of a single character in pixels at given font size.

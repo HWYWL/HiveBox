@@ -2038,6 +2038,10 @@ struct Words {
     language: Language,
     /// The app's own name, which is the list's heading: the board's grid has a tile, and a page inside
     /// the app has no other place to say what this is.
+    ///
+    /// One word, because the tile is where the name is read most and a tile's label is one line: see
+    /// the launcher's `LABEL_MAX_WIDTH`, and the catalogue's copy of this string, which the two keep
+    /// spelled the same way.
     title: &'static str,
     /// The list's button, and the form's heading when it is adding one.
     add: &'static str,
@@ -2106,7 +2110,7 @@ impl Words {
         match language {
             Language::Chinese => Self {
                 language,
-                title: "服务器监控",
+                title: "服务器",
                 add: "添加设备",
                 edit_device: "编辑设备",
                 no_devices: "还没有添加服务器：点下面的按钮填上地址和账号",
@@ -2151,7 +2155,7 @@ impl Words {
             },
             Language::English => Self {
                 language,
-                title: "Server monitor",
+                title: "Server",
                 add: "Add a server",
                 edit_device: "Edit server",
                 no_devices: "No servers yet: use the button below to add an address and an account",

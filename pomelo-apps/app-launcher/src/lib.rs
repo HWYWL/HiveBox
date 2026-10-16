@@ -193,12 +193,12 @@ pub const WEB_MANAGER: usize = 1;
 pub const TERMINAL: usize = 2;
 pub const SETTINGS: usize = 3;
 pub const UPDATER: usize = 4;
-pub const CALCULATOR: usize = 5;
-pub const TASK_VIEWER: usize = 6;
-pub const NAS_MONITOR: usize = 7;
-pub const CLOCK: usize = 8;
-pub const OVERVIEW: usize = 9;
-pub const FILES: usize = 10;
+pub const TASK_VIEWER: usize = 5;
+pub const NAS_MONITOR: usize = 6;
+pub const FILES: usize = 7;
+pub const CALCULATOR: usize = 8;
+pub const CLOCK: usize = 9;
+pub const OVERVIEW: usize = 10;
 pub const POWER_LOG: usize = 11;
 pub const WIFI_MAP: usize = 12;
 pub const WEATHER: usize = 13;
@@ -2547,11 +2547,11 @@ mod tests {
         assert_eq!(CATALOGUE[CALCULATOR].localized_name(Language::Chinese), "计算器");
         assert_eq!(
             CATALOGUE[TASK_VIEWER].localized_name(Language::Chinese),
-            "任务查看器"
+            "任务详情"
         );
         assert_eq!(
             CATALOGUE[NAS_MONITOR].localized_name(Language::Chinese),
-            "服务器监控"
+            "服务器"
         );
         assert_eq!(CATALOGUE[NAS_MONITOR].name, "Server");
         assert_eq!(CATALOGUE[CLOCK].localized_name(Language::Chinese), "时钟");
@@ -2572,13 +2572,16 @@ mod tests {
 
     /// The grid's two pages, in the order they are drawn: the eight the box is for — what it plays,
     /// what it serves, what it can be told to do, how it is set up, how its own software is replaced,
-    /// the one tile that is about none of that, and the two that are about the box itself and what is
-    /// beside it — then the seven the box has no say in: the time, the box's own dashboard, its two
-    /// filesystems, its battery, the air, the sky, and the person holding it.
+    /// and the three that are about the box itself and what is beside it: what it is running, the
+    /// machine next to it, and what is stored on either — then the seven that are not: the one app
+    /// that has nothing to do with the box at all, the time, the box's own dashboard, its battery, the
+    /// air, the sky, and the person holding it.
     ///
     /// Written out rather than derived, because the order *is* the interface: a page and a position
     /// are what a finger learns, and a reshuffle that left this test green would be the one kind of
-    /// change nobody would notice until they were holding the box.
+    /// change nobody would notice until they were holding the box. The page boundary is part of that:
+    /// the file manager is on the first page and the calculator is not, which is the trade the two
+    /// of them made when the page ran out of places.
     #[test]
     fn the_catalogue_is_two_pages_in_the_order_the_grid_shows_them() {
         let names: Vec<&str> = CATALOGUE.iter().map(|entry| entry.name).collect();
@@ -2591,12 +2594,12 @@ mod tests {
                 "Terminal",
                 "Settings",
                 "Update",
-                "Calculator",
                 "Tasks",
                 "Server",
+                "Files",
+                "Calculator",
                 "Clock",
                 "Overview",
-                "Files",
                 "Power Log",
                 "Wi-Fi Map",
                 "Weather",
@@ -2682,6 +2685,26 @@ mod tests {
         assert!(truncated_zh.ends_with("..."));
         assert!(truncated_zh.chars().count() < long_chinese.chars().count());
         assert!(style::text_width(&truncated_zh, style::LABEL) <= style::LABEL_MAX_WIDTH);
+    }
+
+    /// No Chinese name in the catalogue is cut by a tile's label.
+    ///
+    /// The truncation above is what the label *does*, and for the English names it is what it is for:
+    /// "Web Manager" is 151 px against the 113 a quarter of the panel leaves and is meant to be cut.
+    /// The Chinese names are not: four characters are 96 px and fit, five are 120 px and do not, and a
+    /// five-character name is therefore a name the grid draws as `任务查…` — which two of them were, for
+    /// as long as the columns were wide enough that nobody had looked. A name added to the catalogue
+    /// has to be counted, and this is where it is counted.
+    #[test]
+    fn every_chinese_name_fits_a_tile_label() {
+        for entry in CATALOGUE {
+            let name = entry.localized_name(Language::Chinese);
+            assert_eq!(
+                style::truncate_label(name, style::LABEL_MAX_WIDTH, style::LABEL),
+                name,
+                "{name} is wider than a tile's label and is drawn cut"
+            );
+        }
     }
 
     #[test]

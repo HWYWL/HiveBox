@@ -195,11 +195,21 @@ pub const RING_LABEL_GAP: f32 = 6.0;
 /// two values are not the same length: left to themselves the pair would be two different heights
 /// on one row, which is the one thing a row of cards must not be.
 ///
-/// The number is the card's own two lines, the gap between them and the padding either side:
-/// `SUMMARY_CARD_LABEL_FONT × 1.3 + SUMMARY_CARD_GAP_V + SUMMARY_CARD_VALUE_FONT × 1.3` is 66.4
+/// The number is the card's own three lines, the gap between them and the padding either side:
+/// `SUMMARY_CARD_LABEL_FONT × 1.3 + SUMMARY_CARD_GAP_V + SUMMARY_CARD_VALUE_FONT × 1.3 × 2` is 97.6
 /// and [`SUMMARY_CARD_PADDING`] twice is 20 more. Rounded up, because the 1.3 line-box ratio is
 /// this font's and not this file's to know exactly.
-pub const SUMMARY_CARD_H: f32 = 88.0;
+///
+/// Three lines and not two, because a firmware version is one long word with nowhere to break:
+/// `v0.10.3-20261016` is sixteen characters and about 197 px wide at this size, against the 176 the
+/// half of the row a card gets leaves for it — so it wraps onto a second line, and that line has to
+/// be inside the card. At two lines' worth of height the card's own content was taller than the card
+/// and the overflow came out where a centred box puts it: half of it above, pushing the name up out
+/// of the card, and half below, drawing the tail of the version over the card's bottom edge. The
+/// chip's model is one short word and leaves that third line empty; a row of equal cards is worth
+/// an empty line, and the alternative — a height per value — is the one thing this constant is
+/// here not to be.
+pub const SUMMARY_CARD_H: f32 = 118.0;
 pub const SUMMARY_CARD_GAP: f32 = 12.0;
 pub const SUMMARY_CARD_PADDING: f32 = 10.0;
 /// The glyph in a card's heading, and the gap under that heading.
