@@ -38,8 +38,8 @@
 //!
 //! # The grid is paged, and the page slides under the finger
 //!
-//! A page is [`PER_PAGE`] apps, three to a row, so the fifteen the catalogue has are three pages:
-//! six, six and three.
+//! A page is [`PER_PAGE`] apps, four to a row, so the fifteen the catalogue has are two pages:
+//! eight and seven.
 //! A finger turning one is a **drag**: down on the grid, across, up. iced has no widget for that — a
 //! `button` captures the press it is given, and `Scrollable` scrolls for a wheel, a touch or its own
 //! scrollbar and for nothing else — so the gesture is read by `pomelo-widgets`' pager.
@@ -2570,17 +2570,17 @@ mod tests {
         assert_eq!(CATALOGUE[GAMES].name, "Games");
     }
 
-    /// The grid's three pages, in the order they are drawn: the six the box is for — what it plays,
+    /// The grid's two pages, in the order they are drawn: the eight the box is for — what it plays,
     /// what it serves, what it can be told to do, how it is set up, how its own software is replaced,
-    /// and the one tile that is about none of that — then the six that are about the box itself and
-    /// what is beside it, and last the three the box has no say in: the air, the sky, and the person
-    /// holding it.
+    /// the one tile that is about none of that, and the two that are about the box itself and what is
+    /// beside it — then the seven the box has no say in: the time, the box's own dashboard, its two
+    /// filesystems, its battery, the air, the sky, and the person holding it.
     ///
     /// Written out rather than derived, because the order *is* the interface: a page and a position
     /// are what a finger learns, and a reshuffle that left this test green would be the one kind of
     /// change nobody would notice until they were holding the box.
     #[test]
-    fn the_catalogue_is_three_pages_in_the_order_the_grid_shows_them() {
+    fn the_catalogue_is_two_pages_in_the_order_the_grid_shows_them() {
         let names: Vec<&str> = CATALOGUE.iter().map(|entry| entry.name).collect();
 
         assert_eq!(
@@ -2606,8 +2606,8 @@ mod tests {
         assert_eq!(CATALOGUE.len(), 15, "and the fifteen are all the tiles there are");
         assert_eq!(
             Launcher::new(Arc::new(Board::simulated())).pages(),
-            3,
-            "six, six and three"
+            2,
+            "eight and seven"
         );
     }
 
@@ -2643,11 +2643,16 @@ mod tests {
 
     #[test]
     fn tile_label_truncation_and_single_line() {
-        // The longest name the catalogue has fits the wider tile line width
-        assert_eq!(
-            style::truncate_label("Web Manager", style::LABEL_MAX_WIDTH, style::LABEL),
-            "Web Manager"
+        // A quarter of the panel is 113 px of label, so the names that fit at the font the interface
+        // draws at are the short ones: what the catalogue's longest name does now is get cut, which is
+        // [`style::LABEL_MAX_WIDTH`]'s own example.
+        let longest = style::truncate_label("Web Manager", style::LABEL_MAX_WIDTH, style::LABEL);
+        assert!(
+            longest.ends_with("..."),
+            "{longest}: the longest name does not fit a quarter of the panel"
         );
+        assert!(style::text_width(&longest, style::LABEL) <= style::LABEL_MAX_WIDTH);
+
         assert_eq!(
             style::truncate_label("Terminal", style::LABEL_MAX_WIDTH, style::LABEL),
             "Terminal"
@@ -2659,8 +2664,8 @@ mod tests {
 
         // Strips any potential newline to guarantee single line
         assert_eq!(
-            style::truncate_label("Web Manager\nsecond-line", style::LABEL_MAX_WIDTH, style::LABEL),
-            "Web Manager"
+            style::truncate_label("Terminal\nsecond-line", style::LABEL_MAX_WIDTH, style::LABEL),
+            "Terminal"
         );
 
         // Very long name truncates and appends "..."

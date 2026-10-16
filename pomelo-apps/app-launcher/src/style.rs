@@ -23,12 +23,16 @@ pub const WALLPAPER_DARK: (u8, u8, u8) = (0, 0, 0);
 /// panel has no bezel to hide in, so it keeps the near-white it has always had.
 pub const WALLPAPER_LIGHT: (u8, u8, u8) = (242, 242, 247);
 
-/// The app grid: three columns of two rows, so a page holds six apps.
+/// The app grid: four columns of two rows, so a page holds eight apps.
 ///
-/// Two by two, one tile to a quadrant, was what a page of four was laid out for. Six is three
-/// across and two down: the grid is scanned by column before it is read as rows, and a column of
-/// three is what a page of a phone's home screen has.
-pub const COLUMNS: usize = 3;
+/// Two by two, one tile to a quadrant, was what a page of four was laid out for, and three by two
+/// what a page of six was. Eight is four across and two down: the grid is scanned by column before
+/// it is read as rows, and four across is what a page of a phone's home screen has.
+///
+/// The extra column is paid for by the icon and by the label's room — see [`ICON`] and
+/// [`LABEL_MAX_WIDTH`] — and not by the rows: a 480 px panel still holds two of those, whatever
+/// the columns do.
+pub const COLUMNS: usize = 4;
 pub const ROWS: usize = 2;
 
 /// The apps one page of the grid holds.
@@ -46,32 +50,41 @@ pub const FONT: f32 = FONT_BASE;
 
 /// The gap between the cells, and around the page.
 pub const GUTTER: f32 = 20.0;
-pub const ICON: f32 = 118.0;
-pub const ICON_RADIUS: f32 = 33.0;
-pub const GLYPH: f32 = 54.0;
+
+/// The icon square: smaller than the one a page of six drew, because a column is now a quarter of the
+/// panel rather than a third of it.
+///
+/// 92 px in a 105 px tile, against the 118 in 144 the page of six had, and the two numbers that shape
+/// it — the corner and the glyph — come down with it: a square of 92 has a 26 px corner. The shrink is
+/// what pays for the fourth column, and it costs the tile nothing else: four of these across is 368 px
+/// of the 480 the panel is, so what is left between two icons is still a gap rather than a crowd.
+pub const ICON: f32 = 92.0;
+pub const ICON_RADIUS: f32 = 26.0;
+pub const GLYPH: f32 = 42.0;
 
 /// The gap the grid leaves between its columns, and at its left and right edges.
 ///
-/// The three columns do not add up to the panel's width. What is left over is split four ways by the
+/// The four columns do not add up to the panel's width. What is left over is split five ways by the
 /// flexible spaces the page is built from — one outside each edge, and one between each pair of columns
 /// — so this is what each of those spaces comes to. [`LABEL_MAX_WIDTH`] is where the room is spent.
 ///
-/// A page of six pays for its two extra tiles here and in [`TILE_WIDTH`], and nowhere else: the icon
-/// stays the size a page of four drew it at, because two rows of two hundred pixels hold a 118 px icon,
-/// its gap and its label with fifty to spare.
+/// A page of eight pays for its columns here and in [`TILE_WIDTH`], and nowhere else — 4 × 105 + 5 × 12
+/// is the 480 px the panel is — and the icon is where the *width* comes from: see [`ICON`], which a page
+/// of six drew 26 px larger because a third of the panel held it.
 pub const GRID_GAP: f32 = 12.0;
 
 /// The app tile container width: wider than the icon, and wider than most names need.
 ///
-/// 144 px, which with [`GRID_GAP`] back is the third of the panel a column gets — 3 × 144 + 4 × 12 =
-/// 480 — so that the longest name the catalogue has stays on one line beside it. What happens to one
-/// that does not is [`LABEL_MAX_WIDTH`]'s: a tile's label is a single line and is cut with an ellipsis,
-/// because a label that wrapped would be a row a different height from the row beside it.
-pub const TILE_WIDTH: f32 = 144.0;
+/// 105 px, which with [`GRID_GAP`] back is the quarter of the panel a column gets — 4 × 105 + 5 × 12 =
+/// 480 — so that the names the catalogue has stay on one line beside it, or as much of one as a quarter
+/// of the panel leaves. What happens to the ones that do not is [`LABEL_MAX_WIDTH`]'s: a tile's label is
+/// a single line and is cut with an ellipsis, because a label that wrapped would be a row a different
+/// height from the row beside it.
+pub const TILE_WIDTH: f32 = 105.0;
 
 /// The app grid icon label font size: the size the interface draws at.
 pub const LABEL: f32 = FONT;
-pub const GLYPH_GAP: f32 = 10.0;
+pub const GLYPH_GAP: f32 = 8.0;
 
 /// Maximum width for a tile label before truncation with "...".
 ///
@@ -80,8 +93,10 @@ pub const GLYPH_GAP: f32 = 10.0;
 /// room a single-line name may lean into, and two names leaning into it from opposite sides still
 /// leave a gap between them.
 ///
-/// Which is the room the one name that needs it — "Web Manager", about 151 px at 24 px against the 144
-/// its tile has — would not fit without.
+/// Which is 113 px, and a page of six was laid out so that the longest name the catalogue has —
+/// "Web Manager", about 151 px at 24 px — fitted inside the 152 its tile and its lean gave it. A quarter
+/// of the panel does not hold that name at that size, so it and the other long English ones are cut;
+/// the Chinese names are four characters at most and are all well inside it.
 pub const LABEL_MAX_WIDTH: f32 = TILE_WIDTH + GRID_GAP - 4.0;
 
 /// Estimated width of a single character in pixels at given font size.
