@@ -903,6 +903,216 @@ uint16_t hal_web_get_port(void);
 void hal_web_set_app_name(const char *name);
 
 /* ---------------------------------------------------------------------------
+ * Cloud servers (Tencent Cloud).
+ *
+ * The board's second outbound client, and deliberately not the same shape as the
+ * first: a cloud call is a POST with a JSON body signed by a SecretKey, so this
+ * is its own entry point rather than another argument on `hal_http_*`.
+ * `board_cloud.c` has the whole of why.
+ *
+ * Two providers, four actions between them:
+ *
+ *   HAL_CLOUD_CVM         腾讯云 · 云服务器          (ins-…)
+ *   HAL_CLOUD_LIGHTHOUSE  腾讯云 · 轻量应用服务器    (lhins-…)
+ *   HAL_CLOUD_ALL         两家的并集，只用于 LIST —— 一次问你存了密钥的每一家
+ *
+ *   HAL_CLOUD_ACTION_LIST    what the key owns
+ *   HAL_CLOUD_ACTION_START  power on
+ *   HAL_CLOUD_ACTION_STOP   power off
+ *   HAL_CLOUD_ACTION_REBOOT
+ *
+ * Asynchronous, in the shape of `hal_http_*`: `hal_cloud_start` returns before
+ * anything has been sent, the state is polled, and the answer is one JSON
+ * document read with `hal_cloud_answer` and released with `hal_cloud_take`.
+ * The document is the same one the page's cloud routes hand to a browser, so
+ * both surfaces read the same words:
+ *
+ *   {"ok":1,"provider":"cvm","region":"ap-guangzhou","count":1,
+ *    "instances":[{"id":"ins-…","name":"…","state":"RUNNING","ip":"1.2.3.4","kind":"cvm"}]}
+ *   {"ok":1,"provider":"all","region":"","count":2,
+ *    "instances":[{"id":"lhins-…",…,"kind":"lighthouse"},{"id":"ins-…",…,"kind":"cvm"}],
+ *    "failed":["lighthouse"]}                        -- 这一家的这次没取到
+ *   {"ok":1,"provider":"cvm","action":"stop","request_id":"…"}
+ *   {"error":"cloud_clock"}                          -- one of the faults below
+ *   {"error":"cloud_api","code":"…","message":"…"}   -- the API refused
+ *
+ * `kind` is on every row, including the single-provider answers: a merged list
+ * is a list of machines from two APIs, and a button has to know which API to
+ * send `StartInstances` to. `HAL_CLOUD_ALL` is not a key's owner — the key table
+ * is still two entries wide (`HAL_CLOUD_PROVIDER_COUNT`).
+ *
+ * The keys are plaintext in `/internal/AppData/CLOUD/cloud.conf`, like the Wi-Fi
+ * password and the NAS logins. A SecretKey is worse to leak than either of those
+ * — it can stop or destroy everything the account owns — so give this board a
+ * CAM sub-account whose policy names only the instances it may touch.
+ * ------------------------------------------------------------------------- */
+
+/** Both providers, and the count, which is what the key table is sized by. */
+#define HAL_CLOUD_CVM             0
+#define HAL_CLOUD_LIGHTHOUSE      1
+#define HAL_CLOUD_PROVIDER_COUNT  2
+
+/**
+ * 「全部服务器」：一次请求把存了密钥的每一家都问一遍，答案合并成一张列表。
+ *
+ * 只对 `HAL_CLOUD_ACTION_LIST` 有意义 —— 开关机总得指名一台机器，所以带
+ * `HAL_CLOUD_ALL` 的电源动作会被 `hal_cloud_start` 拒掉。它只是列表的目标，不是任何
+ * 一份密钥的主人，所以 `HAL_CLOUD_PROVIDER_COUNT` 仍然是 2，密钥表不因它变宽。
+ */
+#define HAL_CLOUD_ALL             2
+
+#define HAL_CLOUD_ACTION_LIST     0
+#define HAL_CLOUD_ACTION_START    1
+#define HAL_CLOUD_ACTION_STOP     2
+#define HAL_CLOUD_ACTION_REBOOT   3
+
+/** What `hal_cloud_state` answers with. */
+#define HAL_CLOUD_IDLE     0
+#define HAL_CLOUD_RUNNING  1
+#define HAL_CLOUD_DONE     2
+#define HAL_CLOUD_FAILED   (-1)
+
+/**
+ * Why the request that is not DONE failed.
+ *
+ * A closed list rather than an `esp_err_t`, because every one of these is a
+ * sentence on a page and the page is what has to be able to say it: the answer
+ * JSON carries the name (`cloud_creds`, `cloud_clock`, …) and the page has the
+ * wording. Deliberately absent is "the signature was wrong" — that is an API
+ * refusal and arrives with a code of its own through `HAL_CLOUD_FAULT_API`.
+ */
+#define HAL_CLOUD_FAULT_NONE         0
+/** A provider, an action or an instance id that is not one. */
+#define HAL_CLOUD_FAULT_ARGS         1
+/** No key on file for this provider. */
+#define HAL_CLOUD_FAULT_NO_CREDS     2
+/** Not on a network. */
+#define HAL_CLOUD_FAULT_NO_NETWORK   3
+/** The clock has not been set, so the signature would be expired before it was sent. */
+#define HAL_CLOUD_FAULT_CLOCK        4
+/** DNS, connect or read failed. */
+#define HAL_CLOUD_FAULT_UNREACHABLE  5
+/** The handshake or the certificate failed. */
+#define HAL_CLOUD_FAULT_TLS          6
+/** A status that was not 2xx and did not carry an `Error` object. */
+#define HAL_CLOUD_FAULT_HTTP         7
+/** The API answered with `Error`; the code and message are in the answer. */
+#define HAL_CLOUD_FAULT_API          8
+/** The answer did not fit, or the key file could not be read or written. */
+#define HAL_CLOUD_FAULT_STORAGE      9
+
+/** How long a SecretId or a SecretKey may be. Both are 36 and 32 characters as Tencent issues them. */
+#define HAL_CLOUD_SECRET_ID_MAX   64
+#define HAL_CLOUD_SECRET_KEY_MAX  64
+/** `ap-guangzhou` and its siblings. */
+#define HAL_CLOUD_REGION_MAX      32
+/** `ins-xxxxxxxx` or `lhins-xxxxxxxx`. */
+#define HAL_CLOUD_INSTANCE_MAX    48
+/** The most of an instance name this layer will carry, in bytes of UTF-8. */
+#define HAL_CLOUD_NAME_MAX        96
+/** The most the key file may be. Two sections of three short lines, and room to spare. */
+#define HAL_CLOUD_CONF_MAX        512
+
+/** @brief Allocate what this needs and read the keys. Idempotent; called by everything below.
+ *
+ * Called at the first request rather than at boot, because the filesystem the keys are on is not
+ * up when the board boots and there is no reason to have this wait for it.
+ *
+ * @return ESP_OK, or ESP_ERR_NO_MEM when the answer buffers could not be allocated.
+ */
+esp_err_t hal_cloud_init(void);
+
+/** @brief Begin a request. Non-blocking.
+ *
+ * @param provider `HAL_CLOUD_CVM`, `HAL_CLOUD_LIGHTHOUSE`, or `HAL_CLOUD_ALL` for a list of every
+ *                 provider that has a key (a power action naming `HAL_CLOUD_ALL` is invalid).
+ * @param action   One of the `HAL_CLOUD_ACTION_*` actions.
+ * @param region   `ap-guangzhou` and its siblings, or NULL/"" to use the one saved with the key.
+ *                 Ignored by `HAL_CLOUD_ALL`, which asks each provider in the region its key was
+ *                 saved with.
+ * @param instance The instance id, and ignored by `HAL_CLOUD_ACTION_LIST`.
+ *
+ * Requesting one while another is in flight is ESP_ERR_INVALID_STATE and changes nothing. A request
+ * that cannot be sent — no key, no network, no clock — is ESP_OK with the state failed, and the
+ * reason in the answer: it is a request the caller asked for and the page has to draw.
+ *
+ * @return ESP_OK, ESP_ERR_INVALID_ARG, ESP_ERR_INVALID_STATE, or ESP_ERR_NO_MEM.
+ */
+esp_err_t hal_cloud_start(int32_t provider, int32_t action, const char *region,
+                          const char *instance);
+
+/** @brief Where the request is: `HAL_CLOUD_IDLE`, `RUNNING`, `DONE` or `FAILED`. */
+int32_t hal_cloud_state(void);
+
+/** @brief Why it failed, as one of `HAL_CLOUD_FAULT_*`. Meaningful while the state is `FAILED`. */
+int32_t hal_cloud_fault(void);
+
+/** @brief The answer, or NULL while there is not one yet.
+ *
+ * There is an answer for a failure as well as for a success — `{"error":"cloud_clock"}` is the whole
+ * of what a page has to draw — so this comes back for `DONE` *and* for `FAILED`, and only a request
+ * still in flight has nothing.
+ *
+ * Valid until `hal_cloud_take`, and not for the life of the board: the next request writes over it.
+ * `out_length` may be NULL, and receives the length the document was written to — the buffer behind
+ * this pointer is longer than the document in it.
+ *
+ * Not for two threads at once. A caller that handed the pointer to somebody else and then went on
+ * holding it across a second request wants `hal_cloud_take_answer`, which is this and the release in
+ * one step.
+ */
+const char *hal_cloud_answer(size_t *out_length);
+
+/** @brief Release the answer and the slot, so the next request may start. */
+void hal_cloud_take(void);
+
+/** @brief The answer copied into the caller's buffer and the slot released, in one step.
+ *
+ * The web server's way in: a handler sends the document from a buffer it owns, which is what keeps a
+ * second browser tab's request from rewriting the answer while the first one is being sent. The same
+ * `{"error":…}` document as `hal_cloud_answer`, truncated to fit if it has to be.
+ *
+ * @param out       Where to write it. NUL-terminated on return.
+ * @param capacity  The room there is.
+ * @return The number of bytes written, or 0 when there was no answer.
+ */
+size_t hal_cloud_take_answer(char *out, size_t capacity);
+
+/** @brief Let go of a request in flight.
+ *
+ * A request that has not left the board is dropped and the slot goes back to idle. One already on
+ * the wire finishes — there is no way to un-ask the API — and its answer is discarded instead of
+ * arriving at whoever asked next.
+ */
+void hal_cloud_cancel(void);
+
+/** @brief Whether this provider has a key, with a masked copy of its SecretId.
+ *
+ * The mask is the first four characters and the last four (`AKID……wxyz`): enough to tell which key
+ * is on file, and deliberately not enough to use. The SecretKey is never handed out by anything in
+ * this header — a page that has saved one cannot read it back.
+ *
+ * @return ESP_OK, ESP_ERR_NOT_FOUND when this provider has no key, or ESP_ERR_INVALID_ARG.
+ */
+esp_err_t hal_cloud_credentials_get(int32_t provider, char *out_masked, size_t capacity,
+                                    char *out_region, size_t region_capacity);
+
+/** @brief Save a key for one provider, leaving the other's alone. Written to flash.
+ *
+ * The two strings must be printable ASCII without quotes or backslashes: what Tencent issues always
+ * is, and refusing the rest here is what keeps a pasted newline out of the file this layer both
+ * writes and reads.
+ *
+ * @return ESP_OK, ESP_ERR_INVALID_ARG for a key that is empty or not that shape,
+ *         ESP_ERR_INVALID_SIZE for one that is too long, or what the filesystem said.
+ */
+esp_err_t hal_cloud_credentials_set(int32_t provider, const char *region, const char *secret_id,
+                                    const char *secret_key);
+
+/** @brief Forget one provider's key. ESP_ERR_NOT_FOUND when there was none. */
+esp_err_t hal_cloud_credentials_forget(int32_t provider);
+
+/* ---------------------------------------------------------------------------
  * Log ring.
  *
  * The last `HAL_LOG_LINES` lines every `ESP_LOGx` wrote, kept in a ring so the page can show them.

@@ -298,8 +298,8 @@ fn a_press_says_which_row_it_was_for() {
 /// root's choice and a test is a composition root — see [`pomelo_hal::sim::SimStorage::without_card`].
 fn board_with_slot(card: bool) -> Arc<Board> {
     use pomelo_hal::sim::{
-        SimAudio, SimHttp, SimImu, SimInput, SimMic, SimNas, SimPower, SimStorage, SimSystem, SimWeb,
-        SimWifi,
+        SimAudio, SimCloud, SimHttp, SimImu, SimInput, SimMic, SimNas, SimPower, SimStorage,
+        SimSystem, SimWeb, SimWifi,
     };
 
     let storage = if card {
@@ -320,6 +320,7 @@ fn board_with_slot(card: bool) -> Arc<Board> {
         Box::new(SimSystem::new()),
         Box::new(SimNas::new()),
         Box::new(SimHttp::new()),
+        Box::new(SimCloud::new()),
     ))
 }
 

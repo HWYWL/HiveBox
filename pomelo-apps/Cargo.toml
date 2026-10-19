@@ -18,6 +18,7 @@ members = [
     "app-launcher",
     "calculator",
     "clock",
+    "cloud-monitor",
     "files",
     "games",
     "music-player",

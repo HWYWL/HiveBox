@@ -38,8 +38,8 @@
 //!
 //! # The grid is paged, and the page slides under the finger
 //!
-//! A page is [`PER_PAGE`] apps, four to a row, so the fourteen the catalogue has are two pages:
-//! eight and six.
+//! A page is [`PER_PAGE`] apps, four to a row, so the fifteen the catalogue has are two pages:
+//! eight and seven.
 //! A finger turning one is a **drag**: down on the grid, across, up. iced has no widget for that — a
 //! `button` captures the press it is given, and `Scrollable` scrolls for a wheel, a touch or its own
 //! scrollbar and for nothing else — so the gesture is read by `pomelo-widgets`' pager.
@@ -128,6 +128,7 @@ use iced::{
 
 use calculator::Calculator;
 use clock::Clock;
+use cloud_monitor::CloudMonitor;
 use files::Files;
 use games::Games;
 use music_player::Player;
@@ -186,7 +187,7 @@ enum Screen {
 ///
 /// Indices, because that is what the grid hands over when a tile is tapped. The tests assert that
 /// each of these still names the app it says it does, and every entry has one: the catalogue and
-/// the list of apps are the same fourteen things, in the same order.
+/// the list of apps are the same fifteen things, in the same order.
 pub const MUSIC: usize = 0;
 pub const WEB_MANAGER: usize = 1;
 pub const NAS_MONITOR: usize = 2;
@@ -201,6 +202,7 @@ pub const CLOCK: usize = 10;
 pub const POWER_LOG: usize = 11;
 pub const CALCULATOR: usize = 12;
 pub const WIFI_MAP: usize = 13;
+pub const CLOUD: usize = 14;
 
 /// What the launcher reacts to.
 ///
@@ -296,6 +298,8 @@ pub enum Message {
     /// The games app's own: the row that opened a game, the direction that steered it, the way back to
     /// the list, or the frame a snake stepped on.
     Games(games::Message),
+    /// The cloud page's own: the frame that reads an answer, a chip or a row picked, or a power button.
+    Cloud(cloud_monitor::Message),
 }
 
 /// The layer over the desktop that is moving, and which way it is going.
@@ -388,6 +392,8 @@ pub struct Launcher {
     weather: Option<Weather>,
     /// The games app. Plain `games` and not `games_app`, for the weather page's reason.
     games: Option<Games>,
+    /// The cloud page. Plain `cloud` and not `cloud_app`, for the games app's reason.
+    cloud: Option<CloudMonitor>,
     /// Apps currently running in memory (foreground or background).
     running_apps: Vec<usize>,
     board: Arc<Board>,
@@ -454,6 +460,7 @@ impl Launcher {
             wifi_map: None,
             weather: None,
             games: None,
+            cloud: None,
             clock,
             battery,
             charging,
@@ -526,6 +533,9 @@ impl Launcher {
             app.set_preferences(prefs);
         }
         if let Some(app) = &mut self.games {
+            app.set_preferences(prefs);
+        }
+        if let Some(app) = &mut self.cloud {
             app.set_preferences(prefs);
         }
     }
@@ -768,6 +778,25 @@ impl Launcher {
         self.games.as_mut().unwrap()
     }
 
+    /// The cloud page, which is handed the board and reads one backend through it: the account.
+    ///
+    /// [`CloudMonitor::new`] asks for the list on the way in, which is the weather page's argument
+    /// again: a page whose whole subject is a set of machines should open on that set having been
+    /// *asked for*, rather than on an empty card. The request is asynchronous and frame-driven — see
+    /// the app's own docs — so this app, like the ones before it, is parked in
+    /// [`Launcher::subscription`] and poked by [`Message::Tick`] rather than being allowed to block.
+    ///
+    /// It is also the one app here that reads a *masked* secret: [`CloudMonitor`] is told whether an
+    /// account has a key and never what the key is — see the app's own docs.
+    pub fn get_or_create_cloud(&mut self) -> &mut CloudMonitor {
+        if self.cloud.is_none() {
+            let mut app = CloudMonitor::new(Arc::clone(&self.board));
+            app.set_preferences(self.preferences);
+            self.cloud = Some(app);
+        }
+        self.cloud.as_mut().unwrap()
+    }
+
     /// The hosted apps, for the host and the tests.
     pub fn calculator(&mut self) -> &Calculator {
         self.get_or_create_calculator()
@@ -827,6 +856,11 @@ impl Launcher {
         self.get_or_create_games()
     }
 
+    /// The cloud page.
+    pub fn cloud(&mut self) -> &CloudMonitor {
+        self.get_or_create_cloud()
+    }
+
     /// Sets what the status bar shows.
     ///
     /// The platform owns these, and pushes them — rather than iced pulling them from a timer,
@@ -881,6 +915,7 @@ impl Launcher {
             WIFI_MAP => self.wifi_map = None,
             WEATHER => self.weather = None,
             GAMES => self.games = None,
+            CLOUD => self.cloud = None,
             _ => {}
         }
 
@@ -1111,6 +1146,16 @@ impl Launcher {
     fn games_screen(&self) -> Element<'_, Message> {
         if let Some(app) = &self.games {
             app.view().map(Message::Games)
+        } else {
+            Space::new().into()
+        }
+    }
+
+    /// The cloud page. One page and no tabs, so the launcher's own back gesture is the way out, as it
+    /// is for the pages beside it.
+    fn cloud_screen(&self) -> Element<'_, Message> {
+        if let Some(app) = &self.cloud {
+            app.view().map(Message::Cloud)
         } else {
             Space::new().into()
         }
@@ -1352,6 +1397,15 @@ impl Launcher {
             subs.push(app.subscription().map(Message::Updater));
         }
 
+        // The cloud page's subscription is the updater's, letter for letter: frames only while a
+        // request is in flight — see `CloudMonitor::waiting` — so a page sitting on a list of machines
+        // costs nothing, and the beat above is what ends the wait on a board with no frames. The one
+        // thing this page waits on that the others do not is a *power command*: it is the same kind of
+        // wait, and it is ended by the same beat.
+        if let (Screen::App(CLOUD), Some(app)) = (self.screen, &self.cloud) {
+            subs.push(app.subscription().map(Message::Cloud));
+        }
+
         Subscription::batch(subs)
     }
 
@@ -1442,6 +1496,9 @@ impl Launcher {
                     }
                     GAMES => {
                         self.get_or_create_games();
+                    }
+                    CLOUD => {
+                        self.get_or_create_cloud();
                     }
                     _ => {}
                 }
@@ -1574,6 +1631,16 @@ impl Launcher {
                 if let (Screen::App(UPDATER), Some(app)) = (self.screen, &mut self.updater) {
                     app.update(updater::Message::Tick(Instant::now()));
                 }
+
+                // The cloud page is asked the ninth way, and its reason is the sixth one again: a
+                // request is a wait, and this is the beat that ends it on a board whose host serves no
+                // frames. One a second is the whole of what the page needs — it draws an answer, and a
+                // press of its own button asks for the next one. A power command asks for the list
+                // again a few of these later, which is the same wait a second time rather than a clock
+                // of the page's own — see `CloudMonitor::tick`.
+                if let (Screen::App(CLOUD), Some(app)) = (self.screen, &mut self.cloud) {
+                    app.update(cloud_monitor::Message::Tick(Instant::now()));
+                }
             }
             Message::Resized(size) => {
                 self.size = size;
@@ -1602,6 +1669,7 @@ impl Launcher {
             Message::WifiMap(message) => self.get_or_create_wifi_map().update(message),
             Message::Weather(message) => self.get_or_create_weather().update(message),
             Message::Games(message) => self.get_or_create_games().update(message),
+            Message::Cloud(message) => self.get_or_create_cloud().update(message),
             Message::Updater(message) => self.get_or_create_updater().update(message),
             Message::Settings(settings::Message::Back) => return self.go_back(),
             Message::Settings(message) => {
@@ -2069,6 +2137,7 @@ impl Launcher {
             WIFI_MAP => self.wifi_map_screen(),
             WEATHER => self.weather_screen(),
             GAMES => self.games_screen(),
+            CLOUD => self.cloud_screen(),
             _ => self.launcher(),
         }
     }
@@ -2509,14 +2578,17 @@ mod tests {
         assert_eq!(CATALOGUE[WEATHER].name, "Weather");
         assert_eq!(CATALOGUE[GAMES].localized_name(Language::Chinese), "游戏");
         assert_eq!(CATALOGUE[GAMES].name, "Games");
+        assert_eq!(CATALOGUE[CLOUD].localized_name(Language::Chinese), "云服务");
+        assert_eq!(CATALOGUE[CLOUD].name, "Cloud");
     }
 
     /// The grid's two pages, in the order they are drawn: the eight the first page holds, which is
     /// the box in use — what it plays, the page it serves, the machine beside it, the files on either,
     /// then the sky, the person holding it, and the two pages about its own software, the settings and
-    /// the updater — then the six of the second page, which is the box itself: the terminal, what it is
-    /// running, the time it thinks it is, what its battery has been doing, and the two that are only
-    /// ever opened to play with, the calculator and the channel map.
+    /// the updater — then the seven of the second page, which is the box itself: the terminal, what it
+    /// is running, the time it thinks it is, what its battery has been doing, the two that are only
+    /// ever opened to play with, the calculator and the channel map, and the cloud, which is the one
+    /// tile on that page whose subject is not the box at all but the machines in an account.
     ///
     /// Written out rather than derived, because the order *is* the interface: a page and a position
     /// are what a finger learns, and a reshuffle that left this test green would be the one kind of
@@ -2543,14 +2615,15 @@ mod tests {
                 "Clock",
                 "Power Log",
                 "Calculator",
-                "Wi-Fi Map"
+                "Wi-Fi Map",
+                "Cloud"
             ]
         );
-        assert_eq!(CATALOGUE.len(), 14, "and the fourteen are all the tiles there are");
+        assert_eq!(CATALOGUE.len(), 15, "and the fifteen are all the tiles there are");
         assert_eq!(
             Launcher::new(Arc::new(Board::simulated())).pages(),
             2,
-            "eight and six"
+            "eight and seven"
         );
     }
 

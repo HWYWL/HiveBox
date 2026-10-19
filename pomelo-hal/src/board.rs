@@ -12,8 +12,8 @@ use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
 use crate::traits::{
-    AudioBackend, HttpBackend, ImuBackend, InputBackend, MicBackend, NasBackend, PowerBackend,
-    StorageBackend, SystemBackend, WebBackend, WifiBackend,
+    AudioBackend, CloudBackend, HttpBackend, ImuBackend, InputBackend, MicBackend, NasBackend,
+    PowerBackend, StorageBackend, SystemBackend, WebBackend, WifiBackend,
 };
 use crate::types::{SystemEvent, WifiStatus};
 
@@ -46,6 +46,7 @@ pub struct Board {
     system: Mutex<Box<dyn SystemBackend>>,
     nas: Mutex<Box<dyn NasBackend>>,
     http: Mutex<Box<dyn HttpBackend>>,
+    cloud: Mutex<Box<dyn CloudBackend>>,
     listeners: Mutex<Vec<EventListener>>,
     events: Mutex<VecDeque<SystemEvent>>,
     event_condvar: Condvar,
@@ -57,8 +58,8 @@ impl Board {
     /// Assemble a board from one backend per subsystem.
     ///
     /// The order is `power`, `wifi`, `audio`, `mic`, `imu`, `input`, `storage`, `web`, `system`, `nas`,
-    /// `http` — the same order the accessors appear in. It takes boxes rather than generics so the
-    /// caller can mix concrete types and, in a test, its own fakes.
+    /// `http`, `cloud` — the same order the accessors appear in. It takes boxes rather than generics so
+    /// the caller can mix concrete types and, in a test, its own fakes.
     ///
     /// New backends go on the *end* of both lists, even when a place in the middle would read better:
     /// the order is one line in a caller's file per backend, and a backend inserted anywhere but the
@@ -75,6 +76,7 @@ impl Board {
         system: Box<dyn SystemBackend>,
         nas: Box<dyn NasBackend>,
         http: Box<dyn HttpBackend>,
+        cloud: Box<dyn CloudBackend>,
     ) -> Self {
         Self {
             power: Mutex::new(power),
@@ -88,6 +90,7 @@ impl Board {
             system: Mutex::new(system),
             nas: Mutex::new(nas),
             http: Mutex::new(http),
+            cloud: Mutex::new(cloud),
             listeners: Mutex::new(Vec::new()),
             events: Mutex::new(VecDeque::with_capacity(MAX_EVENT_QUEUE_SIZE)),
             event_condvar: Condvar::new(),
@@ -99,8 +102,8 @@ impl Board {
     #[cfg(not(target_os = "espidf"))]
     pub fn simulated() -> Self {
         use crate::sim::{
-            SimAudio, SimHttp, SimImu, SimInput, SimMic, SimNas, SimPower, SimStorage, SimSystem,
-            SimWeb, SimWifi,
+            SimAudio, SimCloud, SimHttp, SimImu, SimInput, SimMic, SimNas, SimPower, SimStorage,
+            SimSystem, SimWeb, SimWifi,
         };
         Self::from_backends(
             Box::new(SimPower::new()),
@@ -114,6 +117,7 @@ impl Board {
             Box::new(SimSystem::new()),
             Box::new(SimNas::new()),
             Box::new(SimHttp::new()),
+            Box::new(SimCloud::new()),
         )
     }
 
@@ -274,15 +278,26 @@ impl Board {
         lock(&self.http)
     }
 
+    /// Lock the cloud-account backend.
+    ///
+    /// Last for the reason [`Board::http`] gives. Nothing in [`Board::init`] brings it up: it opens
+    /// no session, and the only thing it has to read is the key the management page wrote down,
+    /// which is read when a page asks for a list rather than at boot.
+    pub fn cloud(&self) -> MutexGuard<'_, Box<dyn CloudBackend>> {
+        lock(&self.cloud)
+    }
+
     /// Advance every time-driven subsystem (Wi-Fi scan progress, audio EOF detection, input
     /// debouncing, a simulated request's progress). Call periodically or once per UI frame.
     ///
-    /// On the device the HTTP client is woken by the network instead, and its `tick` does nothing.
+    /// On the device the HTTP client and the cloud backend are woken by the network instead, and
+    /// their `tick`s do nothing.
     pub fn tick(&self) {
         self.wifi().tick();
         self.audio().tick();
         self.input().tick();
         self.http().tick();
+        self.cloud().tick();
 
         #[cfg(not(target_os = "espidf"))]
         {

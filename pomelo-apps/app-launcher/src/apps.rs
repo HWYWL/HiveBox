@@ -21,8 +21,8 @@ pub use pomelo_widgets::{AppIcon, AppMeta as Entry};
 
 include!(concat!(env!("OUT_DIR"), "/baked_icons.rs"));
 
-/// Fourteen apps, in the order the grid shows them: each [`crate::PER_PAGE`] fill a page, and the rest
-/// fall on the one after — eight and six.
+/// Fifteen apps, in the order the grid shows them: each [`crate::PER_PAGE`] fill a page, and the rest
+/// fall on the one after — eight and seven.
 ///
 /// The order is the interface's and not the alphabet's, and the two pages are told apart by *when* a
 /// person wants what is on them rather than by what it is.
@@ -37,13 +37,20 @@ include!(concat!(env!("OUT_DIR"), "/baked_icons.rs"));
 /// because they are the two a person opens *last*: one when something is wrong, the other when
 /// something new exists.
 ///
-/// The second page is the box *itself*, which is why nothing on it is a job: the terminal, where the
-/// box is asked directly; the task viewer, which is about nothing but what the box is running; the
-/// clock, which is about nothing but the time the box thinks it is; and the power log, which is about
-/// the battery and is the only tile on the grid that is about *time* — the status bar shows what the
-/// battery is, and this one shows what it has been doing. The two that close it are the ones a person
-/// only ever opens to play with: the calculator, which is about neither the box nor anything beside
-/// it, and the channel map, which is about the air around the box and belongs to neither.
+/// The second page is the box *itself*: the terminal, where the box is asked directly; the task
+/// viewer, which is about nothing but what the box is running; the clock, which is about nothing but
+/// the time the box thinks it is; and the power log, which is about the battery and is the only tile
+/// on the grid that is about *time* — the status bar shows what the battery is, and this one shows
+/// what it has been doing. The two after those are the ones a person only ever opens to play with:
+/// the calculator, which is about neither the box nor anything beside it, and the channel map, which
+/// is about the air around the box and belongs to neither.
+///
+/// The cloud closes the page, and it is the one tile on it whose subject is *off* the panel: the
+/// machines in an account rather than the box in the hand. It is on the second page and not beside
+/// the server tile for a reason that is only about room — the first page holds [`crate::PER_PAGE`]
+/// and its two rows are the box's own jobs, which a cloud account is not one of — and it is last
+/// rather than first for the same reason: a page is read in order, and a tile that pushed the six
+/// above it along would be a grid every finger has to learn again.
 ///
 /// Fourteen and not fifteen: the overview tile was the one tile whose subject was *more than one
 /// thing* — the dashboard that drew the battery, the radio, the disks, the memory and the server at
@@ -184,5 +191,18 @@ pub const CATALOGUE: &[Entry] = &[
         // A teal, between the tasks app's cyan and the terminal's green: the one stretch of hue left that
         // is neither a signal-meter blue nor a success green.
         accent: (0, 137, 123),
+    },
+    Entry {
+        name: "Cloud",
+        name_zh: "云服务",
+        // A cloud with two arrows around it rather than a plain one: the plain cloud is the weather
+        // page's overcast — see its own comment above — and what this tile is about is a cloud somebody
+        // *acts on*, which is what the arrows say. It is the glyph the page's own header wears too, and
+        // here that is the point rather than a repetition: the tile and the page are one subject.
+        icon: AppIcon::glyph(Icon::CLOUD_SYNC),
+        // The colour of a cloud seen from below, and the one hue on the grid that is a *desaturated*
+        // blue: the web manager's and the weather page's are both at full strength beside it, so the
+        // three blues are told apart by saturation rather than by a person reading the labels.
+        accent: (91, 143, 176),
     },
 ];

@@ -11,6 +11,7 @@
 //! interface can be read, built and tested without any of the hardware code.
 
 mod audio;
+mod cloud;
 mod http;
 mod imu;
 mod input;
@@ -23,6 +24,7 @@ mod web;
 mod wifi;
 
 pub use audio::AudioBackend;
+pub use cloud::CloudBackend;
 pub use http::HttpBackend;
 pub use imu::ImuBackend;
 pub use input::InputBackend;

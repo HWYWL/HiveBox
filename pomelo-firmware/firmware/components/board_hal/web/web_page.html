@@ -156,8 +156,8 @@ a { color: var(--tint); text-decoration: none; }
   transition: transform .32s var(--ease), width .32s var(--ease);
 }
 .seg button {
-  position: relative; flex: 1; z-index: 1; padding: 7px 4px; border-radius: 9px;
-  font-size: 13.5px; font-weight: 600; color: var(--label-2);
+  position: relative; flex: 1; z-index: 1; padding: 7px 3px; border-radius: 9px;
+  font-size: 13px; font-weight: 600; color: var(--label-2); white-space: nowrap;
   transition: color .2s;
 }
 .seg button.on { color: var(--label); }
@@ -251,6 +251,7 @@ main { padding-top: 16px; }
 .chip:active { transform: scale(.97); }
 .chip.on { background: var(--tint); color: #fff; box-shadow: 0 4px 14px rgba(0,122,255,.3); }
 .chip.on .chip-sub { color: rgba(255,255,255,.8); }
+.chip-txt { display: flex; flex-direction: column; line-height: 1.3; text-align: left; }
 .chip-name { font-size: 14px; font-weight: 600; }
 .chip-sub { font-size: 11.5px; color: var(--label-2); }
 
@@ -648,6 +649,7 @@ textarea.code.wrap { white-space: pre-wrap; word-break: break-word; }
       <button data-view="wifi">网络</button>
       <button data-view="control">控制</button>
       <button data-view="servers">服务器</button>
+      <button data-view="cloud">云服务</button>
       <button data-view="logs">日志</button>
       <button data-view="system">设备</button>
     </nav>
@@ -723,6 +725,65 @@ textarea.code.wrap { white-space: pre-wrap; word-break: break-word; }
           密码只写在设备里，端口默认 22；地址是这台机器的身份，同一地址再存一次就是「更正」那一台
           （行尾的铅笔也可以直接改）。这张列表就是设备上「服务器监控」应用里的那一份，两边随时都能改。
         </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="view-cloud" hidden>
+    <div class="group">
+      <div class="group-title">服务商</div>
+      <div class="card" style="padding:14px">
+        <div class="row" style="padding:0">
+          <svg class="ic sm"><use href="#i-cloud"/></svg>
+          <div class="row-main">
+            <div class="row-name">腾讯云</div>
+            <div class="row-meta">云服务器 CVM 与轻量应用服务器，一把密钥，全部地域</div>
+          </div>
+          <span class="row-meta" id="cloudState">未保存密钥</span>
+        </div>
+      </div>
+    </div>
+    <div class="group">
+      <div class="group-title">密钥</div>
+      <div class="card" style="padding:14px">
+        <div id="cloudSavedView" hidden>
+          <div class="row" style="padding:0">
+            <svg class="ic sm" style="color:var(--green)"><use href="#i-check"/></svg>
+            <div class="row-main">
+              <div class="row-name" id="cloudSavedId">—</div>
+              <div class="row-meta">SecretKey 只写在设备里，读不回来</div>
+            </div>
+          </div>
+          <div class="bar-actions" style="padding:12px 0 0;margin:0">
+            <button class="btn" id="cloudEdit">编辑密钥</button>
+            <button class="btn danger" id="cloudForget">删除密钥</button>
+          </div>
+        </div>
+        <div id="cloudForm">
+          <label class="field">
+            <svg class="ic sm"><use href="#i-check"/></svg>
+            <input id="cloudId" placeholder="SecretId，例如 AKID…" autocomplete="off" spellcheck="false">
+          </label>
+          <label class="field" style="margin-top:10px">
+            <svg class="ic sm"><use href="#i-lock"/></svg>
+            <input id="cloudSecret" type="password" placeholder="SecretKey" autocomplete="off">
+          </label>
+          <div class="bar-actions" style="padding:12px 0 0;margin:0">
+            <button class="btn primary" id="cloudSave">保存密钥</button>
+            <button class="btn" id="cloudCancel" hidden>取消</button>
+          </div>
+        </div>
+        <div class="pv-note" style="padding:10px 0 0;text-align:left" id="cloudOut">
+          密钥和 Wi-Fi 密码一样写在这台设备的文件里，网页只读得回一个打了码的 SecretId ——
+          面板上的「云服务」应用用的是同一份。
+        </div>
+      </div>
+    </div>
+    <div class="group">
+      <div class="group-title">实例</div>
+      <div class="card" id="cloudList"></div>
+      <div class="bar-actions" style="padding-top:12px">
+        <button class="btn tinted" id="cloudScan"><svg class="ic sm"><use href="#i-refresh"/></svg>读取实例列表</button>
       </div>
     </div>
   </section>
@@ -967,6 +1028,18 @@ const ERRORS = {
   rtc_failed: "时间没写进时钟芯片",
   audio_failed: "扬声器没有发出声音",
   touch_failed: "这一下没能送到屏幕上",
+  cloud_failed: "云服务这一步没走通",
+  cloud_args: "云服务的请求不完整",
+  cloud_creds: "还没有密钥，先在下面存一份",
+  cloud_offline: "设备现在没有网络",
+  cloud_clock: "设备的时间还没对上，先同步一次时间",
+  cloud_unreachable: "连不上腾讯云的接口",
+  cloud_tls: "接口的证书没有验过，看看设备的时间",
+  cloud_http: "接口回了一个看不懂的应答",
+  cloud_api: "腾讯云拒绝了这次请求",
+  cloud_storage: "这个应答在设备上放不下",
+  cloud_busy: "设备上已经有一条云命令在跑，等它回来",
+  cloud_timeout: "腾讯云没有在时限内回话",
   network: "连不上设备，看看是否还在同一个网络里"
 };
 const RESET_REASONS = {
@@ -995,6 +1068,12 @@ const state = {
   scan: null,
   servers: null,         // the last /api/nas/list answer: [{ host, user, port }]
   editing: null,         // the host the server form is correcting, or null when it is adding one
+  cloud: null,           // the last /api/cloud/status answer: { saved, secret_id, region }
+  cloud_editing: false,  // the key form is open over a saved key
+  cloud_rows: null,      // the last /api/cloud/list rows, or null before the first answer
+  cloud_failed: [],      // providers that merged list could not reach
+  cloud_loading: false,  // a list is being read, which is what the skeleton is for
+  cloud_busy: false,     // a power action is in flight, so the buttons are quiet
   query: "",
   sort: { key: "name", dir: 1 },
   select: false,
@@ -2417,10 +2496,346 @@ async function nasClear() {
   }
 }
 
-/* --- the six views --------------------------------------------------------- */
+/* --- the cloud ------------------------------------------------------------- */
+
+/* One account, one key. CVM and Lighthouse are two endpoints underneath, but a person has one
+   Tencent Cloud account and types one SecretId; the page never asks which product a machine is. The
+   row says it instead, because that is the only thing the product name is still good for. */
+const CLOUD_PRODUCTS = {
+  cvm: "云服务器",
+  lighthouse: "轻量应用服务器"
+};
+
+/* Data centres, in the names a person uses. A merged list scans every one of them, and two machines
+   can share a name, so the row says where it is. Anything not in here is shown as it came. */
+const CLOUD_ZONES = {
+  "ap-beijing": "北京", "ap-chengdu": "成都", "ap-chongqing": "重庆", "ap-guangzhou": "广州",
+  "ap-hongkong": "香港", "ap-jakarta": "雅加达", "ap-nanjing": "南京", "ap-seoul": "首尔",
+  "ap-shanghai": "上海", "ap-singapore": "新加坡", "ap-tokyo": "东京", "ap-bangkok": "曼谷",
+  "ap-mumbai": "孟买", "ap-taipei": "台北", "ap-shenzhen": "深圳",
+  "ap-siliconvalley": "硅谷", "na-siliconvalley": "硅谷", "na-ashburn": "弗吉尼亚",
+  "na-toronto": "多伦多", "ap-frankfurt": "法兰克福", "eu-frankfurt": "法兰克福",
+  "ap-moscow": "莫斯科", "eu-moscow": "莫斯科", "ap-saopaulo": "圣保罗", "sa-saopaulo": "圣保罗"
+};
+
+/* What the API's state words mean. Two providers spell the same idea differently -- CVM says
+   `SHUTDOWN` where Lighthouse says `STOPPED` -- and a row that showed `SHUTDOWN` to somebody would be
+   a row they have to translate. Anything not in here is shown as it came. */
+const CLOUD_STATES = {
+  RUNNING: "运行中",
+  STOPPED: "已关机",
+  SHUTDOWN: "已关机",
+  STARTING: "开机中",
+  STOPPING: "关机中",
+  REBOOTING: "重启中",
+  PENDING: "创建中",
+  TERMINATING: "退还中",
+  LAUNCH_FAILED: "创建失败"
+};
+
+const CLOUD_DONE = {
+  start: "已请求开机",
+  stop: "已请求关机",
+  reboot: "已请求重启"
+};
+
+/* A cloud answer is a document, not just an `ok`. When Tencent refuses, the answer carries the API's
+   own code and message, and those two are the sentence somebody needs -- `UnauthorizedOperation` says
+   what to fix and `cloud_api` does not -- so this reads the answer itself instead of going through
+   `api()`, which flattens every failure into the code table. */
+function cloudFailureText(data, status) {
+  if (data && data.code) {
+    return (ERRORS[data.error] || data.error) + "：" + data.code +
+      (data.message ? " —— " + data.message : "");
+  }
+  return ERRORS[data && data.error] || "设备返回了 " + ((data && data.error) || status);
+}
+
+async function cloudCall(endpoint, params, method) {
+  const query = params ? "?" + new URLSearchParams(params).toString() : "";
+  let response;
+  try {
+    response = await fetch(endpoint + query, { method: method || "GET", cache: "no-store" });
+  } catch (error) {
+    throw new Error(ERRORS.network);
+  }
+
+  let data = {};
+  try { data = await response.json(); } catch (error) { /* the box always answers JSON */ }
+
+  if (!response.ok || data.error) {
+    const failure = new Error(cloudFailureText(data, response.status));
+    failure.code = data.error || "http_" + response.status;
+    throw failure;
+  }
+
+  return data;
+}
+
+function cloudStatus() { return state.cloud || null; }
+function cloudSaved() { const status = cloudStatus(); return !!(status && status.saved); }
+
+function cloudNote(text) { $("cloudOut").textContent = text; }
+
+/* What is saved, said in words rather than put in the boxes. The board hands back a masked SecretId
+   and never the SecretKey, so there is nothing to fill in from here: the form is for *replacing* what
+   is there, which is why a saved key shows as a card with 编辑 and 删除 rather than as filled boxes. */
+async function loadCloud(quiet) {
+  try {
+    state.cloud = await cloudCall("/api/cloud/status");
+  } catch (error) {
+    if (!quiet) toast(error.message, "bad");
+    return;
+  }
+
+  renderCloud();
+}
+
+function renderCloud() {
+  const status = cloudStatus();
+  const saved = cloudSaved();
+  const editing = state.cloud_editing;
+
+  $("cloudState").textContent = saved ? "已保存密钥" : "未保存密钥";
+  $("cloudSavedView").hidden = !saved || editing;
+  $("cloudForm").hidden = saved && !editing;
+  $("cloudCancel").hidden = !editing;
+
+  if (saved) {
+    $("cloudSavedId").textContent = status.secret_id;
+  }
+
+  $("cloudId").placeholder = saved ? "新的 SecretId" : "SecretId，例如 AKID…";
+  $("cloudSecret").placeholder = saved ? "新的 SecretKey" : "SecretKey";
+
+  cloudNote(saved
+    ? "已保存 " + status.secret_id + "，面板上的「云服务」用的是同一份。读取列表会扫一遍云服务器" +
+      "和轻量的所有地域，机器多时第一次会慢一点。"
+    : "在腾讯云控制台建一个子账号密钥，给它这个账号的读权限和开关机权限就够了。");
+
+  renderCloudList();
+}
+
+function renderCloudList() {
+  const box = $("cloudList");
+
+  if (!cloudSaved()) {
+    box.innerHTML =
+      '<div class="row"><svg class="ic sm" style="color:var(--label-2)"><use href="#i-cloud"/></svg>' +
+      '<div class="row-main"><div class="row-name">先存一份密钥</div>' +
+      '<div class="row-meta">上面填好 SecretId 和 SecretKey，这里就会列出这个账号里的机器。</div>' +
+      "</div></div>";
+    return;
+  }
+
+  if (state.cloud_loading) { box.innerHTML = skeletonHtml(); return; }
+
+  /* No answer yet is not the same as an empty answer: nothing has been asked, and saying "没有机器"
+     about a question nobody put would be the page making one up. */
+  if (!state.cloud_rows) {
+    box.innerHTML =
+      '<div class="row"><svg class="ic sm" style="color:var(--label-2)"><use href="#i-cloud"/></svg>' +
+      '<div class="row-main"><div class="row-name">还没有读过列表</div>' +
+      '<div class="row-meta">点下面的「读取实例列表」，设备会带着这份密钥去问一次腾讯云，' +
+      "云服务器和轻量的所有地域都会问到。</div></div></div>";
+    return;
+  }
+
+  const failed = state.cloud_failed || [];
+
+  if (!state.cloud_rows.length && !failed.length) {
+    box.innerHTML =
+      '<div class="row"><svg class="ic sm" style="color:var(--label-2)"><use href="#i-cloud"/></svg>' +
+      '<div class="row-main"><div class="row-name">这个账号里没有机器</div>' +
+      '<div class="row-meta">云服务器和轻量的所有地域都问过了，一台也没有。</div></div></div>';
+    return;
+  }
+
+  /* The rows, and the buttons a machine can take: a running one can be stopped or restarted, a
+     stopped one can be started. Each button carries the row's product and region, because the next
+     command has to be sent to the same API and data centre the row came from. */
+  const rows = state.cloud_rows.map((instance) => {
+    const running = instance.state === "RUNNING";
+    const live = running || instance.state === "STOPPED" || instance.state === "SHUTDOWN";
+    const quiet = state.cloud_busy || !live ? " disabled" : "";
+    const product = CLOUD_PRODUCTS[instance.kind] || instance.kind || "";
+    const zone = CLOUD_ZONES[instance.region] || instance.region || "";
+    const aim = ' data-id="' + esc(instance.id) + '" data-name="' +
+      esc(instance.name || instance.id) + '" data-kind="' + esc(instance.kind) +
+      '" data-region="' + esc(instance.region || "") + '"';
+
+    const power = running
+      ? '<button class="btn sm tinted" data-power="stop"' + aim + quiet + ">关机</button>" +
+        '<button class="btn sm" data-power="reboot"' + aim + quiet + ">重启</button>"
+      : '<button class="btn sm primary" data-power="start"' + aim + quiet + ">开机</button>";
+
+    return '<div class="row">' +
+      '<svg class="ic sm" style="color:var(--label-2)"><use href="#i-cloud"/></svg>' +
+      '<div class="row-main">' +
+      '<div class="row-name">' + esc(instance.name || instance.id) + "</div>" +
+      '<div class="row-meta">' + esc(CLOUD_STATES[instance.state] || instance.state || "状态未知") +
+      (product ? " · " + esc(product) : "") + (zone ? " · " + esc(zone) : "") +
+      " · " + esc(instance.id) + (instance.ip ? " · " + esc(instance.ip) : "") + "</div>" +
+      "</div>" + power + "</div>";
+  }).join("");
+
+  /* Half an answer is said out loud: a machine that is not in the list because its product's request
+     failed is not the same thing as a machine that does not exist. */
+  const missing = failed.length
+    ? '<div class="row"><svg class="ic sm" style="color:var(--red)"><use href="#i-cloud"/></svg>' +
+      '<div class="row-main"><div class="row-name">有一部分没取到</div>' +
+      '<div class="row-meta">' + esc(failed.map((kind) => CLOUD_PRODUCTS[kind] || kind).join("、")) +
+      "这次没有返回，列表可能不全，过一会儿再读一次。</div></div></div>"
+    : "";
+
+  box.innerHTML = rows + missing;
+}
+
+/* The list is asked for, not remembered: it is the account's own answer and the account can change
+   between two looks at this page. */
+async function loadCloudList(quiet) {
+  if (!cloudSaved()) {
+    state.cloud_rows = null;
+    state.cloud_failed = [];
+    renderCloudList();
+    cloudNote("还没有密钥，设备没有东西可以拿去签名。先在上面存一份。");
+    return;
+  }
+
+  state.cloud_loading = true;
+  renderCloudList();
+  cloudNote("正在扫描云服务器和轻量的所有地域，机器多时第一次会慢一点…");
+
+  try {
+    const answer = await cloudCall("/api/cloud/list", { provider: "all" });
+    state.cloud_rows = answer.instances || [];
+    state.cloud_failed = answer.failed || [];
+    cloudNote("读到 " + state.cloud_rows.length + " 台机器" +
+      (state.cloud_failed.length ? "，有一类没有返回，列表可能不全" : "") + "。");
+  } catch (error) {
+    /* An empty list, not a kept one: the rows on screen were the account's answer to a question that
+       was just refused, and leaving them up would be showing machines this page cannot act on. */
+    state.cloud_rows = [];
+    state.cloud_failed = [];
+    cloudNote("没能读到列表：" + (error.message || error));
+    if (!quiet) toast(error.message || String(error), "bad");
+  }
+
+  state.cloud_loading = false;
+  renderCloudList();
+}
+
+async function cloudSave() {
+  const secret_id = $("cloudId").value.trim();
+  const secret_key = $("cloudSecret").value;
+
+  /* Both halves, always. There is no "keep the old one" path: the board stores a whole key or none,
+     and a SecretId with no SecretKey is a pair that cannot sign anything. */
+  if (!secret_id || !secret_key) {
+    cloudNote("SecretId 和 SecretKey 都要填。");
+    return;
+  }
+
+  cloudNote("正在保存…");
+
+  try {
+    await cloudCall("/api/cloud/remember", {
+      secret_id: secret_id,
+      secret_key: secret_key
+    }, "POST");
+  } catch (error) {
+    cloudNote("保存失败：" + (error.message || error));
+    return;
+  }
+
+  /* The box is emptied and says so: what is in the board's file is what signs, and a browser tab
+     holding a SecretKey in a form field is a tab holding one. */
+  $("cloudId").value = "";
+  $("cloudSecret").value = "";
+  state.cloud_rows = null;
+  state.cloud_failed = [];
+  state.cloud_editing = false;
+
+  await loadCloud(true);
+  toast("密钥已保存", "good");
+  loadCloudList(true);
+}
+
+async function cloudForget() {
+  if (!cloudSaved()) { cloudNote("还没有存过密钥。"); return; }
+
+  const sure = await confirmSheet({
+    title: "删除这份密钥？",
+    note: cloudStatus().secret_id,
+    hint: "设备上的「云服务」应用也会跟着不能用了。",
+    ok: "删除",
+    danger: true
+  });
+  if (!sure) return;
+
+  cloudNote("正在删除…");
+
+  try {
+    await cloudCall("/api/cloud/forget", null, "POST");
+  } catch (error) {
+    cloudNote("删除失败：" + (error.message || error));
+    return;
+  }
+
+  state.cloud_rows = null;
+  state.cloud_failed = [];
+  state.cloud_editing = false;
+  await loadCloud(true);
+  toast("密钥已删除", "good");
+}
+
+/* One machine per command. The page draws one button per row and a row is one machine, so there is
+   no way to stop ten of them with one mis-tap. */
+async function cloudPower(action, id, name, kind, region) {
+  if (state.cloud_busy) { toast(ERRORS.cloud_busy, "bad"); return; }
+
+  if (action === "stop") {
+    const sure = await confirmSheet({
+      title: "关掉这台机器？",
+      note: name || id,
+      hint: "机器上的服务会跟着停下来，要用的时候再开。",
+      ok: "关机",
+      danger: true
+    });
+    if (!sure) return;
+  }
+
+  state.cloud_busy = true;
+  renderCloudList();
+  cloudNote("正在请求" + (action === "start" ? "开机" : action === "stop" ? "关机" : "重启") + "…");
+
+  try {
+    await cloudCall("/api/cloud/power", {
+      provider: kind,
+      action: action,
+      instance: id,
+      region: region || ""
+    }, "POST");
+
+    toast(CLOUD_DONE[action] + "：" + (name || id), "good");
+    cloudNote(CLOUD_DONE[action] + "。机器要几秒钟才走完，下面这一行状态过一会儿会自己变。");
+
+    /* The API answered "accepted", not "done": a machine that was just told to stop is still running
+       for a few seconds, so the list is read again once it has had a moment rather than right now. */
+    setTimeout(() => { if (state.view === "cloud") loadCloudList(true); }, 3000);
+  } catch (error) {
+    cloudNote("命令没有送出去：" + (error.message || error));
+    toast(error.message || String(error), "bad");
+  }
+
+  state.cloud_busy = false;
+  renderCloudList();
+}
+
+/* --- the seven views ------------------------------------------------------- */
 function setView(view) {
   state.view = view;
-  for (const name of ["files", "wifi", "control", "servers", "logs", "system"]) {
+  for (const name of ["files", "wifi", "control", "servers", "cloud", "logs", "system"]) {
     $("view-" + name).hidden = name !== view;
   }
 
@@ -2445,6 +2860,11 @@ function setView(view) {
   }
   if (view === "system") renderSystem();
   if (view === "servers") { renderServers(); loadServers(true); }
+
+  /* The cloud is the one view that does *not* ask for a list as it opens: a `DescribeInstances` is a
+     signed call to Tencent, and somebody who opened this page to look at their files should not spend
+     one. What it does ask is what is saved, which is a read of the board's own file. */
+  if (view === "cloud") { renderCloud(); loadCloud(true); }
 
   /* The stream is opened when the log is being looked at and closed when it is not: a connection to
      the box is one of four, and one left open behind another tab is one a person cannot use. */
@@ -3446,6 +3866,42 @@ $("view-servers").addEventListener("click", (event) => {
   else if (on("#nasClear")) nasClear();
 });
 
+/* The cloud view, wired the same way and for the same reason: the rows are replaced on every answer,
+   so the row's own buttons are read off the click rather than attached to the row. */
+$("view-cloud").addEventListener("click", (event) => {
+  const on = (selector) => event.target.closest && event.target.closest(selector);
+
+  /* The form is opened over a saved key, cleared, so that what is typed is the new key and not a
+     partly edited old one -- the board keeps a whole key or none. */
+  if (on("#cloudEdit")) {
+    state.cloud_editing = true;
+    $("cloudId").value = "";
+    $("cloudSecret").value = "";
+    renderCloud();
+    $("cloudId").focus();
+    return;
+  }
+
+  if (on("#cloudCancel")) {
+    state.cloud_editing = false;
+    $("cloudId").value = "";
+    $("cloudSecret").value = "";
+    renderCloud();
+    return;
+  }
+
+  const power = on("[data-power]");
+  if (power) {
+    cloudPower(power.dataset.power, power.dataset.id, power.dataset.name,
+               power.dataset.kind, power.dataset.region);
+    return;
+  }
+
+  if (on("#cloudSave")) cloudSave();
+  else if (on("#cloudForget")) cloudForget();
+  else if (on("#cloudScan")) loadCloudList(false);
+});
+
 $("probeBtn").onclick = runProbe;
 $("probeHost").onkeydown = (event) => { if (event.key === "Enter") runProbe(); };
 $("diagRefresh").onclick = () => { loadDiag(); readTail(); };
@@ -3563,7 +4019,7 @@ function start() {
 
   let view = "files";
   try { view = localStorage.getItem("hivebox.view") || "files"; } catch (error) { /* private mode */ }
-  if (["files", "wifi", "control", "logs", "system"].indexOf(view) < 0) view = "files";
+  if (["files", "wifi", "control", "servers", "cloud", "logs", "system"].indexOf(view) < 0) view = "files";
   setView(view);
 
   refreshSystem(true);

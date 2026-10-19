@@ -276,7 +276,8 @@ impl pomelo_hal::PowerBackend for CountingPower {
 /// A board whose power backend is [`CountingPower`].
 fn board_that_counts_restarts(restarts: Arc<AtomicUsize>) -> Arc<Board> {
     use pomelo_hal::sim::{
-        SimAudio, SimHttp, SimImu, SimInput, SimMic, SimNas, SimStorage, SimSystem, SimWeb, SimWifi,
+        SimAudio, SimCloud, SimHttp, SimImu, SimInput, SimMic, SimNas, SimStorage, SimSystem,
+        SimWeb, SimWifi,
     };
 
     Arc::new(Board::from_backends(
@@ -294,6 +295,7 @@ fn board_that_counts_restarts(restarts: Arc<AtomicUsize>) -> Arc<Board> {
         Box::new(SimSystem::new()),
         Box::new(SimNas::new()),
         Box::new(SimHttp::new()),
+        Box::new(SimCloud::new()),
     ))
 }
 
@@ -606,8 +608,8 @@ fn the_battery_page_admits_when_it_has_no_temperature() {
 /// composition root.
 fn board_with_slot(card: bool) -> Arc<Board> {
     use pomelo_hal::sim::{
-        SimAudio, SimHttp, SimImu, SimInput, SimMic, SimNas, SimPower, SimStorage, SimSystem, SimWeb,
-        SimWifi,
+        SimAudio, SimCloud, SimHttp, SimImu, SimInput, SimMic, SimNas, SimPower, SimStorage,
+        SimSystem, SimWeb, SimWifi,
     };
 
     let storage = if card {
@@ -628,6 +630,7 @@ fn board_with_slot(card: bool) -> Arc<Board> {
         Box::new(SimSystem::new()),
         Box::new(SimNas::new()),
         Box::new(SimHttp::new()),
+        Box::new(SimCloud::new()),
     ))
 }
 
@@ -1384,7 +1387,8 @@ impl SystemBackend for CountingSystem {
 /// A board whose system backend is [`CountingSystem`].
 fn board_that_counts_reads(reads: Arc<AtomicUsize>) -> Arc<Board> {
     use pomelo_hal::sim::{
-        SimAudio, SimHttp, SimImu, SimInput, SimMic, SimNas, SimPower, SimStorage, SimWeb, SimWifi,
+        SimAudio, SimCloud, SimHttp, SimImu, SimInput, SimMic, SimNas, SimPower, SimStorage,
+        SimWeb, SimWifi,
     };
 
     Arc::new(Board::from_backends(
@@ -1402,6 +1406,7 @@ fn board_that_counts_reads(reads: Arc<AtomicUsize>) -> Arc<Board> {
         }),
         Box::new(SimNas::new()),
         Box::new(SimHttp::new()),
+        Box::new(SimCloud::new()),
     ))
 }
 

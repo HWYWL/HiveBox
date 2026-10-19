@@ -26,6 +26,7 @@
 
 pub mod app_data;
 pub mod board;
+pub mod cloud_answer;
 pub mod error;
 pub mod music_settings;
 pub mod nas_credentials;
@@ -51,15 +52,16 @@ pub use error::HalError;
 pub use music_settings::MusicSettings;
 pub use nas_credentials::NasCredentials;
 pub use traits::{
-    AudioBackend, HttpBackend, ImuBackend, InputBackend, MicBackend, NasBackend, PowerBackend,
-    StorageBackend, SystemBackend, WebBackend, WifiBackend,
+    AudioBackend, CloudBackend, HttpBackend, ImuBackend, InputBackend, MicBackend, NasBackend,
+    PowerBackend, StorageBackend, SystemBackend, WebBackend, WifiBackend,
 };
 pub use types::{
-    ApInfo, AudioMeta, ChipInfo, FirmwareInfo, FlashLayout, FlashRegion, FlashRegionKind, HttpFault,
-    HttpProgress, HttpResponse, HttpState, InputAction, MemoryInfo, NasCpu, NasDisk, NasFault,
-    NasNetwork, NasReading, NasShell, NasShellStatus, NasStatus, ScanState, Sink, SystemEvent,
-    TaskInfo, TaskReading, TaskState, Vec3, VolumeInfo, VolumeKind, WebStatus, WifiState, WifiStatus,
-    signal_bars,
+    ApInfo, AudioMeta, ChipInfo, CloudAction, CloudAnswer, CloudFault, CloudInstance,
+    CloudInstanceState, CloudKey, CloudProvider, CloudState, FirmwareInfo, FlashLayout, FlashRegion,
+    FlashRegionKind, HttpFault, HttpProgress, HttpResponse, HttpState, InputAction, MemoryInfo,
+    NasCpu, NasDisk, NasFault, NasNetwork, NasReading, NasShell, NasShellStatus, NasStatus,
+    ScanState, Sink, SystemEvent, TaskInfo, TaskReading, TaskState, Vec3, VolumeInfo, VolumeKind,
+    WebStatus, WifiState, WifiStatus, signal_bars,
 };
 pub use wifi_credentials::WifiCredentials;
 
@@ -68,15 +70,16 @@ pub mod prelude {
     pub use crate::board::Board;
     pub use crate::error::HalError;
     pub use crate::traits::{
-        AudioBackend, HttpBackend, ImuBackend, InputBackend, MicBackend, NasBackend, PowerBackend,
-        StorageBackend, SystemBackend, WebBackend, WifiBackend,
+        AudioBackend, CloudBackend, HttpBackend, ImuBackend, InputBackend, MicBackend, NasBackend,
+        PowerBackend, StorageBackend, SystemBackend, WebBackend, WifiBackend,
     };
     pub use crate::types::{
-        ApInfo, AudioMeta, ChipInfo, FirmwareInfo, FlashLayout, FlashRegion, FlashRegionKind,
-        HttpFault, HttpProgress, HttpResponse, HttpState, InputAction, MemoryInfo, NasCpu, NasDisk,
-        NasFault, NasNetwork, NasReading, NasShell, NasShellStatus, NasStatus, ScanState, Sink,
-        SystemEvent, TaskInfo, TaskReading, TaskState, Vec3, VolumeInfo, VolumeKind, WebStatus,
-        WifiState, WifiStatus, signal_bars,
+        ApInfo, AudioMeta, ChipInfo, CloudAction, CloudAnswer, CloudFault, CloudInstance,
+        CloudInstanceState, CloudKey, CloudProvider, CloudState, FirmwareInfo, FlashLayout,
+        FlashRegion, FlashRegionKind, HttpFault, HttpProgress, HttpResponse, HttpState, InputAction,
+        MemoryInfo, NasCpu, NasDisk, NasFault, NasNetwork, NasReading, NasShell, NasShellStatus,
+        NasStatus, ScanState, Sink, SystemEvent, TaskInfo, TaskReading, TaskState, Vec3, VolumeInfo,
+        VolumeKind, WebStatus, WifiState, WifiStatus, signal_bars,
     };
     pub use crate::music_settings::MusicSettings;
     pub use crate::nas_credentials::NasCredentials;

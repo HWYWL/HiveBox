@@ -2256,8 +2256,8 @@ mod tests {
     /// is the NAS's. See [`pomelo_hal::sim::SimNas::unreachable`].
     fn monitor_of_a_machine_that_is_off() -> NasMonitor {
         use pomelo_hal::sim::{
-            SimAudio, SimHttp, SimImu, SimInput, SimMic, SimPower, SimStorage, SimSystem, SimWeb,
-            SimWifi,
+            SimAudio, SimCloud, SimHttp, SimImu, SimInput, SimMic, SimPower, SimStorage, SimSystem,
+            SimWeb, SimWifi,
         };
 
         let mut nas = SimNas::unreachable();
@@ -2275,6 +2275,7 @@ mod tests {
             Box::new(SimSystem::new()),
             Box::new(nas),
             Box::new(SimHttp::new()),
+            Box::new(SimCloud::new()),
         ));
 
         NasMonitor::new(board)
@@ -2708,8 +2709,8 @@ mod tests {
     fn a_board_that_cannot_do_it_says_which_it_is() {
         use pomelo_hal::error::HalError;
         use pomelo_hal::sim::{
-            SimAudio, SimHttp, SimImu, SimInput, SimMic, SimPower, SimStorage, SimSystem, SimWeb,
-            SimWifi,
+            SimAudio, SimCloud, SimHttp, SimImu, SimInput, SimMic, SimPower, SimStorage, SimSystem,
+            SimWeb, SimWifi,
         };
         use pomelo_hal::traits::NasBackend;
 
@@ -2758,6 +2759,7 @@ mod tests {
             Box::new(SimSystem::new()),
             Box::new(Refusing),
             Box::new(SimHttp::new()),
+            Box::new(SimCloud::new()),
         ));
 
         let monitor = NasMonitor::new(board);

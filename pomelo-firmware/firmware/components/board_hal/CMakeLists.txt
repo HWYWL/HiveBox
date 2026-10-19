@@ -28,6 +28,10 @@ idf_component_register(
         "board_storage.c"
         "board_system.c"
         "board_http.c"
+        # The cloud client (`board_cloud.c`): the second thing that speaks to the
+        # internet, POST-shaped and signed, and the reason it is not `board_http.c` is
+        # written at the top of it.
+        "board_cloud.c"
         "board_web.c"
         "board_socket.c"
     INCLUDE_DIRS "."

@@ -51,6 +51,7 @@ version = "0.1.0"
 dependencies = [
  "calculator",
  "clock",
+ "cloud-monitor",
  "files",
  "games",
  "iced",
@@ -280,6 +281,16 @@ dependencies = [
 
 [[package]]
 name = "clock"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "pomelo-hal",
+ "pomelo-material-symbols",
+ "pomelo-widgets",
+]
+
+[[package]]
+name = "cloud-monitor"
 version = "0.1.0"
 dependencies = [
  "iced",

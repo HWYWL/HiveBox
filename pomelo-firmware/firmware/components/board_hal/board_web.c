@@ -2178,6 +2178,279 @@ static esp_err_t handle_restart(httpd_req_t *req)
 }
 
 /* ---------------------------------------------------------------------------
+ * The cloud servers
+ *
+ * Five endpoints behind the page's cloud view: what is saved for each provider, saving a key,
+ * forgetting one, and the two that actually reach Tencent Cloud.
+ *
+ * The two that reach it are the only handlers in this file that wait for something slower than the
+ * filesystem. They wait by polling `hal_cloud_state` on a hundred-millisecond tick, which looks like
+ * a busy loop and is not: the work is on a task of `board_cloud.c`'s own, and the polling here is
+ * what a frame loop does with the same API one screen over. The waiting costs this one connection
+ * and nothing else on the board.
+ *
+ * The answers to those two are the C layer's JSON, passed through unread. That is the point of the
+ * answer being a document: the same bytes go to the browser and to a Rust app through
+ * `hal_cloud_answer`, so there is no second description of what a cloud call returns, here or there.
+ *
+ * Nothing here logs a key, at any level: the log is a ring the page itself can read out, so a
+ * SecretKey written to it would be a SecretKey on a page.
+ * ------------------------------------------------------------------------- */
+
+#define WEB_CLOUD_ANSWER_MAX  6144
+/* Longer than a whole scan's budget, so that the answer to a request that is going to fail is this
+ * board's sentence and not the browser's. A merged list asks every data centre of every product, so
+ * the wait is the scan's 45 seconds plus room for the answer to be copied out. */
+#define WEB_CLOUD_WAIT_MS     50000
+
+/** Which provider the query named, or -1. `all` is what the page sends for a merged list; `cvm` and
+ * `lighthouse` are still accepted, and the numbers too, so that a `curl` can use what `board_hal.h`
+ * defines. */
+static int32_t cloud_provider_arg(httpd_req_t *req)
+{
+    char name[32];
+
+    if (!query_string(req, "provider", name, sizeof name)) {
+        return -1;
+    }
+
+    if (strcasecmp(name, "cvm") == 0 || strcmp(name, "0") == 0) {
+        return HAL_CLOUD_CVM;
+    }
+    if (strcasecmp(name, "lighthouse") == 0 || strcmp(name, "1") == 0) {
+        return HAL_CLOUD_LIGHTHOUSE;
+    }
+    /* `all` is every provider with a key, merged into one answer. It is a list's target only: the
+     * power endpoint refuses it, because a machine is what a power action names. */
+    if (strcasecmp(name, "all") == 0) {
+        return HAL_CLOUD_ALL;
+    }
+
+    return -1;
+}
+
+/** Which action the query named, or -1. `list` is not accepted here: this is the power endpoint, and
+ * a list has its own. */
+static int32_t cloud_action_arg(httpd_req_t *req)
+{
+    char name[24];
+
+    if (!query_string(req, "action", name, sizeof name)) {
+        return -1;
+    }
+
+    if (strcasecmp(name, "list") == 0)   return HAL_CLOUD_ACTION_LIST;
+    if (strcasecmp(name, "start") == 0)  return HAL_CLOUD_ACTION_START;
+    if (strcasecmp(name, "stop") == 0)   return HAL_CLOUD_ACTION_STOP;
+    if (strcasecmp(name, "reboot") == 0) return HAL_CLOUD_ACTION_REBOOT;
+
+    return -1;
+}
+
+/* What is saved, and nothing that could be used to sign anything.
+ *
+ * There is one Tencent Cloud key, not one per product: the same SecretId and SecretKey can list both
+ * CVM and Lighthouse machines, and the page has one box to type them into. The C layer still keeps
+ * two copies -- each product signs against its own endpoint and keeps its own region -- and this
+ * answer is the one the person recognises.
+ *
+ * The SecretId comes back masked and the SecretKey does not come back at all, which is what makes it
+ * safe for the page to ask this on every visit: a saved key draws as "AKID……wxyz" and a browser tab
+ * that is left open on this page is not a tab holding a working credential. */
+static esp_err_t handle_cloud_status(httpd_req_t *req)
+{
+    char masked[HAL_CLOUD_SECRET_ID_MAX + 8];
+    char region[HAL_CLOUD_REGION_MAX];
+    bool saved = false;
+
+    masked[0] = '\0';
+    region[0] = '\0';
+
+    for (int32_t provider = 0; provider < HAL_CLOUD_PROVIDER_COUNT; provider++) {
+        if (hal_cloud_credentials_get(provider, masked, sizeof masked, region, sizeof region) ==
+            ESP_OK) {
+            saved = true;
+            break;
+        }
+    }
+
+    web_buf_t buf;
+    buf_init(&buf, 512);
+    buf_printf(&buf, "{\"saved\":%s,\"secret_id\":\"%s\",\"region\":\"%s\"}", saved ? "true" : "false",
+               masked, region);
+
+    if (buf.full) {
+        buf_free(&buf);
+        return send_busy(req);
+    }
+
+    const esp_err_t ret = send_json(req, buf.data);
+    buf_free(&buf);
+
+    return ret;
+}
+
+/* Saves the Tencent Cloud key, for both products at once.
+ *
+ * The key is taken as three query parameters like everything else this page sends, so a SecretKey
+ * with a `+` or an `&` in it arrives whole: the page encodes, `url_decode` decodes, and neither end
+ * guesses. What it is *not* is checked against Tencent here -- a key that is the wrong shape is
+ * refused, and a key that is simply wrong is found out by the first request that uses it, with the
+ * API's own sentence about why.
+ *
+ * One key, two copies underneath: CVM and Lighthouse sign against different endpoints, so each keeps
+ * its own record. The page never has to know that, and the region it no longer asks for defaults to
+ * `ap-guangzhou` -- a list scans every data centre anyway.
+ */
+static esp_err_t handle_cloud_remember(httpd_req_t *req)
+{
+    char secret_id[HAL_CLOUD_SECRET_ID_MAX];
+    char secret_key[HAL_CLOUD_SECRET_KEY_MAX];
+    char region[HAL_CLOUD_REGION_MAX];
+
+    if (!query_string(req, "secret_id", secret_id, sizeof secret_id) || secret_id[0] == '\0') {
+        return send_blocked(req, "secret_id is required");
+    }
+
+    if (!query_string(req, "secret_key", secret_key, sizeof secret_key) || secret_key[0] == '\0') {
+        return send_blocked(req, "secret_key is required");
+    }
+
+    if (!query_string(req, "region", region, sizeof region)) {
+        region[0] = '\0';
+    }
+
+    for (int32_t provider = 0; provider < HAL_CLOUD_PROVIDER_COUNT; provider++) {
+        const esp_err_t err = hal_cloud_credentials_set(provider, region, secret_id, secret_key);
+
+        if (err == ESP_ERR_INVALID_ARG) {
+            return send_error(req, "400 Bad Request", "cloud_key_shape",
+                              "a key must be printable ASCII, without quotes or backslashes");
+        }
+        if (err == ESP_ERR_INVALID_SIZE) {
+            return send_error(req, "400 Bad Request", "cloud_key_long", "the key is too long");
+        }
+        if (err != ESP_OK) {
+            return send_error(req, "500 Internal Server Error", "write_failed", esp_err_to_name(err));
+        }
+    }
+
+    ESP_LOGI(TAG, "cloud key saved");
+
+    return send_json(req, "{\"ok\":true}");
+}
+
+/* Forgets the key, both copies of it.
+ *
+ * Forgetting a key that was never there is what the caller asked for, and the answer to it is that
+ * there is no key. */
+static esp_err_t handle_cloud_forget(httpd_req_t *req)
+{
+    for (int32_t provider = 0; provider < HAL_CLOUD_PROVIDER_COUNT; provider++) {
+        const esp_err_t err = hal_cloud_credentials_forget(provider);
+
+        if (err != ESP_OK && err != ESP_ERR_NOT_FOUND) {
+            return send_error(req, "500 Internal Server Error", "forget_failed",
+                              esp_err_to_name(err));
+        }
+    }
+
+    ESP_LOGI(TAG, "cloud key forgotten");
+
+    return send_json(req, "{\"ok\":true}");
+}
+
+/* Start it, wait for it, hand over the answer. The waiting is the whole of what these two do. */
+static esp_err_t cloud_await(httpd_req_t *req, esp_err_t started)
+{
+    if (started == ESP_ERR_INVALID_STATE) {
+        return send_error(req, "409 Conflict", "cloud_busy",
+                          "another cloud request is already in flight");
+    }
+    if (started != ESP_OK) {
+        return send_error(req, "400 Bad Request", "cloud_args",
+                          "the request named no provider, no action, or a machine that is not one");
+    }
+
+    char *answer = malloc(WEB_CLOUD_ANSWER_MAX);
+    if (answer == NULL) {
+        hal_cloud_cancel();
+        return send_busy(req);
+    }
+
+    const int64_t deadline = esp_timer_get_time() + (int64_t)WEB_CLOUD_WAIT_MS * 1000;
+
+    while (hal_cloud_state() == HAL_CLOUD_RUNNING && esp_timer_get_time() < deadline) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    if (hal_cloud_state() == HAL_CLOUD_RUNNING) {
+        /* Let go rather than wait for it: the worker will finish on its own, and its answer belongs
+         * to nobody by then. */
+        hal_cloud_cancel();
+        free(answer);
+
+        return send_error(req, "504 Gateway Timeout", "cloud_timeout",
+                          "the API did not answer in time");
+    }
+
+    /* Copied and released in one step, which is what keeps a second browser tab's list from
+     * rewriting the document this one is halfway through sending. */
+    const size_t length = hal_cloud_take_answer(answer, WEB_CLOUD_ANSWER_MAX);
+    if (length == 0) {
+        free(answer);
+        return send_error(req, "500 Internal Server Error", "cloud_failed", "there was no answer");
+    }
+
+    const esp_err_t ret = send_json(req, answer);
+    free(answer);
+
+    return ret;
+}
+
+static esp_err_t handle_cloud_list(httpd_req_t *req)
+{
+    const int32_t provider = cloud_provider_arg(req);
+    if (provider < 0) {
+        return send_blocked(req, "provider must be cvm or lighthouse");
+    }
+
+    char region[HAL_CLOUD_REGION_MAX];
+    if (!query_string(req, "region", region, sizeof region)) {
+        region[0] = '\0';
+    }
+
+    return cloud_await(req, hal_cloud_start(provider, HAL_CLOUD_ACTION_LIST, region, ""));
+}
+
+/* Power off, power on, reboot. One instance per call: the page draws one button per row, and a bulk
+ * action is a page that can stop ten machines with one mis-tap. */
+static esp_err_t handle_cloud_power(httpd_req_t *req)
+{
+    const int32_t provider = cloud_provider_arg(req);
+    if (provider < 0) {
+        return send_blocked(req, "provider must be cvm or lighthouse");
+    }
+
+    const int32_t action = cloud_action_arg(req);
+    if (action < HAL_CLOUD_ACTION_START || action > HAL_CLOUD_ACTION_REBOOT) {
+        return send_blocked(req, "action must be start, stop or reboot");
+    }
+
+    char instance[HAL_CLOUD_INSTANCE_MAX];
+    if (!query_string(req, "instance", instance, sizeof instance) || instance[0] == '\0') {
+        return send_blocked(req, "instance is required");
+    }
+
+    char region[HAL_CLOUD_REGION_MAX];
+    if (!query_string(req, "region", region, sizeof region)) {
+        region[0] = '\0';
+    }
+
+    return cloud_await(req, hal_cloud_start(provider, action, region, instance));
+}
+
+/* ---------------------------------------------------------------------------
  * The server itself
  * ------------------------------------------------------------------------- */
 
@@ -2228,6 +2501,11 @@ static const web_route_t s_routes[] = {
     { "/api/nas/remember",     HTTP_POST, handle_nas_remember },
     { "/api/nas/list",         HTTP_GET,  handle_nas_list },
     { "/api/nas/forget",       HTTP_POST, handle_nas_forget },
+    { "/api/cloud/status",     HTTP_GET,  handle_cloud_status },
+    { "/api/cloud/remember",   HTTP_POST, handle_cloud_remember },
+    { "/api/cloud/forget",     HTTP_POST, handle_cloud_forget },
+    { "/api/cloud/list",       HTTP_GET,  handle_cloud_list },
+    { "/api/cloud/power",      HTTP_POST, handle_cloud_power },
     { "/api/wifi/disconnect", HTTP_POST, handle_wifi_disconnect },
     { "/api/wifi/forget",     HTTP_POST, handle_wifi_forget },
     { "/api/restart",         HTTP_POST, handle_restart },

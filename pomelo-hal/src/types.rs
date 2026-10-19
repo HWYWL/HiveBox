@@ -1188,4 +1188,471 @@ pub enum SystemEvent {
     Tick,
 }
 
+/// Which of the cloud provider's two server products a page is showing — or both at once.
+///
+/// Two products and not one, because that is what they are: an elastic cloud server and a
+/// lightweight one are two APIs, with two endpoint names, two versions and two shapes of answer.
+/// One account and one API key reach both; nothing else about them is shared.
+///
+/// The order of the products is the C side's (`HAL_CLOUD_CVM`, `HAL_CLOUD_LIGHTHOUSE`), because it
+/// is also the order of the two accounts in the credentials file.
+///
+/// [`CloudProvider::All`] is not a product: it is the target of a *list*. It is the C side's
+/// `HAL_CLOUD_ALL`, which asks every provider that has a key and merges the answers into one list
+/// with a `kind` on each row. A power action always names one machine, so it always names one
+/// product — which is why every row carries the product it belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum CloudProvider {
+    /// The elastic one, whose instance ids begin `ins-`.
+    #[default]
+    Cvm,
+    /// The fixed-price one, whose instance ids begin `lhins-`.
+    Lighthouse,
+    /// Both at once, for a list: every provider with a key on file, merged into one answer.
+    All,
+}
+
+impl CloudProvider {
+    /// The two real products, in the order a page draws them. [`CloudProvider::All`] is not one.
+    pub const PRODUCTS: [CloudProvider; 2] = [CloudProvider::Cvm, CloudProvider::Lighthouse];
+
+    /// Where this provider sits, as the C side's provider code — `hal_cloud_start`'s first argument.
+    ///
+    /// The number is not this crate's invention, and the two agree only because
+    /// [`CloudProvider::PRODUCTS`] is written in the C side's order — see
+    /// [`CloudProvider::from_index`], which is the way back. [`CloudProvider::All`] is 2, the C
+    /// side's `HAL_CLOUD_ALL`, and is nobody's key: the credentials file is two entries wide.
+    pub fn index(self) -> usize {
+        match self {
+            CloudProvider::Cvm => 0,
+            CloudProvider::Lighthouse => 1,
+            CloudProvider::All => 2,
+        }
+    }
+
+    /// The provider whose code is `index`, when it is one this build knows.
+    pub fn from_index(index: usize) -> Option<CloudProvider> {
+        CloudProvider::PRODUCTS
+            .get(index)
+            .copied()
+            .or(match index {
+                2 => Some(CloudProvider::All),
+                _ => None,
+            })
+    }
+
+    /// The provider as the wire spells it: `cvm`, `lighthouse`, or `all`.
+    pub fn name(self) -> &'static str {
+        match self {
+            CloudProvider::Cvm => "cvm",
+            CloudProvider::Lighthouse => "lighthouse",
+            CloudProvider::All => "all",
+        }
+    }
+
+    /// Whether this is a product with machines of its own, rather than the union of them.
+    ///
+    /// The one question a page asks before it addresses a machine: a power command goes to a
+    /// product, and a row that said `All` would be a row with nowhere to send it.
+    pub fn is_product(self) -> bool {
+        self != CloudProvider::All
+    }
+
+    /// The provider an answer's `provider` field names, including `all`.
+    pub fn from_name(name: &str) -> Option<CloudProvider> {
+        let name = name.trim();
+
+        if name.eq_ignore_ascii_case("all") {
+            return Some(CloudProvider::All);
+        }
+
+        CloudProvider::PRODUCTS
+            .into_iter()
+            .find(|provider| provider.name().eq_ignore_ascii_case(name))
+    }
+}
+
+/// What is being asked of a provider.
+///
+/// [`CloudAction::List`] is the odd one out and is here anyway: a page asks the three power
+/// questions and the one inventory question with the same button, the same spinner and the same
+/// answer slot, and a backend whose signature said "read *or* do" in two shapes would have every
+/// implementation looking at which one it was handed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CloudAction {
+    /// What the key owns: every instance of this provider under this account.
+    List,
+    /// Power on. Nothing happens to an instance that is already running.
+    Start,
+    /// Power off — a shutdown and not a reboot, which is the state a person wants when they are
+    /// done with the machine for the day. See [`CloudAction::is_power`].
+    Stop,
+    /// Restart, keeping everything on the machine's disks.
+    Reboot,
+}
+
+impl CloudAction {
+    /// All four, in the order a page draws the refresh and the three buttons.
+    pub const ALL: [CloudAction; 4] = [
+        CloudAction::List,
+        CloudAction::Start,
+        CloudAction::Stop,
+        CloudAction::Reboot,
+    ];
+
+    /// The action's code, as the C side's `hal_cloud_start` takes it.
+    pub fn index(self) -> usize {
+        match self {
+            CloudAction::List => 0,
+            CloudAction::Start => 1,
+            CloudAction::Stop => 2,
+            CloudAction::Reboot => 3,
+        }
+    }
+
+    /// The action as the wire spells it in an answer: `list`, `start`, `stop`, `reboot`.
+    pub fn name(self) -> &'static str {
+        match self {
+            CloudAction::List => "list",
+            CloudAction::Start => "start",
+            CloudAction::Stop => "stop",
+            CloudAction::Reboot => "reboot",
+        }
+    }
+
+    /// The action a `list`…`reboot` word names, as an answer writes it.
+    pub fn from_name(name: &str) -> Option<CloudAction> {
+        CloudAction::ALL
+            .into_iter()
+            .find(|action| action.name().eq_ignore_ascii_case(name.trim()))
+    }
+
+    /// Whether this action changes the machine rather than reading it.
+    ///
+    /// The one question a page asks of an action, and it is a fact about the *action* rather than
+    /// about a page: a power command takes the machine away from whatever was logged into it, and
+    /// it is the kind a finger lands on by accident — which is why a page confirms one and does not
+    /// confirm a refresh.
+    pub fn is_power(self) -> bool {
+        !matches!(self, CloudAction::List)
+    }
+}
+
+/// A saved API key, as much of it as ever comes back out.
+///
+/// The id masked and the region, and deliberately not the secret: what a page needs in order to
+/// draw "one key is saved for this account" is the front and the back of an id, and a backend that
+/// handed a whole key up to a page would be putting it in a frame's memory for nothing. Typing one
+/// in is the management page's job — a form with three fields, on the page whose keyboard is built
+/// for it — so nothing in this crate writes a key, and nothing in this crate holds one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CloudKey {
+    /// The secret id with its middle taken out, as the backend masks it. Empty when nothing is
+    /// saved for this provider, which is what [`CloudKey::configured`] reads.
+    pub masked: String,
+    /// The region the saved key is used with: `ap-guangzhou`, `ap-hongkong`, and so on. The
+    /// address of a *data centre*, which is why a request has to carry one — the API will not
+    /// answer without being told which region's instances to look at.
+    pub region: String,
+}
+
+impl CloudKey {
+    /// Whether a key is saved for this provider.
+    ///
+    /// The masked id and not the region: a key saved with no region is still a key that is there,
+    /// and a page that drew it as "not set up" would send a person to type in a key they have
+    /// already typed in.
+    pub fn configured(&self) -> bool {
+        !self.masked.is_empty()
+    }
+}
+
+/// What an instance is doing, as the provider's own list describes it.
+///
+/// Both APIs spell these in capitals (`RUNNING`, `STOPPING`), and neither spells the whole set: one
+/// has `PENDING`, the other `FROZEN`. What is below is the set a *page* draws — four states and a
+/// fifth slot for the rest — because a machine that is frozen or pending or terminating is, to
+/// somebody looking at the panel, a machine that is not running and that this board cannot explain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CloudInstanceState {
+    /// Up, and at its address.
+    Running,
+    /// Down.
+    #[default]
+    Stopped,
+    /// On its way up.
+    Starting,
+    /// On its way down.
+    Stopping,
+    /// Restarting.
+    Rebooting,
+    /// Up, down, or somewhere between, in a word this board was not taught. Drawn as neither: the
+    /// honest answer to "is it up" is that the provider said something else.
+    Other,
+}
+
+impl CloudInstanceState {
+    /// The state a provider's word names.
+    ///
+    /// Case-insensitive, and generous about the words that mean the same thing: `STOPPED` is one
+    /// product's word for it and `SHUTDOWN` the other's, and both are [`Self::Stopped`] to anybody
+    /// looking at the panel.
+    pub fn from_name(name: &str) -> CloudInstanceState {
+        let name = name.trim();
+        let is = |word: &str| name.eq_ignore_ascii_case(word);
+
+        if is("RUNNING") {
+            CloudInstanceState::Running
+        } else if is("STOPPED") || is("SHUTDOWN") || is("PENDING") {
+            CloudInstanceState::Stopped
+        } else if is("STARTING") {
+            CloudInstanceState::Starting
+        } else if is("STOPPING") {
+            CloudInstanceState::Stopping
+        } else if is("REBOOTING") {
+            CloudInstanceState::Rebooting
+        } else {
+            CloudInstanceState::Other
+        }
+    }
+
+    /// This state as a provider would spell it, for a test and for a log.
+    pub fn name(self) -> &'static str {
+        match self {
+            CloudInstanceState::Running => "RUNNING",
+            CloudInstanceState::Stopped => "STOPPED",
+            CloudInstanceState::Starting => "STARTING",
+            CloudInstanceState::Stopping => "STOPPING",
+            CloudInstanceState::Rebooting => "REBOOTING",
+            CloudInstanceState::Other => "UNKNOWN",
+        }
+    }
+
+    /// Whether the machine is up.
+    pub fn is_running(self) -> bool {
+        matches!(
+            self,
+            CloudInstanceState::Running | CloudInstanceState::Rebooting
+        )
+    }
+
+    /// Whether the provider is in the middle of a change to it.
+    ///
+    /// The state a page greys its buttons out on: neither API takes a power command for a machine
+    /// it is already changing, so a button that stayed live would be a button that failed.
+    pub fn is_busy(self) -> bool {
+        matches!(
+            self,
+            CloudInstanceState::Starting
+                | CloudInstanceState::Stopping
+                | CloudInstanceState::Rebooting
+        )
+    }
+}
+
+/// One instance, as the provider's own list describes it.
+///
+/// Six fields out of the dozens both APIs answer with: what a person needs in order to say "*that*
+/// one". An id, the name somebody gave it, what it is doing, the address to reach it at, which
+/// product it came from, and which data centre that product keeps it in.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CloudInstance {
+    /// The provider's id for it: `ins-…` for one product, `lhins-…` for the other. What every power
+    /// command is addressed with, and the reason this is the one field that can never be empty.
+    pub id: String,
+    /// The name somebody gave it, or the id again when nobody did.
+    pub name: String,
+    /// What it is doing.
+    pub state: CloudInstanceState,
+    /// The address to reach it at: the public one when it has one, the private one when it does
+    /// not. Empty for a machine that has never been powered on.
+    pub ip: String,
+    /// Which product this machine belongs to — the API a power command for it has to be sent to.
+    ///
+    /// Carried on the row rather than assumed from the answer, because a merged list is exactly two
+    /// APIs in one: the row above may be a lightweight machine and the row below an elastic one,
+    /// and the two take the same command at different endpoints. Never [`CloudProvider::All`].
+    pub provider: CloudProvider,
+    /// The data centre it lives in (`ap-guangzhou`, `ap-tokyo`, …).
+    ///
+    /// Both APIs answer about one region per call, so a merged list is also every data centre in
+    /// one — and a power command has to name the region its machine is in, not the key's own.
+    pub region: String,
+}
+
+/// How a cloud request is going, as [`CloudBackend`][crate::traits::CloudBackend] reports it.
+///
+/// The same start-and-poll shape the radio's scan and the HTTP client have, and for the same
+/// reason: a request is a TLS handshake plus a signed round trip, which is a second or two of
+/// somebody else's time, and a page that waited for one would be a page that stopped drawing.
+/// [`CloudState::Done`] means *there is an answer to collect* — see
+/// [`CloudBackend::take_answer`][crate::traits::CloudBackend::take_answer] — and not "the answer
+/// has been read".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CloudState {
+    /// Nothing has been asked for, or the last answer has been collected.
+    #[default]
+    Idle,
+    /// A request is in flight.
+    Running,
+    /// An answer is waiting to be taken.
+    Done,
+    /// The request did not come back, and this is why. There is still an answer to take: see
+    /// [`CloudAnswer::Refused`].
+    Failed(CloudFault),
+}
+
+/// Why a cloud request did not come back with a list or an acceptance.
+///
+/// A closed list rather than the platform's error code, and one variant per reason a person can act
+/// on — which is the test a fault has to pass to be worth naming. Two of them are worth telling
+/// apart from the rest: [`CloudFault::NoCredentials`] is "nobody has typed a key in yet", which is
+/// the management page's job and not the network's, and [`CloudFault::ClockNotSet`] is a board that
+/// has never been told the time, which refuses every signed request before it is sent. See
+/// [`CloudFault::code`], which is the same list as the page's own error strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloudFault {
+    /// The request failed with nothing more specific to say. The one fault that is not a reason,
+    /// and the answer when the board could not read what came back.
+    Failed,
+    /// The request was malformed: a provider or an action this board does not have, or a power
+    /// command with no instance to aim at. A bug in the page rather than anything in the world.
+    Args,
+    /// No key is saved for this provider. Not a failure of the request at all — it never left —
+    /// and the screen that says "go to the management page and put one in".
+    NoCredentials,
+    /// The board is not on a network, so there is nothing to send the request through.
+    NoNetwork,
+    /// The clock has never been set, and a signed request needs one: the date is one of the four
+    /// things the signature is derived from, so 1970 is a signature the server will not accept —
+    /// and a certificate judged against 1970 fails before that. Refused without a socket.
+    ClockNotSet,
+    /// Nothing answered: the name did not resolve, the connection was refused, or the route is
+    /// gone.
+    Unreachable,
+    /// The server was reached and the TLS handshake did not complete — a certificate that does not
+    /// check out, or two ends that share no protocol.
+    Tls,
+    /// The connection was made and the answer was not one: a status the provider does not use, or a
+    /// body that is not the document this side knows how to read.
+    Http,
+    /// The provider answered and refused the request: a key that is wrong, expired, or not allowed
+    /// to touch that instance, a region that does not exist, or an instance id that is not there.
+    /// The one fault whose *reason* the provider itself wrote down, which is why
+    /// [`CloudAnswer::Refused`] carries its code and message.
+    Api,
+    /// The answer could not be held: it did not fit the board's buffer, or the credentials file
+    /// could not be read or written. A fault of the board rather than of the network.
+    Storage,
+}
+
+impl CloudFault {
+    /// All ten, in the C side's order, for a test that wants to walk them.
+    pub const ALL: [CloudFault; 10] = [
+        CloudFault::Failed,
+        CloudFault::Args,
+        CloudFault::NoCredentials,
+        CloudFault::NoNetwork,
+        CloudFault::ClockNotSet,
+        CloudFault::Unreachable,
+        CloudFault::Tls,
+        CloudFault::Http,
+        CloudFault::Api,
+        CloudFault::Storage,
+    ];
+
+    /// The name this fault goes by on the wire, which is also the page's error string.
+    ///
+    /// The one piece of vocabulary this crate shares with the *page*: the C side writes these into
+    /// the answer document, the management page reads them out of the same document over the same
+    /// routes, and a panel app that had its own words for them would be a second list to keep in
+    /// step.
+    pub fn code(self) -> &'static str {
+        match self {
+            CloudFault::Failed => "cloud_failed",
+            CloudFault::Args => "cloud_args",
+            CloudFault::NoCredentials => "cloud_creds",
+            CloudFault::NoNetwork => "cloud_offline",
+            CloudFault::ClockNotSet => "cloud_clock",
+            CloudFault::Unreachable => "cloud_unreachable",
+            CloudFault::Tls => "cloud_tls",
+            CloudFault::Http => "cloud_http",
+            CloudFault::Api => "cloud_api",
+            CloudFault::Storage => "cloud_storage",
+        }
+    }
+
+    /// The fault a `cloud_*` name stands for.
+    ///
+    /// A word this build was not taught reads as [`CloudFault::Failed`], which is the fault that
+    /// says "the request failed" and nothing it cannot back up.
+    pub fn from_code(code: &str) -> CloudFault {
+        CloudFault::ALL
+            .into_iter()
+            .find(|fault| fault.code() == code.trim())
+            .unwrap_or(CloudFault::Failed)
+    }
+}
+
+/// What a cloud request that finished has to hand over.
+///
+/// A refusal is an *answer* and not a fault: the provider read the request, understood it, and
+/// said no, and what it said is a code and a sentence a person needs to see — a key that has
+/// expired, an instance that is not in this region, an account that has run out of credit. So it
+/// arrives here, through the same call that hands over a list, and a caller that reads only the
+/// success arms is a caller that shows nothing at all for a request that was refused. See
+/// [`CloudState::Failed`], which is where a request that never got that far reports itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloudAnswer {
+    /// What the keys own.
+    Instances {
+        /// Which list this is: one product's, or [`CloudProvider::All`] for a merged one.
+        provider: CloudProvider,
+        /// The region it was read from, as the key's file holds it. Empty for a merged list, whose
+        /// rows can come from two regions at once — the region is a property of a *key*, and a row
+        /// knows which key listed it.
+        region: String,
+        /// The instances, in the order the providers listed them: one product's, or each product's
+        /// in turn. Every row says which product it came from.
+        instances: Vec<CloudInstance>,
+        /// The products whose call failed on a merged list, so a page can say "轻量的这次没取到"
+        /// instead of quietly drawing half of what somebody owns. Empty for a single product's
+        /// list, which either arrived or answered with something else entirely.
+        failed: Vec<CloudProvider>,
+    },
+    /// The provider took a power command.
+    ///
+    /// An acceptance and not a result: the machine is *going* to change, and what it is doing a
+    /// second later is a second question. The panel shows the row as busy and asks for the list
+    /// again, which is also the only way to find out that a command was accepted and then did not
+    /// work.
+    Accepted {
+        /// Which product was asked.
+        provider: CloudProvider,
+        /// What was asked of it.
+        action: CloudAction,
+        /// The provider's receipt for the command, in its own format. Carried because it is the one
+        /// handle on the request if somebody has to take it up with the provider afterwards.
+        request_id: String,
+    },
+    /// The provider refused the request, or the request failed with a reason worth showing.
+    Refused {
+        /// Why, as far as this board can tell.
+        fault: CloudFault,
+        /// The provider's own error code, when it wrote one. Empty for a failure that never
+        /// reached the provider.
+        code: String,
+        /// The provider's own sentence, in the language it chose — which for a person reading the
+        /// panel is more use than anything this crate could write in its place.
+        message: String,
+    },
+}
+
+impl CloudAnswer {
+    /// Whether this is a [`CloudAnswer::Refused`].
+    pub fn refused(&self) -> bool {
+        matches!(self, CloudAnswer::Refused { .. })
+    }
+}
+
 
