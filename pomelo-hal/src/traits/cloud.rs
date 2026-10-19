@@ -21,29 +21,34 @@
 //! flight. A power command and a list are the same question to this trait — see
 //! [`CloudAction`][crate::types::CloudAction] — because they share the one answer slot.
 //!
-//! # Two products, one list
+//! # Two levels, one list
 //!
-//! A key is saved per product underneath, and a merged list asks both: what one product's API can
-//! tell this board says nothing about the other's. [`CloudBackend::key`] is how a page finds out
-//! whether anything is set up, and the page that sets it up is the management page, not this one.
+//! A key is saved per *vendor* (腾讯云, 阿里云, AWS), and a list names the vendor: what its own
+//! products can tell this board is merged into the one answer a page draws. A power command names a
+//! *product* instead — [`CloudProvider`], off the row it came from — because that is what says which
+//! API to call. [`CloudBackend::key`] is how a page finds out whether a vendor is set up, and the
+//! page that sets it up is the management page, not this one.
 
 use crate::error::HalError;
-use crate::types::{CloudAction, CloudAnswer, CloudKey, CloudProvider, CloudState};
+use crate::types::{CloudAction, CloudAnswer, CloudKey, CloudState, CloudTarget, CloudVendor};
 
 /// Managing servers in a cloud account: what there is, and turning it on and off.
 pub trait CloudBackend: Send + Sync {
-    /// The key saved for `provider`, as much of it as comes back out.
+    /// The key saved for `vendor`, as much of it as comes back out.
     ///
     /// Cheap and safe to call every frame, and the only thing a page knows about the credentials:
-    /// an empty [`CloudKey`] means nothing is saved for that product, which is a screen rather than
+    /// an empty [`CloudKey`] means nothing is saved for that company, which is a screen rather than
     /// a failure. See [`CloudKey::configured`][crate::types::CloudKey::configured].
-    fn key(&self, provider: CloudProvider) -> CloudKey;
+    fn key(&self, vendor: CloudVendor) -> CloudKey;
 
-    /// Asks `provider` to do `action` to `instance`, and returns at once.
+    /// Asks for `action` on `target`, and returns at once.
     ///
-    /// `instance` is the provider's own id — `ins-…` or `lhins-…` — and is ignored by
-    /// [`CloudAction::List`][crate::types::CloudAction::List], which is the one action that is not
-    /// about a machine.
+    /// A [`CloudAction::List`][crate::types::CloudAction::List] names a vendor:
+    /// [`CloudTarget::Vendor`] and every region of every product it sells, merged. A power command
+    /// names a machine: [`CloudTarget::Machine`] and the product its row came from.
+    ///
+    /// `instance` is the provider's own id — `ins-…`, `lhins-…` or `i-…` — and is ignored by a list,
+    /// which is the one action that is not about a machine.
     ///
     /// `region` is the data centre the machine is in, and is what
     /// [`CloudInstance::region`][crate::types::CloudInstance::region] carries on a list row: the
@@ -56,7 +61,7 @@ pub trait CloudBackend: Send + Sync {
     /// request came to is [`CloudBackend::state`].
     fn start(
         &mut self,
-        provider: CloudProvider,
+        target: CloudTarget,
         action: CloudAction,
         instance: &str,
         region: &str,

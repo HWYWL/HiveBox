@@ -1,0 +1,48 @@
+[package]
+name = "app-host"
+version = "0.1.0"
+edition = "2021"
+description = "The runtime that instantiates a .hbapp package and replays its display list"
+license = "GPL-3.0-only"
+
+[dependencies]
+app-abi = { path = "../app-abi" }
+mini-json = { path = "../mini-json" }
+
+# The interpreter. `virtual_memory` is deliberately off: it maps wasm pages with the host's `mmap`,
+# which the board does not have. Without it the module's memory is an ordinary allocation, which is
+# exactly what a 512 KB sandbox wants.
+wasmi = { version = "0.31", default-features = false, features = ["std"] }
+
+# The one thing the installer checks that a size cannot: the bytes are the bytes the manifest named.
+sha2 = "0.10"
+
+# The widget that draws a display list. Off by default so that the runtime, its tests and the headless
+# runner do not need a renderer at all; the launcher turns it on.
+iced = { version = "0.14", default-features = false, features = ["advanced"], optional = true }
+
+pomelo-hal = { git = "https://github.com/pomelos-on-sale/pomelo-hal.git", rev = "20eaa910f0a05cd68684d6aa868fd78457c51be9", optional = true }
+
+[dev-dependencies]
+# The widget's own tests build an element tree, and iced will not compile without an executor
+# feature. A dev-dependency rather than a feature of the crate: the runtime itself still builds with
+# no platform layer at all, which is the property `cargo test -p app-host` is watched for.
+iced = { version = "0.14", default-features = false, features = [
+    "advanced",
+    "canvas",
+    "thread-pool",
+    "tiny-skia",
+] }
+
+[features]
+default = []
+# The iced side of the runtime: the widget that replays a display list, and the launcher-facing
+# `HostedApp` that owns a VM. `canvas` is the widget the display list is recorded with — the rest of
+# iced, including the renderer, is the graph root's choice.
+ui = ["dep:iced", "iced/canvas"]
+# The board side: services backed by `pomelo-hal` instead of the desktop's files.
+board = ["dep:pomelo-hal"]
+
+[[bin]]
+name = "app-host"
+path = "src/bin/host.rs"

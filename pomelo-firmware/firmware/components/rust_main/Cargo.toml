@@ -101,6 +101,17 @@ iced-pomelo-gfx = { path = "../../../../ui-framework/iced-pomelo-gfx" }
 [patch."https://github.com/pomelos-on-sale/iced-pomelo-gfx.git"]
 iced-pomelo-gfx = { path = "../../../../ui-framework/iced-pomelo-gfx" }
 
+# The canonical form of a git URL has no `.git` suffix, and a patch key is matched against the
+# canonical form: the two entries above cover the manifests as they are written, these two cover the
+# same sources once cargo has normalized them. Only the first pair used to be here, which is why a
+# resolve that needs the source at all still went to the network for a crate that is in this
+# checkout — see the table's own note on patches.
+[patch."ssh://git@github.com/pomelos-on-sale/iced-pomelo-gfx"]
+iced-pomelo-gfx = { path = "../../../../ui-framework/iced-pomelo-gfx" }
+
+[patch."https://github.com/pomelos-on-sale/iced-pomelo-gfx"]
+iced-pomelo-gfx = { path = "../../../../ui-framework/iced-pomelo-gfx" }
+
 
 
 [patch."https://github.com/pomelos-on-sale/pomelo-hal.git"]
@@ -125,7 +136,13 @@ iced_winit = { path = "../../../../ui-framework/iced-pomelo-winit" }
 # a host `cargo test --release` in *this* project is blocked by `panic = "abort"`; test with the
 # default dev profile, which is what the platform crate's own suite does.
 [profile.release]
-opt-level = "s"
+# `z` and no longer `s`: the runtime (`wasmi`), the store and the launcher's dynamic tiles took the
+# image past what an `ota_0` slot holds, and this is the one lever that costs no asset and no
+# feature. What it costs is speed, and the two places that are timed are the two to watch on the
+# device: a wasm frame (six milliseconds budgeted) and the panel's paint. If either misses, the
+# answer is not to go back to `s` (the image does not fit) but to make the package smaller — see
+# `pomelo-material-symbols`, whose 1.1 MiB icon font is the image's largest single asset.
+opt-level = "z"
 lto = true
 codegen-units = 1
 panic = "abort"

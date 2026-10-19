@@ -14,6 +14,18 @@
 resolver = "2"
 
 members = [
+    # The platform: one crate for the contract across the sandbox boundary, one for the runtime that
+    # enforces it, one for the SDK applications are written against, and one for the reader both the
+    # release manifest and a package's metadata are parsed with.
+    "app-abi",
+    "app-host",
+    "app-sdk",
+    "mini-json",
+    "store",
+    # The applications that are packages rather than crates in the firmware. Their build target is
+    # `wasm32-unknown-unknown`; they are members so that one `cargo test` still covers the whole tree.
+    "wasm-apps/calculator",
+    "wasm-apps/clock",
     "task-viewer",
     "app-launcher",
     "calculator",

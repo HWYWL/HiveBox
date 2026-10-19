@@ -1,64 +1,84 @@
 // =============================================================================
-// Cloud servers (Tencent Cloud)
+// Cloud servers (Tencent Cloud, Alibaba Cloud, AWS)
 // -----------------------------------------------------------------------------
-// "Turn my server off from the bed." The board holds two cloud credentials and
-// can list what they own, stop it, start it and reboot it. `hal_cloud_start`
-// names a provider and an action and returns; a worker does the signing, the
-// handshake and the read, and the answer is *taken* rather than read twice --
-// the same shape as `board_http.c`, and for the same reason: this is called
-// from a frame loop and from an HTTP handler, and neither can wait three
-// seconds for a TLS handshake.
+// "Turn my server off from the bed." The board holds one key per company, can
+// list everything that key owns -- every product, every data centre -- and can
+// stop, start and reboot one machine. `hal_cloud_start` names a vendor to list
+// or a product to act through, plus an action, and returns; a worker does the
+// signing, the handshake and the read, and the answer is *taken* rather than
+// read twice -- the same shape as `board_http.c`, and for the same reason: this
+// is called from a frame loop and from an HTTP handler, and neither can wait
+// three seconds for a TLS handshake.
 //
 // -----------------------------------------------------------------------------
 // Why this is not `board_http.c`
 // -----------------------------------------------------------------------------
 // The other client is a *fetch*: a URL goes in and bytes come out, which is what
 // both its callers want (a weather page, a firmware image). This one is not --
-// a Tencent Cloud call is a POST with a JSON body and five headers of its own,
-// and the board's `HttpBackend` is deliberately GET-only (`pomelo-hal`'s
-// `traits/http.rs` says so out loud). Widening that trait for one caller would
-// put a body and a header list in a parameter every implementation has to look
-// at to find out it is empty, so this file owns its own `esp_http_client`
-// instead, and the Rust side reaches it through `hal_cloud_*` rather than
-// through `board.http()`.
+// a cloud call is a POST with a body and headers of its own, and the board's
+// `HttpBackend` is deliberately GET-only (`pomelo-hal`'s `traits/http.rs` says
+// so out loud). Widening that trait for one caller would put a body and a header
+// list in a parameter every implementation has to look at to find out it is
+// empty, so this file owns its own `esp_http_client` instead, and the Rust side
+// reaches it through `hal_cloud_*` rather than through `board.http()`.
 //
 // -----------------------------------------------------------------------------
-// The signing (TC3-HMAC-SHA256)
+// Two signers, one shape of answer
 // -----------------------------------------------------------------------------
-// Tencent's scheme, and the whole of it: hash the body, build a canonical
-// request out of the method, the path, the query, the two headers that matter
-// and that body hash, then sign that with a key derived from the SecretKey
-// through four HMACs. The result is an `Authorization` header and no session:
-// there is nothing to keep, nothing to refresh and nothing to log in to, which
-// is the reason a board with four sockets can do this at all.
+// Tencent's scheme is TC3-HMAC-SHA256: hash the body, build a canonical request
+// out of the method, the path, the query, the two headers that matter and that
+// body hash, then sign it with a key derived from the SecretKey through four
+// HMACs. The result is an `Authorization` header and no session: there is
+// nothing to keep, nothing to refresh and nothing to log in to, which is the
+// reason a board with four sockets can do this at all.
 //
-// It is done here, in C, against mbedTLS (both SHA-256 and HMAC are already on
-// for the TLS stack, and the chip has an SHA accelerator behind them). The
-// alternative was a pure-Rust signer -- better for testing, since Tencent
-// publishes worked examples to pin it against -- but it would have meant a new
+// Alibaba's is the older RPC scheme: every parameter in one canonical query,
+// percent-encoded once more for the string to sign, HMAC-SHA1 with a signing key
+// that is the SecretKey plus `&`, base64 at the end, and the signature riding in
+// the form body. Its endpoint is per region -- `ecs.<region>.aliyuncs.com` --
+// because there the region is part of the host and not only of the form, which
+// is why the session is reopened when the host changes.
+//
+// Both are done here, in C, against mbedTLS (SHA-256, SHA-1 and HMAC are already
+// on for the TLS stack, and the chip has an accelerator behind them). The
+// alternative was a pure-Rust signer -- better for testing, since both clouds
+// publish worked examples to pin it against -- but it would have meant a new
 // crate in the image and a new trait, a new sim and a new FFI surface for
 // something only two callers in this tree ever ask for. mbedTLS was already
 // paid for.
 //
-// Two things have to be true before this works at all, and both are refused
+// AWS is the third company and has no signer yet: its key has a place in the
+// file, `vendor_is_wired_up` says no, and a request for it comes back
+// `cloud_unsupported` before a socket is opened. Keeping the name and dropping
+// the call is what lets a page say "not yet" rather than "wrong".
+//
+// Two things have to be true before any of this works, and both are refused
 // here rather than dressed up as "connection failed":
 //
 //   * The board must be on a network. Signing needs no network; sending does.
-//   * The clock must have been set. The signature carries a timestamp and
-//     Tencent's server refuses one more than five minutes out of step, so a
-//     board reading 1970 gets `AuthFailure.SignatureExpire` on every call.
-//     `hal_time_sync()` is what fixes that.
+//   * The clock must have been set. Both signatures carry a timestamp and both
+//     servers refuse one minutes out of step, so a board reading 1970 gets
+//     `AuthFailure.SignatureExpire` from Tencent and `InvalidTimeStamp.Expired`
+//     from Alibaba on every call. `hal_time_sync()` is what fixes that.
 //
 // -----------------------------------------------------------------------------
 // The credentials
 // -----------------------------------------------------------------------------
 // One plaintext TOML file, `/internal/AppData/CLOUD/cloud.conf`, with a section
-// per provider:
+// per vendor and not per product: one Tencent key reaches CVM and Lighthouse
+// both.
 //
-//     [cvm]
+//     [tencent]
 //     region = "ap-guangzhou"
 //     secret_id = "AKID..."
 //     secret_key = "..."
+//
+//     [aliyun]
+//     ...
+//
+// A `[cvm]` section written by an older firmware is still read as Tencent's key
+// and is never written again: a board flashed before this file knew about
+// vendors should keep working without somebody retyping a key on a phone.
 //
 // Plaintext, like the Wi-Fi password and the NAS logins, and for the same
 // reason: this board has no secure element and no key store, and a key that has
@@ -87,11 +107,16 @@
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+/* SHA-1 for Alibaba's HMAC, and base64 for the signature it becomes. Tencent's scheme needs neither
+ * -- it signs hex -- which is the one structural difference between the two authorisers. */
+#include "mbedtls/base64.h"
 #include "mbedtls/md.h"
 
 #include "board_hal.h"
@@ -102,11 +127,21 @@ static const char *TAG = "board_cloud";
 static const char *CLOUD_CONF_PATH = "/internal/AppData/CLOUD/cloud.conf";
 
 /** How long the whole call may take: resolve, connect, handshake, POST, answer. The handshake is
- * most of it -- Tencent's API is one host and a small JSON document. */
-#define CLOUD_TIMEOUT_MS 15000
+ * most of it -- both APIs are one host and a small JSON document.
+ *
+ * Three seconds and neither fifteen nor eight nor five: a scan makes thirty-odd of these, and
+ * `DescribeRegions` lists the parts of the world the product is sold in, not the parts this network
+ * can reach. A data centre behind a route that black-holes packets spends the whole timeout, and
+ * with six of them in a scan of thirty-three that is the list arriving twenty seconds late. Every
+ * region that answers at all answers in under a second and a half. */
+#define CLOUD_TIMEOUT_MS 3000
 
-/** The worker's stack. The deep part is the handshake; see `board_http.c`, which pays the same. */
-#define CLOUD_TASK_STACK 8192
+/** The worker's stack. The deep part is the handshake; see `board_http.c`, which pays the same.
+ *
+ * Ten kilobytes and not eight: an Alibaba request is signed on this stack and its canonical query,
+ * its percent-encoded copy and the form body are three buffers deep before the socket sees any of
+ * it. */
+#define CLOUD_TASK_STACK 10240
 
 /** The socket's read buffer, and the one headers and the request body are written through. */
 #define CLOUD_IO_CHUNK 2048
@@ -146,30 +181,189 @@ static const char *CLOUD_CONF_PATH = "/internal/AppData/CLOUD/cloud.conf";
  * and no rows, not a failure.
  */
 static const char *const CLOUD_REGIONS_CVM[] = {
+    /* Mumbai, Frankfurt and Moscow answer `UnsupportedRegion` for this account's site: the region
+     * exists on the other site, and asking costs a round trip that can only ever be empty. */
     "ap-beijing",      "ap-chengdu",  "ap-chongqing",   "ap-guangzhou", "ap-hongkong",
     "ap-jakarta",      "ap-nanjing",  "ap-seoul",       "ap-shanghai",  "ap-singapore",
-    "ap-tokyo",        "ap-bangkok",  "ap-mumbai",      "ap-taipei",    "ap-shenzhen",
-    "na-ashburn",      "na-siliconvalley", "na-toronto", "eu-frankfurt", "eu-moscow",
-    "sa-saopaulo",
+    "ap-tokyo",        "ap-bangkok",  "ap-taipei",      "ap-shenzhen",  "na-ashburn",
+    "na-siliconvalley", "na-toronto", "sa-saopaulo",
 };
 
 static const char *const CLOUD_REGIONS_LIGHTHOUSE[] = {
-    "ap-beijing",  "ap-chengdu", "ap-chongqing", "ap-guangzhou", "ap-hongkong",
-    "ap-jakarta",  "ap-nanjing", "ap-seoul",     "ap-shanghai",  "ap-singapore",
-    "ap-tokyo",    "ap-bangkok", "ap-frankfurt", "ap-moscow",    "ap-siliconvalley",
-    "ap-saopaulo",
+    /* Lighthouse's own region list, which is shorter than CVM's: Frankfurt, Moscow, Silicon Valley
+     * and São Paulo answer `InvalidParameterValue` -- the product is not sold there. Asking anyway
+     * is four wasted round trips on every scan. */
+    "ap-beijing", "ap-chengdu", "ap-chongqing", "ap-guangzhou", "ap-hongkong",
+    "ap-jakarta", "ap-nanjing",  "ap-seoul",     "ap-shanghai",  "ap-singapore",
+    "ap-tokyo",   "ap-bangkok",
 };
 
-/** The regions of one provider, and how many. */
+/**
+ * Alibaba's regions, which spell the same places a third way.
+ *
+ * `cn-hangzhou` and `ap-southeast-1` are theirs; the list is the one in Alibaba's own region
+ * documentation, mainlands first because that is where most accounts are. A region the account has
+ * not opened answers `InvalidRegionId` or `Forbidden.RAM`-adjacent codes and is skipped, exactly as
+ * an unsold Tencent data centre is.
+ */
+static const char *const CLOUD_REGIONS_ECS[] = {
+    "cn-hangzhou",     "cn-shanghai",    "cn-beijing",      "cn-shenzhen",  "cn-guangzhou",
+    "cn-chengdu",      "cn-qingdao",     "cn-zhangjiakou",  "cn-huhehaote", "cn-wulanchabu",
+    "cn-heyuan",       "cn-hongkong",    "ap-southeast-1",  "ap-southeast-2",
+    "ap-southeast-3",  "ap-southeast-5", "ap-northeast-1",  "ap-northeast-2",
+    "ap-south-1",      "us-west-1",      "us-east-1",       "eu-central-1", "eu-west-1",
+    "me-east-1",
+};
+
+/** The regions of one product, and how many. */
 static void cloud_regions(int32_t provider, const char *const **out_list, size_t *out_count)
 {
-    if (provider == HAL_CLOUD_LIGHTHOUSE) {
+    switch (provider) {
+    case HAL_CLOUD_LIGHTHOUSE:
         *out_list  = CLOUD_REGIONS_LIGHTHOUSE;
         *out_count = sizeof CLOUD_REGIONS_LIGHTHOUSE / sizeof CLOUD_REGIONS_LIGHTHOUSE[0];
-    } else {
+        break;
+    case HAL_CLOUD_ECS:
+        *out_list  = CLOUD_REGIONS_ECS;
+        *out_count = sizeof CLOUD_REGIONS_ECS / sizeof CLOUD_REGIONS_ECS[0];
+        break;
+    default:
         *out_list  = CLOUD_REGIONS_CVM;
         *out_count = sizeof CLOUD_REGIONS_CVM / sizeof CLOUD_REGIONS_CVM[0];
+        break;
     }
+}
+
+/** What one `DescribeRegions` may name: Alibaba sells thirty-two, Tencent thirty-eight across its
+ * two products, and both lists grow. Static because a region list does not change under a board
+ * that is up, and asking for it once is one round trip instead of however many pages are opened. */
+#define CLOUD_REGIONS_MAX 40
+
+/** One product's regions, as the API itself named them. */
+typedef struct {
+    char names[CLOUD_REGIONS_MAX][HAL_CLOUD_REGION_MAX];
+    size_t count;
+    /** Asked for and answered; `count` may be zero, which is a product that named nothing. */
+    bool tried;
+} cloud_region_cache_t;
+
+static cloud_region_cache_t s_regions[HAL_CLOUD_EC2 + 1];
+
+/**
+ * The names under one key of a region answer, in the order the API listed them.
+ *
+ * Both shapes are the same text with a different key: Tencent's `"Region":"ap-beijing"` and
+ * Alibaba's `"RegionId":"cn-hangzhou"`. Lighthouse prints its JSON with a space after the colon --
+ * `"Region": "ap-beijing"` -- so the key stops at the colon and the whitespace is walked over;
+ * CVM's answer is compact and the walk is zero steps.
+ *
+ * A value is taken only when it is spelled like a region -- letters, digits and dashes -- which is
+ * what keeps `"RegionState":"AVAILABLE"` and `"RegionEndpoint":"ecs.cn-hangzhou.aliyuncs.com"` from
+ * being read as names, and what keeps a page from being handed a string that is not an address the
+ * API would accept back.
+ */
+static size_t collect_region_names(const char *body, const char *key,
+                                   char out[][HAL_CLOUD_REGION_MAX], size_t max)
+{
+    size_t count = 0;
+    const char *at = body;
+
+    while (at != NULL && count < max) {
+        const char *found = strstr(at, key);
+        if (found == NULL) {
+            break;
+        }
+
+        const char *value = found + strlen(key);
+        while (*value == ' ') {
+            value++;
+        }
+        if (*value != '"') {
+            at = value + 1;
+            continue;
+        }
+        value++;
+
+        const char *end = value;
+
+        while (*end != '\0' && *end != '"' && (size_t)(end - value) < HAL_CLOUD_REGION_MAX - 1) {
+            end++;
+        }
+
+        /* Whatever came next, the walk moves past it: a value that is too long or not a string is
+         * one entry to skip, not the end of the array. */
+        at = (end > value) ? end : value + 1;
+
+        if (*end != '"' || end == value) {
+            continue;
+        }
+
+        bool usable = true;
+        for (const char *c = value; c < end; c++) {
+            const bool plain = (*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') ||
+                               (*c >= '0' && *c <= '9') || *c == '-';
+            if (!plain) {
+                usable = false;
+                break;
+            }
+        }
+
+        if (!usable) {
+            continue;
+        }
+
+        const size_t length = (size_t)(end - value);
+        memcpy(out[count], value, length);
+        out[count][length] = '\0';
+        count++;
+    }
+
+    return count;
+}
+
+/** Which company sells a product. The one mapping in this file: a key belongs to a vendor, a
+ * command names a product, and this is how the second is found in the first's table. */
+static int32_t product_vendor(int32_t provider)
+{
+    switch (provider) {
+    case HAL_CLOUD_CVM:
+    case HAL_CLOUD_LIGHTHOUSE:
+        return HAL_CLOUD_VENDOR_TENCENT;
+    case HAL_CLOUD_ECS:
+        return HAL_CLOUD_VENDOR_ALIYUN;
+    case HAL_CLOUD_EC2:
+        return HAL_CLOUD_VENDOR_AWS;
+    default:
+        return -1;
+    }
+}
+
+/** The products one vendor sells, which is what a list of that vendor walks. Tencent is the only
+ * vendor with two, and that is the whole reason a list is not one API call. */
+static size_t vendor_products(int32_t vendor, int32_t *out)
+{
+    switch (vendor) {
+    case HAL_CLOUD_VENDOR_TENCENT:
+        out[0] = HAL_CLOUD_CVM;
+        out[1] = HAL_CLOUD_LIGHTHOUSE;
+        return 2;
+    case HAL_CLOUD_VENDOR_ALIYUN:
+        out[0] = HAL_CLOUD_ECS;
+        return 1;
+    case HAL_CLOUD_VENDOR_AWS:
+        out[0] = HAL_CLOUD_EC2;
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/** Whether this vendor has an API client in this build. AWS is a name in the list and a key on
+ * file until its signature is written; saying so is better than an empty list that looks like an
+ * account with no machines. */
+static bool vendor_is_wired_up(int32_t vendor)
+{
+    return vendor == HAL_CLOUD_VENDOR_TENCENT || vendor == HAL_CLOUD_VENDOR_ALIYUN;
 }
 
 /** How long a whole merged list may scan for. Two products over every region is a minute of calls on
@@ -220,13 +414,13 @@ static char *s_answer = NULL;
 static char *s_response = NULL;
 
 /** What the worker is doing. Written under the lock, read by the worker while `busy`. */
-static int32_t s_provider = HAL_CLOUD_CVM;
+static int32_t s_target   = HAL_CLOUD_VENDOR_TENCENT;
 static int32_t s_action   = HAL_CLOUD_ACTION_LIST;
 static char    s_region[HAL_CLOUD_REGION_MAX];
 static char    s_instance[HAL_CLOUD_INSTANCE_MAX];
 
-/** The two keys, as loaded from the file. */
-static cloud_account_t s_accounts[HAL_CLOUD_PROVIDER_COUNT];
+/** The keys, one per vendor, as loaded from the file. */
+static cloud_account_t s_accounts[HAL_CLOUD_VENDOR_COUNT];
 
 /** Whether the table above has been read from the file yet. Loading is deferred to the first call
  * that needs it, because the filesystem is not up when this file is compiled and may not be up when
@@ -442,6 +636,242 @@ out:
     free(to_sign);
 
     return ok;
+}
+
+// =============================================================================
+// The other signature: Alibaba Cloud's, which is RPC style
+// -----------------------------------------------------------------------------
+// Alibaba does not sign a header, it signs the request *parameters*: everything goes in the body as
+// a form, the parameters are sorted by name, percent-encoded the RFC 3986 way, joined with `&`, and
+// that string -- preceded by `POST&%2F&` -- is HMAC-SHA1'd with `<secret>&` as the key and base64'd.
+// The signature then travels as one more form field called `Signature`.
+//
+// It is a different shape from TC3 above and there is no way to share code between them: one signs
+// a canonical request, the other signs a canonical query. What they do share is the secret key, the
+// clock and the notion that a wrong signature fails identically to a wrong key.
+// =============================================================================
+
+/** The ECS API version, which is part of every request and of nothing else. */
+#define ALIYUN_ECS_VERSION "2014-05-26"
+
+/** The action that asks a product where it is sold. It never leaves this file -- no page sends it,
+ * nothing outside the cloud code reads it -- so it has a number of its own rather than an entry in
+ * the public header's action list. */
+#define CLOUD_ACTION_REGIONS 4
+
+/** The most parameters one Alibaba call may carry. The widest is a describe: eleven. */
+#define ALIYUN_PARAM_MAX 12
+
+/** One form field, before it is encoded. The value is copied because half of them are built. */
+typedef struct {
+    const char *key;
+    char value[96];
+} aliyun_param_t;
+
+/** The API's own name for what was asked. ECS spells a power command in the singular -- one machine
+ * per call -- where CVM takes a list of ids. */
+static const char *aliyun_action_name(int32_t action)
+{
+    switch (action) {
+    case HAL_CLOUD_ACTION_START:   return "StartInstance";
+    case HAL_CLOUD_ACTION_STOP:    return "StopInstance";
+    case HAL_CLOUD_ACTION_REBOOT:  return "RebootInstance";
+    case CLOUD_ACTION_REGIONS:     return "DescribeRegions";
+    default:                       return "DescribeInstances";
+    }
+}
+
+/**
+ * RFC 3986 percent-encoding, and not `curl_easy_escape`'s: Alibaba signs the encoded text, so the
+ * set of characters left alone is part of the protocol. `~` stays, space becomes `%20` and not `+`,
+ * and the hex is upper case.
+ */
+static bool percent_encode(const char *in, char *out, size_t capacity)
+{
+    static const char HEX[] = "0123456789ABCDEF";
+    size_t used = 0;
+
+    for (const unsigned char *at = (const unsigned char *)in; *at != '\0'; at++) {
+        const bool plain = (*at >= 'A' && *at <= 'Z') || (*at >= 'a' && *at <= 'z') ||
+                           (*at >= '0' && *at <= '9') || *at == '-' || *at == '_' ||
+                           *at == '.' || *at == '~';
+
+        if (plain) {
+            if (used + 2 > capacity) {
+                return false;
+            }
+            out[used++] = (char)*at;
+        } else {
+            if (used + 4 > capacity) {
+                return false;
+            }
+            out[used++] = '%';
+            out[used++] = HEX[*at >> 4];
+            out[used++] = HEX[*at & 0x0F];
+        }
+    }
+
+    out[used] = '\0';
+
+    return true;
+}
+
+/** One field, if there is room for it. */
+static void aliyun_param_set(aliyun_param_t *params, size_t *count, const char *key,
+                             const char *value)
+{
+    if (*count >= ALIYUN_PARAM_MAX) {
+        return;
+    }
+
+    params[*count].key = key;
+    snprintf(params[*count].value, sizeof params[*count].value, "%s", value);
+    (*count)++;
+}
+
+/** Sorted by name, which is what the canonical query means. Insertion sort: twelve fields at most,
+ * and the alternative is a comparator the C library would have to be handed anyway. */
+static void aliyun_sort(aliyun_param_t *params, size_t count)
+{
+    for (size_t i = 1; i < count; i++) {
+        aliyun_param_t moving = params[i];
+        size_t at = i;
+
+        while (at > 0 && strcmp(params[at - 1].key, moving.key) > 0) {
+            params[at] = params[at - 1];
+            at--;
+        }
+
+        params[at] = moving;
+    }
+}
+
+/**
+ * The form body of one Alibaba request, signature included.
+ *
+ * The nonce is what makes two identical calls two different signed strings: Alibaba refuses a
+ * `SignatureNonce` it has seen before, and the board's clock is only good to the second.
+ */
+static bool aliyun_sign_body(const cloud_account_t *account, int64_t timestamp, int32_t action,
+                             const char *region, const char *instance, char *out, size_t capacity)
+{
+    aliyun_param_t params[ALIYUN_PARAM_MAX];
+    size_t count = 0;
+
+    const time_t stamp = (time_t)timestamp;
+    struct tm utc;
+
+    if (gmtime_r(&stamp, &utc) == NULL) {
+        return false;
+    }
+
+    char when[24];
+    if (strftime(when, sizeof when, "%Y-%m-%dT%H:%M:%SZ", &utc) == 0) {
+        return false;
+    }
+
+    char nonce[40];
+    snprintf(nonce, sizeof nonce, "%08lx%08lx", (unsigned long)esp_random(),
+             (unsigned long)esp_random());
+
+    aliyun_param_set(params, &count, "AccessKeyId", account->secret_id);
+    aliyun_param_set(params, &count, "Action", aliyun_action_name(action));
+    aliyun_param_set(params, &count, "Format", "JSON");
+    aliyun_param_set(params, &count, "RegionId", region);
+
+    if (action == HAL_CLOUD_ACTION_LIST) {
+        char size[8];
+        snprintf(size, sizeof size, "%d", CLOUD_MAX_INSTANCES);
+        aliyun_param_set(params, &count, "PageNumber", "1");
+        aliyun_param_set(params, &count, "PageSize", size);
+    } else if (action != CLOUD_ACTION_REGIONS) {
+        /* `DescribeRegions` takes neither: `RegionId`, set above, is the endpoint's hint and not a
+         * filter, and a page of regions would be a page of names this file then scans anyway. */
+        aliyun_param_set(params, &count, "InstanceId", instance);
+    }
+
+    aliyun_param_set(params, &count, "SignatureMethod", "HMAC-SHA1");
+    aliyun_param_set(params, &count, "SignatureNonce", nonce);
+    aliyun_param_set(params, &count, "SignatureVersion", "1.0");
+    aliyun_param_set(params, &count, "Timestamp", when);
+    aliyun_param_set(params, &count, "Version", ALIYUN_ECS_VERSION);
+
+    aliyun_sort(params, count);
+
+    /* The canonical query: both halves encoded, in that order. */
+    char canonical[640];
+    size_t used = 0;
+
+    for (size_t i = 0; i < count; i++) {
+        char key[32];
+        char value[400];
+
+        if (!percent_encode(params[i].key, key, sizeof key) ||
+            !percent_encode(params[i].value, value, sizeof value)) {
+            return false;
+        }
+
+        const int made = snprintf(canonical + used, sizeof canonical - used, "%s%s=%s",
+                                  i > 0 ? "&" : "", key, value);
+        if (made < 0 || (size_t)made >= sizeof canonical - used) {
+            return false;
+        }
+
+        used += (size_t)made;
+    }
+
+    /* `POST` and `/` are constants: every call is a form POST to the endpoint's root. */
+    char encoded[700];
+    if (!percent_encode(canonical, encoded, sizeof encoded)) {
+        return false;
+    }
+
+    char to_sign[760];
+    const int signed_length = snprintf(to_sign, sizeof to_sign, "POST&%%2F&%s", encoded);
+    if (signed_length < 0 || (size_t)signed_length >= sizeof to_sign) {
+        return false;
+    }
+
+    /* The key is the secret *with an ampersand*, which is the whole reason a secret ending in `&`
+     * would be a problem: it is the separator between the key and nothing. */
+    char signing_key[HAL_CLOUD_SECRET_KEY_MAX + 2];
+    const int key_length = snprintf(signing_key, sizeof signing_key, "%s&", account->secret_key);
+    if (key_length < 0 || (size_t)key_length >= sizeof signing_key) {
+        return false;
+    }
+
+    uint8_t digest[20];
+    const mbedtls_md_info_t *info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA1);
+    if (info == NULL ||
+        mbedtls_md_hmac(info, (const unsigned char *)signing_key, (size_t)key_length,
+                        (const unsigned char *)to_sign, (size_t)signed_length, digest) != 0) {
+        return false;
+    }
+
+    unsigned char base64[32];
+    size_t base64_length = 0;
+    if (mbedtls_base64_encode(base64, sizeof base64, &base64_length, digest, sizeof digest) != 0) {
+        return false;
+    }
+    base64[base64_length] = '\0';
+
+    char signature[64];
+    if (!percent_encode((const char *)base64, signature, sizeof signature)) {
+        return false;
+    }
+
+    const int made = snprintf(out, capacity, "%s&Signature=%s", canonical, signature);
+    if (made < 0 || (size_t)made >= capacity) {
+        return false;
+    }
+
+    return true;
+}
+
+/** Whether this product is asked the Alibaba way. The one branch on vendor inside the call path. */
+static bool product_is_aliyun(int32_t provider)
+{
+    return provider == HAL_CLOUD_ECS;
 }
 
 // =============================================================================
@@ -727,14 +1157,27 @@ static void w_string(writer_t *w, const char *text)
     w_printf(w, "\"");
 }
 
-/** The provider's name as everything outside this file spells it: the page, the file, the log. */
+/** A product's name as everything outside this file spells it: the page, the row's `kind`, the log.
+ * These four words are the wire vocabulary the Rust side and `web_page.html` both parse, so they do
+ * not change without both of those changing too. */
 static const char *provider_name(int32_t provider)
 {
-    if (provider == HAL_CLOUD_ALL) {
-        return "all";
+    switch (provider) {
+    case HAL_CLOUD_LIGHTHOUSE: return "lighthouse";
+    case HAL_CLOUD_ECS:        return "ecs";
+    case HAL_CLOUD_EC2:        return "ec2";
+    default:                   return "cvm";
     }
+}
 
-    return (provider == HAL_CLOUD_LIGHTHOUSE) ? "lighthouse" : "cvm";
+/** A vendor's name, as the list answer and the key file spell it. */
+static const char *vendor_name(int32_t vendor)
+{
+    switch (vendor) {
+    case HAL_CLOUD_VENDOR_ALIYUN: return "aliyun";
+    case HAL_CLOUD_VENDOR_AWS:    return "aws";
+    default:                      return "tencent";
+    }
 }
 
 /** The action as everything outside this file spells it. */
@@ -789,6 +1232,7 @@ static void answer_fault(int32_t fault)
         [HAL_CLOUD_FAULT_HTTP]        = "cloud_http",
         [HAL_CLOUD_FAULT_API]         = "cloud_api",
         [HAL_CLOUD_FAULT_STORAGE]     = "cloud_storage",
+        [HAL_CLOUD_FAULT_UNSUPPORTED] = "cloud_unsupported",
     };
 
     const char *code = "cloud_failed";
@@ -828,8 +1272,34 @@ static bool body_is_refusal(const char *response, char *code, size_t code_size, 
                             size_t message_size)
 {
     const char *error = json_value(response, "Error");
+
     if (error == NULL || *error != '{') {
-        return false;
+        /* Alibaba has no `Error` object: a refusal is the whole body --
+         * `{"RequestId":"…","HostId":"…","Code":"InvalidAccessKeyId.NotFound","Message":"…"}` --
+         * so the code is looked for at the top instead. A successful answer never has both a
+         * RequestId and a Code, which is what keeps a describe from being read as a refusal. */
+        const char *top_code = json_value(response, "Code");
+
+        if (top_code == NULL || *top_code != '"' || json_value(response, "RequestId") == NULL) {
+            return false;
+        }
+
+        code[0] = '\0';
+        message[0] = '\0';
+
+        json_string(top_code, code, code_size);
+        json_string(json_value(response, "Message"), message, message_size);
+
+        if (code[0] == '\0') {
+            snprintf(code, code_size, "UnknownError");
+        }
+        if (message[0] == '\0') {
+            snprintf(message, message_size, "接口返回了一个错误，但没有说是什么");
+        }
+
+        ESP_LOGW(TAG, "the API refused: %s -- %s", code, message);
+
+        return true;
     }
 
     code[0] = '\0';
@@ -862,10 +1332,41 @@ static bool body_is_refusal(const char *response, char *code, size_t code_size, 
  * Answers false when the body has no `InstanceSet` at all: that is not "no instances", it is an
  * answer this file cannot read, and a page needs to hear the difference.
  */
+/** Alibaba's address, which is an object around either a string or a one-element array. */
+static const char *aliyun_ip_in(const char *field)
+{
+    if (field == NULL || *field != '{') {
+        return NULL;
+    }
+
+    const char *ip = json_value(field, "IpAddress");
+    if (ip == NULL) {
+        return NULL;
+    }
+
+    if (*ip == '[') {
+        const char *first = json_first_string(ip);
+        /* `"IpAddress":[]` is an empty list, not an address: without this the first empty field
+         * would answer "" and the next one -- the private address that is actually there -- would
+         * never be read. */
+        return (first != NULL && first[1] != '"') ? first : NULL;
+    }
+
+    return (*ip == '"' && ip[1] != '"') ? ip : NULL;
+}
+
 static bool append_instances(writer_t *w, const char *response, int32_t provider,
                              const char *region, int *listed)
 {
     const char *set = json_value(response, "InstanceSet");
+
+    if (set == NULL || *set != '[') {
+        /* Alibaba's array is one level deeper: `{"Instances":{"Instance":[…]}}`. Two APIs, two
+         * spellings of the same document, and both end up as rows with the same fields. */
+        const char *group = json_value(response, "Instances");
+        set = (group != NULL && *group == '{') ? json_value(group, "Instance") : NULL;
+    }
+
     if (set == NULL || *set != '[') {
         return false;
     }
@@ -907,6 +1408,10 @@ static bool append_instances(writer_t *w, const char *response, int32_t provider
 
         json_string(json_value(at, "InstanceName"), name, sizeof name);
         json_string(json_value(at, "InstanceState"), state, sizeof state);
+        if (state[0] == '\0') {
+            /* Alibaba spells the same field `Status`, without the `Instance` prefix. */
+            json_string(json_value(at, "Status"), state, sizeof state);
+        }
 
         /* CVM's public addresses first, then Lighthouse's, then the private ones: an instance with
          * no public address still has one worth showing, and an empty string is what a row shows
@@ -920,6 +1425,17 @@ static bool append_instances(writer_t *w, const char *response, int32_t provider
         }
         if (address == NULL) {
             address = json_first_string(json_value(at, "PrivateAddresses"));
+        }
+        if (address == NULL) {
+            /* Alibaba: an EIP is its own object, the VPC public address another, and the inner one
+             * a third. In that order, because an address somebody can reach beats one they cannot. */
+            address = aliyun_ip_in(json_value(at, "EipAddress"));
+        }
+        if (address == NULL) {
+            address = aliyun_ip_in(json_value(at, "PublicIpAddress"));
+        }
+        if (address == NULL) {
+            address = aliyun_ip_in(json_value(at, "InnerIpAddress"));
         }
         if (address != NULL) {
             json_string(address, ip, sizeof ip);
@@ -950,34 +1466,6 @@ static bool append_instances(writer_t *w, const char *response, int32_t provider
     return true;
 }
 
-/** The list of one provider, as a page draws it. */
-static void render_instances(const char *response, int32_t provider, const char *region)
-{
-    writer_t w = { .out = s_answer, .capacity = CLOUD_ANSWER_MAX };
-    int listed = 0;
-
-    w_printf(&w, "{\"ok\":1,\"provider\":\"%s\",\"region\":", provider_name(provider));
-    w_string(&w, region);
-    w_printf(&w, ",\"instances\":[");
-
-    if (!append_instances(&w, response, provider, region, &listed)) {
-        answer_api_error("MalformedAnswer", "接口没有返回实例列表");
-        return;
-    }
-
-    w_printf(&w, "],\"count\":%d}", listed);
-
-    if (w.over) {
-        /* Not "some of the instances": a page that drew nine of ten would be a page somebody acts on
-         * with the wrong picture of what they own. */
-        ESP_LOGW(TAG, "the answer for %d instances did not fit in %d bytes", listed, CLOUD_ANSWER_MAX);
-        answer_fault(HAL_CLOUD_FAULT_STORAGE);
-        return;
-    }
-
-    settle(HAL_CLOUD_FAULT_NONE, w.used);
-}
-
 /** The answer to a start, a stop or a reboot. There is no instance to draw -- the page asks for the
  * list again once the machine has had a moment -- so this is the request ID and nothing else. */
 static void render_accepted(const char *response, int32_t provider, int32_t action)
@@ -988,7 +1476,7 @@ static void render_accepted(const char *response, int32_t provider, int32_t acti
 
     writer_t w = { .out = s_answer, .capacity = CLOUD_ANSWER_MAX };
 
-    w_printf(&w, "{\"ok\":1,\"provider\":\"%s\",\"action\":\"%s\",\"request_id\":",
+    w_printf(&w, "{\"ok\":1,\"kind\":\"%s\",\"action\":\"%s\",\"request_id\":",
              provider_name(provider), action_name(action));
     w_string(&w, request_id);
     w_printf(&w, "}");
@@ -1014,8 +1502,13 @@ static void render_accepted(const char *response, int32_t provider, int32_t acti
 // lines, and nothing else -- the whole of the grammar it will accept.
 // =============================================================================
 
-/** The two section names, in the order they are looked for and written. */
-static const char *const CLOUD_SECTIONS[HAL_CLOUD_PROVIDER_COUNT] = { "cvm", "lighthouse" };
+/** The section names, in the order they are looked for and written. One per vendor, because a key
+ * belongs to a company and not to a product. */
+static const char *const CLOUD_SECTIONS[HAL_CLOUD_VENDOR_COUNT] = { "tencent", "aliyun", "aws" };
+
+/** What the file's sections were called before vendors existed: two per Tencent product, holding the
+ * same key. Read only -- the first save writes `[tencent]` and the old names are gone. */
+#define CLOUD_LEGACY_TENCENT_SECTION "cvm"
 
 /**
  * The span of one `[name]` section, `out_start` at the first character after the header's newline.
@@ -1114,15 +1607,27 @@ static esp_err_t cloud_load(void)
 
     memset(s_accounts, 0, sizeof s_accounts);
 
-    for (int32_t provider = 0; provider < HAL_CLOUD_PROVIDER_COUNT; provider++) {
+    for (int32_t vendor = 0; vendor < HAL_CLOUD_VENDOR_COUNT; vendor++) {
         const char *start = NULL;
         const char *end = NULL;
 
-        if (!toml_section(text, CLOUD_SECTIONS[provider], &start, &end)) {
-            continue;
+        if (!toml_section(text, CLOUD_SECTIONS[vendor], &start, &end)) {
+            /* A board that was set up before vendors existed has `[cvm]` (and `[lighthouse]`)
+             * instead. Reading one of them is what keeps a key somebody already typed from being
+             * silently forgotten by an upgrade. */
+            if (vendor == HAL_CLOUD_VENDOR_TENCENT) {
+                if (!toml_section(text, CLOUD_LEGACY_TENCENT_SECTION, &start, &end)) {
+                    continue;
+                }
+
+                ESP_LOGI(TAG, "the key is in the old [%s] section, reading it as [%s]",
+                         CLOUD_LEGACY_TENCENT_SECTION, CLOUD_SECTIONS[vendor]);
+            } else {
+                continue;
+            }
         }
 
-        cloud_account_t *account = &s_accounts[provider];
+        cloud_account_t *account = &s_accounts[vendor];
 
         if (!toml_string(start, end, "secret_id", account->secret_id, sizeof account->secret_id)) {
             continue;
@@ -1162,8 +1667,8 @@ static esp_err_t cloud_store(void)
     char text[HAL_CLOUD_CONF_MAX];
     size_t used = 0;
 
-    for (int32_t provider = 0; provider < HAL_CLOUD_PROVIDER_COUNT; provider++) {
-        const cloud_account_t *account = &s_accounts[provider];
+    for (int32_t vendor = 0; vendor < HAL_CLOUD_VENDOR_COUNT; vendor++) {
+        const cloud_account_t *account = &s_accounts[vendor];
 
         if (!account->used) {
             continue;
@@ -1171,7 +1676,7 @@ static esp_err_t cloud_store(void)
 
         const int made = snprintf(text + used, sizeof text - used,
                                   "[%s]\nregion = \"%s\"\nsecret_id = \"%s\"\nsecret_key = \"%s\"\n\n",
-                                  CLOUD_SECTIONS[provider], account->region, account->secret_id,
+                                  CLOUD_SECTIONS[vendor], account->region, account->secret_id,
                                   account->secret_key);
 
         if (made < 0 || (size_t)made >= sizeof text - used) {
@@ -1250,34 +1755,54 @@ static bool identifier_ok(const char *text, size_t capacity)
     return true;
 }
 
-/** The endpoint, and the three constants that go with it: the API family in the signature, and the
- * version in the header. They are a property of the provider and not of the call. */
-static void cloud_endpoint(int32_t provider, const char **out_host, const char **out_service,
-                           const char **out_version)
+/**
+ * The host one call goes to.
+ *
+ * Tencent keeps the region in `X-TC-Region`, so every region of one product is the same host and
+ * one connection serves the whole scan. Alibaba puts the region *in the name*
+ * (`ecs.cn-hangzhou.aliyuncs.com`), so its scan opens one connection per region -- which is the
+ * single reason a session has to be able to move.
+ */
+static void cloud_host(int32_t provider, const char *region, char *out, size_t capacity)
 {
-    if (provider == HAL_CLOUD_LIGHTHOUSE) {
-        *out_host = "lighthouse.tencentcloudapi.com";
-        *out_service = "lighthouse";
-        *out_version = "2020-03-24";
-    } else {
-        *out_host = "cvm.tencentcloudapi.com";
-        *out_service = "cvm";
-        *out_version = "2017-03-12";
+    if (product_is_aliyun(provider)) {
+        snprintf(out, capacity, "ecs.%s.aliyuncs.com", region);
+        return;
+    }
+
+    snprintf(out, capacity, "%s.tencentcloudapi.com",
+             provider == HAL_CLOUD_LIGHTHOUSE ? "lighthouse" : "cvm");
+}
+
+/** The API family, which is part of Tencent's signature and of nothing else. */
+static const char *cloud_service(int32_t provider)
+{
+    return (provider == HAL_CLOUD_LIGHTHOUSE) ? "lighthouse" : "cvm";
+}
+
+/** The version, which Tencent puts in a header and Alibaba in the signed form. */
+static const char *cloud_version(int32_t provider)
+{
+    switch (provider) {
+    case HAL_CLOUD_LIGHTHOUSE: return "2020-03-24";
+    case HAL_CLOUD_ECS:        return ALIYUN_ECS_VERSION;
+    default:                   return "2017-03-12";
     }
 }
 
-/** The API's own name for what was asked. */
+/** The API's own name for what was asked, for the providers that name it in a header. */
 static const char *cloud_action_name(int32_t action)
 {
     switch (action) {
-    case HAL_CLOUD_ACTION_START:  return "StartInstances";
-    case HAL_CLOUD_ACTION_STOP:   return "StopInstances";
-    case HAL_CLOUD_ACTION_REBOOT: return "RebootInstances";
-    default:                      return "DescribeInstances";
+    case HAL_CLOUD_ACTION_START:   return "StartInstances";
+    case HAL_CLOUD_ACTION_STOP:    return "StopInstances";
+    case HAL_CLOUD_ACTION_REBOOT:  return "RebootInstances";
+    case CLOUD_ACTION_REGIONS:     return "DescribeRegions";
+    default:                       return "DescribeInstances";
     }
 }
 
-/** What one call brought back: the body, already in `s_response`. */
+/** What one call brought back: where the body lands and how much room there is for it. */
 typedef struct {
     char *out;
     size_t capacity;
@@ -1291,12 +1816,17 @@ typedef struct {
  * is the whole reason this is a session rather than a function: a scan asks the same host twenty
  * times, and twenty handshakes would be a minute of waiting where twenty requests are a few
  * seconds. The first call opens the connection; every later region is one request on it.
+ *
+ * A scan runs several of these at once (see [`cloud_scan_t`]), so the body it collects into is the
+ * caller's buffer and not a file-wide one: two calls in the air at the same time must not write over
+ * each other's answer.
  */
 typedef struct {
-    int32_t provider;
+    /** The host `client` is connected to, so a call for another region can tell it must reopen. */
+    char host[64];
     esp_http_client_handle_t client;
     cloud_reply_t reply;
-    /** The answer was longer than `s_response`; what arrived is kept and the tail is lost. */
+    /** The answer was longer than the buffer; what arrived is kept and the tail is lost. */
     bool overflowed;
 } cloud_session_t;
 
@@ -1322,24 +1852,46 @@ static esp_err_t cloud_collect(esp_http_client_event_t *event)
     return ESP_OK;
 }
 
-/** Opens the connection holder for `provider`. No socket is opened until the first call. */
-static bool cloud_session_open(cloud_session_t *session, int32_t provider)
+/** Prepares a connection holder over `buffer`. No socket is opened until the first call. */
+static void cloud_session_init(cloud_session_t *session, char *buffer, size_t capacity)
 {
     memset(session, 0, sizeof *session);
 
-    session->provider       = provider;
-    session->reply.out      = s_response;
-    session->reply.capacity = CLOUD_RESPONSE_MAX;
+    session->reply.out      = buffer;
+    session->reply.capacity = capacity;
+}
 
-    const char *host = NULL;
-    const char *service = NULL;
-    const char *version = NULL;
-    cloud_endpoint(provider, &host, &service, &version);
-    (void)service;
-    (void)version;
+static void cloud_session_close(cloud_session_t *session)
+{
+    if (session->client != NULL) {
+        esp_http_client_cleanup(session->client);
+        session->client = NULL;
+    }
+
+    session->host[0] = '\0';
+}
+
+/**
+ * Makes sure the session is talking to `host`, reopening when it is not.
+ *
+ * The same host keeps its connection, which is what makes a twenty-region Tencent scan fast. A
+ * different one -- every region of an Alibaba scan is a different name -- closes the old connection
+ * and opens the new, because the host is part of the TLS certificate and cannot be swapped under a
+ * live one.
+ */
+static bool cloud_session_connect(cloud_session_t *session, const char *host)
+{
+    if (session->client != NULL && strcmp(session->host, host) == 0) {
+        return true;
+    }
+
+    cloud_session_close(session);
 
     char url[96];
-    snprintf(url, sizeof url, "https://%s/", host);
+    const int made = snprintf(url, sizeof url, "https://%s/", host);
+    if (made < 0 || (size_t)made >= sizeof url) {
+        return false;
+    }
 
     const esp_http_client_config_t config = {
         .url               = url,
@@ -1358,45 +1910,36 @@ static bool cloud_session_open(cloud_session_t *session, int32_t provider)
         return false;
     }
 
-    esp_http_client_set_header(session->client, "Content-Type", "application/json; charset=utf-8");
+    snprintf(session->host, sizeof session->host, "%s", host);
 
     return true;
 }
 
-static void cloud_session_close(cloud_session_t *session)
-{
-    if (session->client != NULL) {
-        esp_http_client_cleanup(session->client);
-        session->client = NULL;
-    }
-}
-
 /**
- * One API call on an open session: sign it, send it, and leave the body in `s_response`.
+ * One API call on an open session: sign it, send it, and leave the body in `session->reply`.
+ *
+ * `provider` is a parameter rather than a field of the session because a scan worker walks through
+ * the products of one vendor on one connection: the host and the signature are what change, and
+ * neither needs a new session.
  *
  * Returns `HAL_CLOUD_FAULT_NONE` when what came back is a whole body, and the fault otherwise -- the
  * connection, the handshake, or an answer that stopped in the middle. It draws nothing: whether a
  * body is worth drawing, and what to say when it is not, is the caller's decision, because a merged
  * list has many bodies to judge.
  */
-static int32_t cloud_session_call(cloud_session_t *session, int32_t action, const char *region,
-                                  const char *instance, int *out_status)
+static int32_t cloud_session_call(cloud_session_t *session, int32_t provider, int32_t action,
+                                  const char *region, const char *instance, int *out_status)
 {
     *out_status = 0;
 
-    const char *host = NULL;
-    const char *service = NULL;
-    const char *version = NULL;
-    cloud_endpoint(session->provider, &host, &service, &version);
+    const int32_t vendor = product_vendor(provider);
 
-    /* The body. A describe says how many rows to bring back; a power action names the one machine.
-     * `Limit` and `Offset` are required by Lighthouse and optional for CVM, so both get them. */
-    char body[192];
+    char host[64];
+    cloud_host(provider, region, host, sizeof host);
 
-    if (action == HAL_CLOUD_ACTION_LIST) {
-        snprintf(body, sizeof body, "{\"Limit\":%d,\"Offset\":0}", CLOUD_MAX_INSTANCES);
-    } else {
-        snprintf(body, sizeof body, "{\"InstanceIds\":[\"%s\"]}", instance);
+    if (!cloud_session_connect(session, host)) {
+        ESP_LOGE(TAG, "cannot open a connection to %s", host);
+        return HAL_CLOUD_FAULT_STORAGE;
     }
 
     int64_t timestamp = 0;
@@ -1404,40 +1947,79 @@ static int32_t cloud_session_call(cloud_session_t *session, int32_t action, cons
         return HAL_CLOUD_FAULT_CLOCK;
     }
 
-    char authorization[CLOUD_AUTH_MAX];
-    if (!cloud_authorize(service, host, &s_accounts[session->provider], timestamp, body, authorization,
-                         sizeof authorization)) {
-        ESP_LOGE(TAG, "the signature could not be built");
-        return HAL_CLOUD_FAULT_STORAGE;
-    }
+    /* 896 bytes because Alibaba's form, signature included, is the widest thing sent from here: its
+     * canonical query alone is five hundred characters of percent-encoded names. Tencent's JSON is
+     * never more than sixty. */
+    char body[896];
 
-    char stamp[24];
-    snprintf(stamp, sizeof stamp, "%lld", (long long)timestamp);
+    if (product_is_aliyun(provider)) {
+        if (!aliyun_sign_body(&s_accounts[vendor], timestamp, action, region, instance, body,
+                              sizeof body)) {
+            ESP_LOGE(TAG, "the signature could not be built");
+            return HAL_CLOUD_FAULT_STORAGE;
+        }
+
+        /* Everything is in the body, so nothing that a kept-alive client might still be carrying
+         * from a Tencent call belongs in the headers. */
+        esp_http_client_set_header(session->client, "Content-Type",
+                                   "application/x-www-form-urlencoded");
+        esp_http_client_delete_header(session->client, "Authorization");
+        esp_http_client_delete_header(session->client, "X-TC-Action");
+        esp_http_client_delete_header(session->client, "X-TC-Version");
+        esp_http_client_delete_header(session->client, "X-TC-Timestamp");
+        esp_http_client_delete_header(session->client, "X-TC-Region");
+    } else {
+        /* A describe says how many rows to bring back; a power action names the one machine.
+         * `Limit` and `Offset` are required by Lighthouse and optional for CVM, so both get them. */
+        if (action == HAL_CLOUD_ACTION_LIST) {
+            snprintf(body, sizeof body, "{\"Limit\":%d,\"Offset\":0}", CLOUD_MAX_INSTANCES);
+        } else if (action == CLOUD_ACTION_REGIONS) {
+            /* A region list has no parameters on either product; the empty object is what the
+             * API documents and what the signature signs. */
+            snprintf(body, sizeof body, "{}");
+        } else {
+            snprintf(body, sizeof body, "{\"InstanceIds\":[\"%s\"]}", instance);
+        }
+
+        char authorization[CLOUD_AUTH_MAX];
+        if (!cloud_authorize(cloud_service(provider), host, &s_accounts[vendor], timestamp, body,
+                             authorization, sizeof authorization)) {
+            ESP_LOGE(TAG, "the signature could not be built");
+            return HAL_CLOUD_FAULT_STORAGE;
+        }
+
+        char stamp[24];
+        snprintf(stamp, sizeof stamp, "%lld", (long long)timestamp);
+
+        /* The four the API needs, and the one that carries the signature. `Host` is set by the
+         * client from the URL and is what the signature signed, so it is deliberately not set
+         * here. */
+        esp_http_client_set_header(session->client, "Content-Type",
+                                   "application/json; charset=utf-8");
+        esp_http_client_set_header(session->client, "Authorization", authorization);
+        esp_http_client_set_header(session->client, "X-TC-Action", cloud_action_name(action));
+        esp_http_client_set_header(session->client, "X-TC-Version", cloud_version(provider));
+        esp_http_client_set_header(session->client, "X-TC-Timestamp", stamp);
+
+        /* A kept-alive session carries the previous region in its header list: a call that names
+         * none has to take it back out, or a power command would be sent to whatever region was
+         * asked for last. */
+        if (region[0] != '\0') {
+            esp_http_client_set_header(session->client, "X-TC-Region", region);
+        } else {
+            esp_http_client_delete_header(session->client, "X-TC-Region");
+        }
+    }
 
     session->reply.used = 0;
     session->reply.out[0] = '\0';
     session->overflowed = false;
 
-    /* The five the API needs, and the one that carries the signature. `Host` is set by the client
-     * from the URL and is what the signature signed, so it is deliberately not set here. */
-    esp_http_client_set_header(session->client, "Authorization", authorization);
-    esp_http_client_set_header(session->client, "X-TC-Action", cloud_action_name(action));
-    esp_http_client_set_header(session->client, "X-TC-Version", version);
-    esp_http_client_set_header(session->client, "X-TC-Timestamp", stamp);
-
-    /* A kept-alive session carries the previous region in its header list: a call that names none
-     * has to take it back out, or a power command would be sent to whatever region was asked for
-     * last. */
-    if (region[0] != '\0') {
-        esp_http_client_set_header(session->client, "X-TC-Region", region);
-    } else {
-        esp_http_client_delete_header(session->client, "X-TC-Region");
-    }
-
     esp_http_client_set_post_field(session->client, body, (int)strlen(body));
 
-    ESP_LOGI(TAG, "%s %s%s%s", cloud_action_name(action), provider_name(session->provider),
-             region[0] != '\0' ? " in " : "", region);
+    ESP_LOGI(TAG, "%s %s%s%s", product_is_aliyun(provider) ? aliyun_action_name(action)
+                                                            : cloud_action_name(action),
+             provider_name(provider), region[0] != '\0' ? " in " : "", region);
 
     const esp_err_t err = esp_http_client_perform(session->client);
     const int status = (err == ESP_OK) ? esp_http_client_get_status_code(session->client) : 0;
@@ -1471,6 +2053,66 @@ static int32_t cloud_session_call(cloud_session_t *session, int32_t action, cons
 }
 
 /**
+ * The regions a product is sold in, asked for once per boot.
+ *
+ * The lists above are what this file knew when it was written. A product opens a region faster
+ * than firmware ships, and an account on the other site does not see the same map at all -- which
+ * is why three Tencent data centres answered `UnsupportedRegion` and why an Alibaba region that is
+ * not sold here would answer `InvalidRegionId`: a hard list is a guess that costs a round trip
+ * for every guess that is wrong.
+ *
+ * `DescribeRegions` is the API answering the same question the scan is about to ask, so the scan
+ * uses it when it can. The answer is kept for the life of the process: a region list does not
+ * change under a board that is up, and a scan that failed once -- no Wi-Fi yet, a clock that was
+ * never set -- falls back to the list above rather than asking again on every refresh.
+ *
+ * Returns the number of regions the API named, or zero when it did not, in which case the caller
+ * uses the list in this file.
+ */
+static size_t cloud_regions_load(int32_t provider)
+{
+    cloud_region_cache_t *cache = &s_regions[provider];
+
+    if (cache->tried) {
+        return cache->count;
+    }
+    cache->tried = true;
+
+    cloud_session_t session;
+    cloud_session_init(&session, s_response, CLOUD_RESPONSE_MAX);
+
+    /* Alibaba's endpoint is built from the region it is asked about, so the call has to name one;
+     * `cn-hangzhou` is the one its console defaults to. Tencent's endpoint is one name for every
+     * region and the header that would carry a region is left out. */
+    const char *region = product_is_aliyun(provider) ? "cn-hangzhou" : "";
+
+    int status = 0;
+    const int32_t fault =
+        cloud_session_call(&session, provider, CLOUD_ACTION_REGIONS, region, "", &status);
+
+    if (fault == HAL_CLOUD_FAULT_NONE && status >= 200 && status < 300) {
+        const char *key = product_is_aliyun(provider) ? "\"RegionId\":" : "\"Region\":";
+        cache->count = collect_region_names(s_response, key, cache->names, CLOUD_REGIONS_MAX);
+        if (cache->count == 0) {
+            /* A 200 that names no region is either a product whose answer this file does not read
+             * (Lighthouse, whose list is spelled differently) or an empty account; the head of the
+             * body is what tells the two apart. */
+            ESP_LOGW(TAG, "%s named no region; answer starts: %.160s", provider_name(provider),
+                     s_response);
+        } else {
+            ESP_LOGI(TAG, "%s names %u regions", provider_name(provider), (unsigned)cache->count);
+        }
+    } else {
+        ESP_LOGW(TAG, "%s did not name its regions (HTTP %d), using the list in this file",
+                 provider_name(provider), status);
+    }
+
+    cloud_session_close(&session);
+
+    return cache->count;
+}
+
+/**
  * A call, tried a second time when it was the wire that failed.
  *
  * The failures worth another try are the ones about the network -- DNS, the handshake, a body that
@@ -1483,14 +2125,12 @@ static int32_t cloud_fetch_retrying(int32_t provider, int32_t action, const char
 {
     cloud_session_t session;
 
-    if (!cloud_session_open(&session, provider)) {
-        return HAL_CLOUD_FAULT_STORAGE;
-    }
+    cloud_session_init(&session, s_response, CLOUD_RESPONSE_MAX);
 
     int32_t fault = HAL_CLOUD_FAULT_NONE;
 
     for (int attempt = 1; attempt <= CLOUD_TRIES; attempt++) {
-        fault = cloud_session_call(&session, action, region, instance, out_status);
+        fault = cloud_session_call(&session, provider, action, region, instance, out_status);
 
         if (fault == HAL_CLOUD_FAULT_NONE) {
             break;
@@ -1518,8 +2158,12 @@ static int32_t cloud_fetch_retrying(int32_t provider, int32_t action, const char
 static bool refusal_is_about_the_account(const char *code)
 {
     static const char *const ACCOUNT[] = {
+        /* Tencent */
         "AuthFailure", "SignatureFailure", "InvalidSecretId", "InvalidCredential",
         "UnauthorizedOperation", "SecretIdNotFound",
+        /* Alibaba spells the same three things `InvalidAccessKeyId`, `SignatureDoesNotMatch` and
+         * `Forbidden`, with a dotted reason after them. */
+        "InvalidAccessKeyId", "SignatureDoesNotMatch", "Forbidden", "InvalidSecurityToken",
     };
 
     for (size_t i = 0; i < sizeof ACCOUNT / sizeof ACCOUNT[0]; i++) {
@@ -1532,137 +2176,296 @@ static bool refusal_is_about_the_account(const char *code)
 }
 
 /**
- * Every server, from every data centre of every provider that has a key.
+ * Every server one vendor owns, from every data centre of every product it sells.
  *
- * A `DescribeInstances` knows one region, so a list that is "all of them" is one call per region:
- * the key's own region was why a machine in Tokyo was invisible. Each provider's calls share one
- * connection (see [`cloud_session_t`]), and a region the account has not opened answers with an
- * `Error` object that is simply skipped -- that is an unsold data centre, not a failed list.
+ * A `DescribeInstances` knows one region, so a list is one call per region per product: the key's
+ * own region was why a machine in Tokyo was invisible. Products of the same host share one
+ * connection (see [`cloud_session_t`]); a region the account has not opened answers with an error
+ * that is simply skipped -- that is an unsold data centre, not a failed list.
  *
  * `kind` and `region` on each row are what tells a button which API and which data centre to send
- * `StartInstances` to. A provider with no key on file is not a failure and is not mentioned -- that
- * is a person who owns machines at one place. One that answered nothing is named in `failed`, so a
- * page can say "轻量的这次没取到" instead of quietly showing half of what somebody owns. When nothing
- * came back at all, the first real reason is the answer, because that is the one worth reading.
+ * `StartInstances` to. A product that answered nothing is named in `failed`, so a page can say
+ * "轻量的这次没取到" instead of quietly showing half of what somebody owns. When nothing came back at
+ * all, the first real reason is the answer, because that is the one worth reading.
+ *
+ * -----------------------------------------------------------------------------
+ * Why the regions are asked for two at a time
+ * -----------------------------------------------------------------------------
+ * Thirty-eight requests one after another is three seconds of waiting on a good line and a minute
+ * on a bad one, and nearly all of that is the wire rather than the chip: the signing is a few
+ * hundred microseconds where a round trip is fifty milliseconds. Two sessions working through the
+ * same queue halve the wait without a third TLS handshake's worth of internal RAM; the caller's own
+ * task is one of them, so the only extra stack is one worker's.
+ *
+ * The order of the answers no longer matters, so the rows are guarded by a lock and the document is
+ * only closed after every worker has stopped. A scan that loses its way still answers with what it
+ * got, which is why the budget is checked by each worker rather than around the call.
  */
-static void render_all_instances(void)
-{
-    writer_t w = { .out = s_answer, .capacity = CLOUD_ANSWER_MAX };
-    int listed = 0;
-    int tried = 0;
-    int ok = 0;
+typedef struct {
+    int32_t product;
+    const char *region;
+} cloud_scan_task_t;
 
-    bool failed[HAL_CLOUD_PROVIDER_COUNT];
-    memset(failed, 0, sizeof failed);
+/** One (product, region) pair each: CVM's twenty-one plus Lighthouse's seventeen is the widest. */
+#define CLOUD_SCAN_TASKS_MAX 40
 
-    int32_t first_fault = HAL_CLOUD_FAULT_NONE;
+/** Workers beside the caller's task: two sessions at once.
+ *
+ * Three is not on the table -- this board carries two TLS contexts beside a panel and a web server,
+ * and a third handshake comes back `MBEDTLS_ERR_SSL_ALLOC_FAILED`. Even the second one is only
+ * comfortable because the regions that could never answer were taken out of the lists above, and
+ * because a handshake that fails on a burst of allocations is tried once more once the burst has
+ * passed (see `cloud_scan_run`). */
+#define CLOUD_SCAN_WORKERS 1
+
+typedef struct {
+    const cloud_scan_task_t *tasks;
+    size_t count;
+    /** The next task nobody has taken. Guarded by `lock`. */
+    size_t next;
+    int64_t deadline;
+
+    /** Guards `next`, the writer and the reason kept for a scan that comes back empty. */
+    SemaphoreHandle_t lock;
+    /** Given once per worker that has stopped, so the caller knows when the answer is whole. */
+    SemaphoreHandle_t done;
+
+    writer_t w;
+    int listed;
+    bool answered[HAL_CLOUD_PROVIDER_COUNT];
+    int32_t first_fault;
     char first_code[64];
     char first_message[256];
-    first_code[0] = '\0';
-    first_message[0] = '\0';
+} cloud_scan_t;
 
-    /* A minute of calls is what a scan of every region costs on a bad line, and a page that waits
-     * that long is worse than a page that shows the twenty rows it got. Past the budget the scan
-     * stops and whatever answered is the list. */
-    const int64_t budget_end = esp_timer_get_time() + (int64_t)CLOUD_SCAN_BUDGET_MS * 1000;
+/** Runs one worker's share of the queue until it is empty or the budget is spent. */
+static void cloud_scan_run(cloud_scan_t *scan)
+{
+    char *body = (char *)heap_caps_malloc(CLOUD_RESPONSE_MAX, MALLOC_CAP_SPIRAM);
+    if (body == NULL) {
+        body = (char *)malloc(CLOUD_RESPONSE_MAX);
+    }
 
-    w_printf(&w, "{\"ok\":1,\"provider\":\"all\",\"region\":\"\",\"instances\":[");
+    if (body == NULL) {
+        xSemaphoreTake(scan->lock, portMAX_DELAY);
+        if (scan->first_fault == HAL_CLOUD_FAULT_NONE) {
+            scan->first_fault = HAL_CLOUD_FAULT_STORAGE;
+        }
+        xSemaphoreGive(scan->lock);
+        return;
+    }
 
-    for (int32_t p = 0; p < HAL_CLOUD_PROVIDER_COUNT; p++) {
-        if (!s_accounts[p].used) {
+    cloud_session_t session;
+    cloud_session_init(&session, body, CLOUD_RESPONSE_MAX);
+
+    for (;;) {
+        xSemaphoreTake(scan->lock, portMAX_DELAY);
+
+        const size_t index = scan->next;
+        if (index < scan->count) {
+            scan->next++;
+        }
+
+        const bool full = scan->listed >= CLOUD_MAX_INSTANCES;
+
+        xSemaphoreGive(scan->lock);
+
+        if (index >= scan->count || full) {
+            break;
+        }
+
+        if (esp_timer_get_time() > scan->deadline) {
+            ESP_LOGW(TAG, "the scan ran past its budget at %s", scan->tasks[index].region);
+            break;
+        }
+
+        const cloud_scan_task_t task = scan->tasks[index];
+
+        int status = 0;
+        const int32_t fault = cloud_session_call(&session, task.product, HAL_CLOUD_ACTION_LIST,
+                                                 task.region, "", &status);
+
+        if (fault != HAL_CLOUD_FAULT_NONE) {
+            xSemaphoreTake(scan->lock, portMAX_DELAY);
+            if (scan->first_fault == HAL_CLOUD_FAULT_NONE) {
+                scan->first_fault = fault;
+            }
+            xSemaphoreGive(scan->lock);
             continue;
         }
 
-        tried++;
+        char code[64];
+        char message[256];
+        code[0] = '\0';
+        message[0] = '\0';
+
+        /* Reading the body before the status is what turns "HTTP 403" into "签名错误". */
+        const bool refused =
+            body_is_refusal(body, code, sizeof code, message, sizeof message);
+
+        if (refused) {
+            /* One data centre that is not sold to this account, or the account itself is the
+             * problem. The latter is worth keeping for the case where *every* region says it. */
+            if (code[0] != '\0' && refusal_is_about_the_account(code)) {
+                xSemaphoreTake(scan->lock, portMAX_DELAY);
+                if (scan->first_code[0] == '\0') {
+                    scan->first_fault = HAL_CLOUD_FAULT_API;
+                    snprintf(scan->first_code, sizeof scan->first_code, "%s", code);
+                    snprintf(scan->first_message, sizeof scan->first_message, "%s", message);
+                }
+                xSemaphoreGive(scan->lock);
+            }
+
+            continue;
+        }
+
+        if (status < 200 || status >= 300) {
+            continue;
+        }
+
+        xSemaphoreTake(scan->lock, portMAX_DELAY);
+        if (append_instances(&scan->w, body, task.product, task.region, &scan->listed)) {
+            scan->answered[task.product] = true;
+        }
+        xSemaphoreGive(scan->lock);
+    }
+
+    cloud_session_close(&session);
+    free(body);
+}
+
+#if CLOUD_SCAN_WORKERS > 0
+/** A worker task: its share of the queue, then one count on `done`. */
+static void cloud_scan_worker(void *argument)
+{
+    cloud_scan_t *scan = (cloud_scan_t *)argument;
+
+    cloud_scan_run(scan);
+
+    xSemaphoreGive(scan->done);
+    vTaskDelete(NULL);
+}
+#endif
+
+/**
+ * Gathers the list described above, two sessions at a time.
+ *
+ * The last paragraph of the header comment is the whole design: tasks are (product, region) pairs
+ * in a queue, workers take the next one rather than a fixed slice, and the caller works too. A
+ * worker that was never created costs nothing but its share of the queue, which the others pick up,
+ * so a board short of internal RAM degrades to one session instead of to no list.
+ */
+static void render_all_instances_awake(int32_t vendor)
+{
+    writer_t w = { .out = s_answer, .capacity = CLOUD_ANSWER_MAX };
+
+    int32_t products[2];
+    const size_t product_count = vendor_products(vendor, products);
+
+    cloud_scan_task_t tasks[CLOUD_SCAN_TASKS_MAX];
+    size_t task_count = 0;
+
+    for (size_t i = 0; i < product_count; i++) {
+        const int32_t p = products[i];
+
+        /* The API's own answer first: it names the regions this account can address, which is not
+         * the same list on both sites and not the same list next year. */
+        const size_t named = cloud_regions_load(p);
+
+        if (named > 0) {
+            for (size_t r = 0; r < named && task_count < CLOUD_SCAN_TASKS_MAX; r++) {
+                tasks[task_count].product = p;
+                tasks[task_count].region  = s_regions[p].names[r];
+                task_count++;
+            }
+            continue;
+        }
 
         const char *const *regions = NULL;
         size_t region_count = 0;
         cloud_regions(p, &regions, &region_count);
 
-        cloud_session_t session;
-
-        if (!cloud_session_open(&session, p)) {
-            failed[p] = true;
-            first_fault = HAL_CLOUD_FAULT_STORAGE;
-            continue;
-        }
-
-        bool answered = false;
-        bool kept = false;
-        int32_t provider_fault = HAL_CLOUD_FAULT_NONE;
-
-        for (size_t r = 0; r < region_count && listed < CLOUD_MAX_INSTANCES; r++) {
-            if (esp_timer_get_time() > budget_end) {
-                ESP_LOGW(TAG, "the scan ran past its budget at %s", regions[r]);
-                break;
-            }
-
-            int status = 0;
-            const int32_t fault =
-                cloud_session_call(&session, HAL_CLOUD_ACTION_LIST, regions[r], "", &status);
-
-            if (fault != HAL_CLOUD_FAULT_NONE) {
-                if (!kept) {
-                    provider_fault = fault;
-                }
-
-                continue;
-            }
-
-            kept = true;
-
-            char code[64];
-            char message[256];
-            code[0] = '\0';
-            message[0] = '\0';
-
-            /* Reading the body before the status is what turns "HTTP 403" into "签名错误". */
-            const bool refused = body_is_refusal(s_response, code, sizeof code, message,
-                                                 sizeof message);
-
-            if (refused) {
-                /* One data centre that is not sold to this account, or the account itself is the
-                 * problem. The latter is worth keeping for the case where *every* region says it. */
-                if (code[0] != '\0' && refusal_is_about_the_account(code) && first_code[0] == '\0') {
-                    first_fault = HAL_CLOUD_FAULT_API;
-                    snprintf(first_code, sizeof first_code, "%s", code);
-                    snprintf(first_message, sizeof first_message, "%s", message);
-                }
-
-                continue;
-            }
-
-            if (status < 200 || status >= 300) {
-                continue;
-            }
-
-            if (append_instances(&w, s_response, p, regions[r], &listed)) {
-                answered = true;
-            }
-        }
-
-        cloud_session_close(&session);
-
-        if (answered) {
-            ok++;
-            continue;
-        }
-
-        failed[p] = true;
-
-        if (first_code[0] == '\0') {
-            first_fault = provider_fault != HAL_CLOUD_FAULT_NONE ? provider_fault
-                                                                 : HAL_CLOUD_FAULT_API;
-            snprintf(first_code, sizeof first_code, "MalformedAnswer");
-            snprintf(first_message, sizeof first_message, "接口没有返回实例列表");
+        for (size_t r = 0; r < region_count && task_count < CLOUD_SCAN_TASKS_MAX; r++) {
+            tasks[task_count].product = p;
+            tasks[task_count].region  = regions[r];
+            task_count++;
         }
     }
 
-    w_printf(&w, "],\"count\":%d", listed);
+    w_printf(&w, "{\"ok\":1,\"vendor\":\"%s\",\"instances\":[", vendor_name(vendor));
+
+    cloud_scan_t scan;
+    memset(&scan, 0, sizeof scan);
+
+    scan.tasks       = tasks;
+    scan.count       = task_count;
+    scan.w           = w;
+    scan.first_fault = HAL_CLOUD_FAULT_NONE;
+
+    /* A minute of calls is what a scan of every region costs on a bad line, and a page that waits
+     * that long is worse than a page that shows the twenty rows it got. Past the budget the scan
+     * stops and whatever answered is the list. */
+    scan.deadline = esp_timer_get_time() + (int64_t)CLOUD_SCAN_BUDGET_MS * 1000;
+
+    scan.lock = xSemaphoreCreateMutex();
+    if (scan.lock == NULL) {
+        answer_fault(HAL_CLOUD_FAULT_STORAGE);
+        return;
+    }
+
+#if CLOUD_SCAN_WORKERS > 0
+    scan.done = xSemaphoreCreateCounting(CLOUD_SCAN_WORKERS, 0);
+#endif
+
+    int made = 0;
+
+#if CLOUD_SCAN_WORKERS > 0
+    if (scan.done != NULL) {
+        for (; made < CLOUD_SCAN_WORKERS; made++) {
+            if (xTaskCreate(cloud_scan_worker, "cloud_scan", CLOUD_TASK_STACK, &scan, 4, NULL) !=
+                pdPASS) {
+                break;
+            }
+        }
+    }
+
+    if (made < CLOUD_SCAN_WORKERS) {
+        /* Internal RAM, not a bug: the caller carries the queue alone and the scan takes twice as
+         * long, which is worth one line so a slow list has a reason on the console. */
+        ESP_LOGW(TAG, "only %d of %d scan workers started; the scan will run one region at a time",
+                 made, CLOUD_SCAN_WORKERS);
+    }
+#endif
+
+    /* The caller works too: with no worker created at all this is the old one-at-a-time scan. */
+    cloud_scan_run(&scan);
+
+    for (int i = 0; i < made; i++) {
+        xSemaphoreTake(scan.done, portMAX_DELAY);
+    }
+
+    if (scan.done != NULL) {
+        vSemaphoreDelete(scan.done);
+    }
+    vSemaphoreDelete(scan.lock);
+
+    w = scan.w;
+
+    int ok = 0;
+    bool failed[HAL_CLOUD_PROVIDER_COUNT];
+    memset(failed, 0, sizeof failed);
+
+    for (size_t i = 0; i < product_count; i++) {
+        const int32_t p = products[i];
+        failed[p] = !scan.answered[p];
+        ok += scan.answered[p] ? 1 : 0;
+    }
+
+    w_printf(&w, "],\"count\":%d", scan.listed);
 
     bool any_failed = false;
-    for (int32_t p = 0; p < HAL_CLOUD_PROVIDER_COUNT; p++) {
-        any_failed = any_failed || failed[p];
+    for (size_t i = 0; i < product_count; i++) {
+        any_failed = any_failed || failed[products[i]];
     }
 
     if (any_failed) {
@@ -1670,8 +2473,8 @@ static void render_all_instances(void)
 
         w_printf(&w, ",\"failed\":[");
 
-        for (int32_t p = 0; p < HAL_CLOUD_PROVIDER_COUNT; p++) {
-            if (!failed[p]) {
+        for (size_t i = 0; i < product_count; i++) {
+            if (!failed[products[i]]) {
                 continue;
             }
 
@@ -1679,7 +2482,7 @@ static void render_all_instances(void)
                 w_printf(&w, ",");
             }
 
-            w_printf(&w, "\"%s\"", provider_name(p));
+            w_printf(&w, "\"%s\"", provider_name(products[i]));
             written++;
         }
 
@@ -1688,30 +2491,59 @@ static void render_all_instances(void)
 
     w_printf(&w, "}");
 
-    if (tried == 0) {
-        /* No key at all is not an empty list: it is a board that has not been told how to reach the
-         * cloud yet, and the page has a sentence and a form for that. */
-        answer_fault(HAL_CLOUD_FAULT_NO_CREDS);
-        return;
-    }
+    if (product_count == 0 || ok == 0) {
+        if (scan.first_code[0] == '\0' && scan.first_fault == HAL_CLOUD_FAULT_NONE) {
+            snprintf(scan.first_code, sizeof scan.first_code, "MalformedAnswer");
+            snprintf(scan.first_message, sizeof scan.first_message, "接口没有返回实例列表");
+        }
 
-    if (ok == 0) {
-        if (first_code[0] != '\0') {
-            answer_api_error(first_code, first_message);
+        if (scan.first_code[0] != '\0') {
+            answer_api_error(scan.first_code, scan.first_message);
         } else {
-            answer_fault(first_fault != HAL_CLOUD_FAULT_NONE ? first_fault : HAL_CLOUD_FAULT_HTTP);
+            answer_fault(scan.first_fault != HAL_CLOUD_FAULT_NONE ? scan.first_fault
+                                                                  : HAL_CLOUD_FAULT_HTTP);
         }
 
         return;
     }
 
     if (w.over) {
-        ESP_LOGW(TAG, "the answer for %d instances did not fit in %d bytes", listed, CLOUD_ANSWER_MAX);
+        ESP_LOGW(TAG, "the answer for %d instances did not fit in %d bytes", scan.listed,
+                 CLOUD_ANSWER_MAX);
         answer_fault(HAL_CLOUD_FAULT_STORAGE);
         return;
     }
 
     settle(HAL_CLOUD_FAULT_NONE, w.used);
+}
+
+/**
+ * Gathers a list with the radio kept awake.
+ *
+ * The scan above is the work; this is the wrapper that takes Wi-Fi power save off for the few
+ * seconds it lasts. With the modem sleeping between beacons a round trip that would be fifty
+ * milliseconds becomes three hundred, and over thirty-odd regions that is the difference between a
+ * second and ten -- the difference between a page that waits and a page that has arrived. The mode
+ * is read before it is changed and put back exactly as it was, so a board that was saving power
+ * goes on saving it.
+ */
+static void render_all_instances(int32_t vendor)
+{
+    wifi_ps_type_t saved = WIFI_PS_MIN_MODEM;
+    bool restore = false;
+
+    /* No Wi-Fi yet is not a failure: the scan's first call answers with the network fault it
+     * deserves, and there is no mode to put back. */
+    if (esp_wifi_get_ps(&saved) == ESP_OK && saved != WIFI_PS_NONE &&
+        esp_wifi_set_ps(WIFI_PS_NONE) == ESP_OK) {
+        restore = true;
+    }
+
+    render_all_instances_awake(vendor);
+
+    if (restore) {
+        esp_wifi_set_ps(saved);
+    }
 }
 
 /**
@@ -1726,13 +2558,13 @@ static void render_all_instances(void)
  */
 static void cloud_request(void)
 {
-    int32_t provider, action;
+    int32_t target, action;
     char region[HAL_CLOUD_REGION_MAX];
     char instance[HAL_CLOUD_INSTANCE_MAX];
 
     lock();
-    provider = s_provider;
-    action   = s_action;
+    target = s_target;
+    action = s_action;
     snprintf(region, sizeof region, "%s", s_region);
     snprintf(instance, sizeof instance, "%s", s_instance);
     const bool cancelled = s_snap.cancelled;
@@ -1750,10 +2582,12 @@ static void cloud_request(void)
         return;
     }
 
-    if (action == HAL_CLOUD_ACTION_LIST && provider == HAL_CLOUD_ALL) {
-        render_all_instances();
+    if (action == HAL_CLOUD_ACTION_LIST) {
+        render_all_instances(target);
         return;
     }
+
+    const int32_t provider = target - HAL_CLOUD_MACHINE_BASE;
 
     int status = 0;
     const int32_t fault = cloud_fetch_retrying(provider, action, region, instance, &status);
@@ -1773,17 +2607,13 @@ static void cloud_request(void)
 
     if (status < 200 || status >= 300) {
         snprintf(code, sizeof code, "HTTP%d", status);
-        snprintf(message, sizeof message, "腾讯云返回了 HTTP %d，请稍后再试", status);
+        snprintf(message, sizeof message, "接口返回了 HTTP %d，请稍后再试", status);
 
         answer_api_error(code, message);
         return;
     }
 
-    if (action == HAL_CLOUD_ACTION_LIST) {
-        render_instances(s_response, provider, region);
-    } else {
-        render_accepted(s_response, provider, action);
-    }
+    render_accepted(s_response, provider, action);
 }
 
 /**
@@ -1846,20 +2676,37 @@ esp_err_t hal_cloud_init(void)
     return ESP_OK;
 }
 
-esp_err_t hal_cloud_start(int32_t provider, int32_t action, const char *region,
+esp_err_t hal_cloud_start(int32_t target, int32_t action, const char *region,
                           const char *instance)
 {
-    if (provider < 0 || provider > HAL_CLOUD_ALL) {
-        return ESP_ERR_INVALID_ARG;
-    }
     if (action < HAL_CLOUD_ACTION_LIST || action > HAL_CLOUD_ACTION_REBOOT) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (provider == HAL_CLOUD_ALL && action != HAL_CLOUD_ACTION_LIST) {
-        /* A power action has to name one machine, and "all of them" is not one: the union is a
-         * list's target and nothing else. */
+
+    /* Two number ranges, one argument: a list names a vendor, a command names the product its row
+     * came from. Reading which one this is has to happen before anything else is believed. */
+    int32_t vendor = -1;
+
+    if (action == HAL_CLOUD_ACTION_LIST) {
+        if (target < 0 || target >= HAL_CLOUD_VENDOR_COUNT) {
+            return ESP_ERR_INVALID_ARG;
+        }
+
+        vendor = target;
+    } else {
+        const int32_t provider = target - HAL_CLOUD_MACHINE_BASE;
+
+        if (provider < 0 || provider >= HAL_CLOUD_PROVIDER_COUNT) {
+            return ESP_ERR_INVALID_ARG;
+        }
+
+        vendor = product_vendor(provider);
+    }
+
+    if (vendor < 0 || vendor >= HAL_CLOUD_VENDOR_COUNT) {
         return ESP_ERR_INVALID_ARG;
     }
+
     if (region != NULL && region[0] != '\0' && !identifier_ok(region, HAL_CLOUD_REGION_MAX)) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -1877,29 +2724,24 @@ esp_err_t hal_cloud_start(int32_t provider, int32_t action, const char *region,
         return ESP_ERR_INVALID_STATE;
     }
 
-    bool have_key = false;
-    const char *key_region = "";
+    const bool have_key = s_accounts[vendor].used;
+    const char *key_region = s_accounts[vendor].region;
 
-    if (provider == HAL_CLOUD_ALL) {
-        /* Any key at all makes "everything" worth asking. Which providers are actually asked is the
-         * worker's decision, from the same table. */
-        for (int32_t p = 0; p < HAL_CLOUD_PROVIDER_COUNT; p++) {
-            have_key = have_key || s_accounts[p].used;
-        }
-    } else {
-        have_key = s_accounts[provider].used;
-        key_region = s_accounts[provider].region;
-    }
+    /* Where a command goes when the caller named no region: the one saved with the key, and failing
+     * that the vendor's own first region, because `X-TC-Region: ap-guangzhou` on an Alibaba request
+     * is a signature failure and not a helpful default. */
+    const char *default_region = (vendor == HAL_CLOUD_VENDOR_ALIYUN) ? "cn-hangzhou"
+                                                                     : "ap-guangzhou";
 
-    s_provider = provider;
-    s_action   = action;
+    s_target = target;
+    s_action = action;
     s_snap.cancelled = false;
     /* The region comes from the caller when it named one and from the key when it did not: the page
-     * sends what is in its field, and the panel app has no field. */
+     * sends the row's own region, and the panel app has no field. */
     snprintf(s_region, sizeof s_region, "%s",
              (region != NULL && region[0] != '\0') ? region
                                                    : (key_region[0] != '\0' ? key_region
-                                                                            : "ap-guangzhou"));
+                                                                            : default_region));
     snprintf(s_instance, sizeof s_instance, "%s", instance != NULL ? instance : "");
 
     s_snap.state  = HAL_CLOUD_RUNNING;
@@ -1910,6 +2752,11 @@ esp_err_t hal_cloud_start(int32_t provider, int32_t action, const char *region,
 
     /* Answered before the task starts, so the page's error arrives in the same round trip as a
      * failed request rather than three seconds later through the socket's timeout. */
+    if (!vendor_is_wired_up(vendor)) {
+        answer_fault(HAL_CLOUD_FAULT_UNSUPPORTED);
+        return ESP_OK;
+    }
+
     if (!have_key) {
         answer_fault(HAL_CLOUD_FAULT_NO_CREDS);
         return ESP_OK;
@@ -2041,10 +2888,10 @@ void hal_cloud_cancel(void)
 // The keys
 // =============================================================================
 
-esp_err_t hal_cloud_credentials_get(int32_t provider, char *out_masked, size_t capacity,
+esp_err_t hal_cloud_credentials_get(int32_t vendor, char *out_masked, size_t capacity,
                                     char *out_region, size_t region_capacity)
 {
-    if (provider < 0 || provider >= HAL_CLOUD_PROVIDER_COUNT) {
+    if (vendor < 0 || vendor >= HAL_CLOUD_VENDOR_COUNT) {
         return ESP_ERR_INVALID_ARG;
     }
     if (out_masked == NULL || capacity == 0) {
@@ -2056,7 +2903,7 @@ esp_err_t hal_cloud_credentials_get(int32_t provider, char *out_masked, size_t c
     }
 
     lock();
-    const cloud_account_t *account = &s_accounts[provider];
+    const cloud_account_t *account = &s_accounts[vendor];
     const bool used = account->used;
     const size_t id_length = strlen(account->secret_id);
 
@@ -2106,10 +2953,10 @@ static bool key_characters_ok(const char *text, size_t capacity)
     return true;
 }
 
-esp_err_t hal_cloud_credentials_set(int32_t provider, const char *region, const char *secret_id,
+esp_err_t hal_cloud_credentials_set(int32_t vendor, const char *region, const char *secret_id,
                                     const char *secret_key)
 {
-    if (provider < 0 || provider >= HAL_CLOUD_PROVIDER_COUNT) {
+    if (vendor < 0 || vendor >= HAL_CLOUD_VENDOR_COUNT) {
         return ESP_ERR_INVALID_ARG;
     }
     if (!key_characters_ok(secret_id, HAL_CLOUD_SECRET_ID_MAX) ||
@@ -2124,11 +2971,13 @@ esp_err_t hal_cloud_credentials_set(int32_t provider, const char *region, const 
         return ESP_ERR_NO_MEM;
     }
 
-    cloud_account_t *account = &s_accounts[provider];
+    cloud_account_t *account = &s_accounts[vendor];
 
     memset(account, 0, sizeof *account);
     snprintf(account->region, sizeof account->region, "%s",
-             (region != NULL && region[0] != '\0') ? region : "ap-guangzhou");
+             (region != NULL && region[0] != '\0')
+                 ? region
+                 : (vendor == HAL_CLOUD_VENDOR_ALIYUN ? "cn-hangzhou" : "ap-guangzhou"));
     snprintf(account->secret_id, sizeof account->secret_id, "%s", secret_id);
     snprintf(account->secret_key, sizeof account->secret_key, "%s", secret_key);
     account->used = true;
@@ -2144,9 +2993,9 @@ esp_err_t hal_cloud_credentials_set(int32_t provider, const char *region, const 
     return ESP_OK;
 }
 
-esp_err_t hal_cloud_credentials_forget(int32_t provider)
+esp_err_t hal_cloud_credentials_forget(int32_t vendor)
 {
-    if (provider < 0 || provider >= HAL_CLOUD_PROVIDER_COUNT) {
+    if (vendor < 0 || vendor >= HAL_CLOUD_VENDOR_COUNT) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -2154,7 +3003,7 @@ esp_err_t hal_cloud_credentials_forget(int32_t provider)
         return ESP_ERR_NO_MEM;
     }
 
-    cloud_account_t *account = &s_accounts[provider];
+    cloud_account_t *account = &s_accounts[vendor];
     if (!account->used) {
         return ESP_ERR_NOT_FOUND;
     }

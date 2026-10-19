@@ -47,8 +47,11 @@ iced_graphics.workspace = true
 iced_tiny_skia.workspace = true
 iced_tiny_skia.optional = true
 
-iced_pomelo_gfx.workspace = true
-iced_pomelo_gfx.optional = true
+# The sibling checkout rather than the workspace's git entry: a `[patch]` in the consuming root does
+# not reach an optional dependency that a feature turns on, and `pomelo` is exactly that — the board
+# turns it on and the workspace's URL would then be fetched for a crate that is in this tree. See the
+# same note in `iced-pomelo-winit`.
+iced_pomelo_gfx = { path = "../../iced-pomelo-gfx", package = "iced-pomelo-gfx", optional = true }
 
 iced_wgpu.workspace = true
 iced_wgpu.optional = true

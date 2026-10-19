@@ -1,0 +1,13 @@
+[package]
+name = "app-sdk"
+version = "0.1.0"
+edition = "2021"
+description = "The crate HiveBox applications are written against"
+license = "GPL-3.0-only"
+
+[dependencies]
+app-abi = { path = "../app-abi" }
+
+[lib]
+# The exports a package has to provide are emitted by `app_sdk::app!`, and they must survive being
+# linked into a different crate: no `dead_code` on the static, no name mangling on the entry points.

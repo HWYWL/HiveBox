@@ -21,8 +21,12 @@ pub use pomelo_widgets::{AppIcon, AppMeta as Entry};
 
 include!(concat!(env!("OUT_DIR"), "/baked_icons.rs"));
 
-/// Fifteen apps, in the order the grid shows them: each [`crate::PER_PAGE`] fill a page, and the rest
-/// fall on the one after — eight and seven.
+/// Sixteen apps, in the order the grid shows them: each [`crate::PER_PAGE`] fill a page, and the
+/// rest fall on the one after — eight and eight.
+///
+/// These are the *shell's* tiles: the apps compiled into this image, which cannot be uninstalled.
+/// The tiles after them are the installed packages, in the catalog's order — see the crate's module
+/// docs on why those are not here.
 ///
 /// The order is the interface's and not the alphabet's, and the two pages are told apart by *when* a
 /// person wants what is on them rather than by what it is.
@@ -32,10 +36,10 @@ include!(concat!(env!("OUT_DIR"), "/baked_icons.rs"));
 /// and the files on either of them — the two of those that reach *off* the box sit together at the
 /// end of the row for that reason. The second row is what is left of a box in use: the two tiles
 /// whose subject is not the box at all — the sky outside it, and the person holding it — and then the
-/// two that are about its own software rather than about anything that software does, the settings and
-/// the updater, which is where a firmware or a glyph table is replaced. Those two close the page
-/// because they are the two a person opens *last*: one when something is wrong, the other when
-/// something new exists.
+/// two that are about its own software rather than about anything that software does: the settings,
+/// and the store, which is where an application is installed, updated or removed. Those two close
+/// the page because they are the two a person opens *last*: one when something is wrong, the other
+/// when something new exists.
 ///
 /// The second page is the box *itself*: the terminal, where the box is asked directly; the task
 /// viewer, which is about nothing but what the box is running; the clock, which is about nothing but
@@ -45,12 +49,18 @@ include!(concat!(env!("OUT_DIR"), "/baked_icons.rs"));
 /// the calculator, which is about neither the box nor anything beside it, and the channel map, which
 /// is about the air around the box and belongs to neither.
 ///
-/// The cloud closes the page, and it is the one tile on it whose subject is *off* the panel: the
-/// machines in an account rather than the box in the hand. It is on the second page and not beside
-/// the server tile for a reason that is only about room — the first page holds [`crate::PER_PAGE`]
-/// and its two rows are the box's own jobs, which a cloud account is not one of — and it is last
-/// rather than first for the same reason: a page is read in order, and a tile that pushed the six
-/// above it along would be a grid every finger has to learn again.
+/// The cloud is the one tile on that page whose subject is *off* the panel: the machines in an
+/// account rather than the box in the hand. It is on the second page and not beside the server tile
+/// for a reason that is only about room — the first page holds [`crate::PER_PAGE`] and its two rows
+/// are the box's own jobs, which a cloud account is not one of — and it sits after the calculator
+/// for the same reason: a page is read in order, and a tile that pushed the six above it along would
+/// be a grid every finger has to learn again.
+///
+/// The updater closes the second page, and it is the one tile here that is on its way out: the
+/// firmware and the glyph table are two of the three things a repository publishes, and the third —
+/// the application packages — is the store's. When the settings page carries the system update, this
+/// tile goes and the page is seven. Until then it sits at the end of the second page, which is the
+/// position its "open this last" argument always wanted and the first page no longer has room for.
 ///
 /// Fourteen and not fifteen: the overview tile was the one tile whose subject was *more than one
 /// thing* — the dashboard that drew the battery, the radio, the disks, the memory and the server at
@@ -125,16 +135,14 @@ pub const CATALOGUE: &[Entry] = &[
         accent: (124, 132, 146),
     },
     Entry {
-        name: "Update",
-        name_zh: "更新",
-        // An arrow coming down onto a bar, which is what `system_update` draws and what the page's two
-        // rows do. Plain `UPDATE` is the pair of circular arrows that means "look again" — which is
-        // what the button *inside* the page wears, on the row that checks for a new version — and a
-        // tile that wore it too would be the same picture for two different things.
-        icon: AppIcon::glyph(Icon::SYSTEM_UPDATE),
-        // An indigo, in the stretch between the server's blue-violet and the settings page's grey: the
-        // one hue the spread has left that is neither a job's colour nor a reading's own.
-        accent: (63, 81, 181),
+        name: "App Store",
+        name_zh: "应用商店",
+        // A shop front. Not `system_update`: that is the updater's tile and means "a new version of
+        // something this box already has", where this page is "something this box does not have yet".
+        icon: AppIcon::glyph(Icon::STORE),
+        // The store's own green, shared with the page it opens. A tile is found by remembering its
+        // colour, and the colour that opens this page should be the one inside it.
+        accent: (46, 158, 123),
     },
     // Page 2
     Entry {
@@ -204,5 +212,17 @@ pub const CATALOGUE: &[Entry] = &[
         // blue: the web manager's and the weather page's are both at full strength beside it, so the
         // three blues are told apart by saturation rather than by a person reading the labels.
         accent: (91, 143, 176),
+    },
+    Entry {
+        name: "Update",
+        name_zh: "更新",
+        // An arrow coming down onto a bar, which is what `system_update` draws and what the page's two
+        // rows do. Plain `UPDATE` is the pair of circular arrows that means "look again" — which is
+        // what the button *inside* the page wears, on the row that checks for a new version — and a
+        // tile that wore it too would be the same picture for two different things.
+        icon: AppIcon::glyph(Icon::SYSTEM_UPDATE),
+        // An indigo, in the stretch between the server's blue-violet and the settings page's grey: the
+        // one hue the spread has left that is neither a job's colour nor a reading's own.
+        accent: (63, 81, 181),
     },
 ];

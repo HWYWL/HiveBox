@@ -1,19 +1,25 @@
 //! 云服务 — the servers in a cloud account, and their power buttons.
 //!
-//! One list of every machine the account has, whichever product it belongs to, and three buttons for
-//! the instance a finger has picked on. What it is *for* is the machine nobody is sitting in front of:
-//! a test server that has been left running for a week, a build box that needs a restart, the instance
-//! whose bill somebody wants stopped before a holiday.
+//! One company at a time, one list of its machines whichever product each of them belongs to, and
+//! three buttons for the instance a finger has picked on. What it is *for* is the machine nobody is
+//! sitting in front of: a test server that has been left running for a week, a build box that needs a
+//! restart, the instance whose bill somebody wants stopped before a holiday.
 //!
-//! # One list, not two
+//! # A vendor, and then one list
 //!
-//! The account reaches two products — an elastic cloud server and a lightweight one — and they are two
-//! APIs with two shapes of answer. That is a fact about the *provider*, and it used to be a fact about
-//! this page too: two chips, two lists, and a person who had to remember which side their machine was
-//! on. It is not a useful fact to ask somebody to hold. So the page asks for
-//! [`CloudProvider::All`] — the board asks each product that has a key and merges the answers — and
-//! draws one list, with each row saying which product it came from. A power command goes back out
-//! through the row's own product: see [`CloudInstance::provider`].
+//! A key belongs to a company — 腾讯云, 阿里云, AWS — and a company sells servers through one API or
+//! two: Tencent's elastic cloud server and its lightweight one are two APIs with two shapes of
+//! answer, while Alibaba's ECS and AWS's EC2 are one each. That is a fact about the *vendor*, and it
+//! used to be a fact about this page too: two chips, two lists, and a person who had to remember
+//! which side their machine was on. It is not a useful fact to ask somebody to hold. So the page asks
+//! one vendor at a time — see [`CloudMonitor::vendor`] — and the board asks every product that
+//! vendor sells and merges the answers, giving one list whose rows each say which product they came
+//! from. A power command goes back out through the row's own product: see
+//! [`CloudInstance::provider`].
+//!
+//! AWS is the one vendor the page cannot ask: it is in the list, with a place to keep a key, and the
+//! board answers [`CloudFault::Unsupported`] until its signature is written. Saying so is better
+//! than an empty list that looks like an account with no machines.
 //!
 //! # Why no key is typed in here
 //!
@@ -60,7 +66,7 @@ use iced::{Element, Subscription, Theme};
 use pomelo_hal::error::HalError;
 use pomelo_hal::{
     Board, CloudAction, CloudAnswer, CloudFault, CloudInstance, CloudInstanceState, CloudKey,
-    CloudProvider, CloudState,
+    CloudProvider, CloudState, CloudTarget, CloudVendor,
 };
 use pomelo_widgets::preferences::{Language, SystemPreferences, ThemeMode};
 
@@ -85,15 +91,20 @@ pub struct CloudMonitor {
     /// The board, and through it the account. Cloned rather than held by reference so the page can be
     /// built in a closure iced owns — see `main.rs`.
     board: Arc<Board>,
-    /// The key of each product, indexed by [`CloudProvider::index`], as much of it as comes back out.
+    /// The company whose list is on the page, and whose key the buttons would use.
     ///
-    /// The table is the products and only the products — [`CloudProvider::All`] owns no key — and it
-    /// is read when the page opens and again every time an answer arrives, which are the only two
-    /// moments it can change underneath this page: writing one is the *management* page's job, and a
-    /// panel whose "no key saved" card survived somebody adding a key on the web page would be a panel
-    /// telling a person to do something they have already done.
-    keys: [CloudKey; 2],
-    /// Every machine in the account, as the last list left them: both products' in one list.
+    /// One at a time, because a key belongs to a company: the page opens on whichever vendor has a
+    /// key — see [`CloudMonitor::new`] — and a finger switches it with [`Message::Vendor`].
+    vendor: CloudVendor,
+    /// The key of each vendor, indexed by [`CloudVendor::index`], as much of it as comes back out.
+    ///
+    /// One per company and not one per product: Tencent's two kinds of server are sold to one
+    /// account, signed with one key. The table is read when the page opens and again every time an
+    /// answer arrives, which are the only two moments it can change underneath this page: writing one
+    /// is the *management* page's job, and a panel whose "no key saved" card survived somebody adding
+    /// a key on the web page would be a panel telling a person to do something they have already done.
+    keys: [CloudKey; 3],
+    /// Every machine of the selected vendor, as the last list left them: every product's in one list.
     instances: Vec<CloudInstance>,
     /// The products whose list did not come back last time, so the page can say which half is missing
     /// rather than presenting half an account as the whole of it.
@@ -152,6 +163,8 @@ pub(crate) enum Notice {
 pub enum Message {
     /// A frame, and the only thing that moves a request along.
     Tick(Instant),
+    /// Look at another company's machines.
+    Vendor(CloudVendor),
     /// Pick an instance: a row of the list, or the row again to put it back down.
     Select(String),
     /// Ask for the list again.
@@ -162,14 +175,19 @@ pub enum Message {
 }
 
 impl CloudMonitor {
-    /// The page, already asking for the list if there is a key to ask with.
+    /// The page, already asking for a list if there is a key to ask with.
     ///
     /// A page that opened on an empty list and waited for a finger would look like an account with no
     /// servers on it, which is a different thing from a page that has not looked yet.
+    ///
+    /// It opens on a vendor somebody has a key for and not on the first one in the list: a person who
+    /// has typed one Alibaba key in is looking for Alibaba's machines, and a page that opened on
+    /// Tencent's "no key" card would be a page telling them to go and do what they have just done.
     pub fn new(board: Arc<Board>) -> Self {
         let mut page = Self {
             board,
-            keys: [CloudKey::default(), CloudKey::default()],
+            vendor: CloudVendor::default(),
+            keys: std::array::from_fn(|_| CloudKey::default()),
             instances: Vec::new(),
             failed: Vec::new(),
             asked: None,
@@ -183,8 +201,12 @@ impl CloudMonitor {
         };
 
         page.keys = page.read_keys();
+        page.vendor = CloudVendor::ALL
+            .into_iter()
+            .find(|vendor| page.key(*vendor).configured())
+            .unwrap_or_default();
 
-        if page.configured() {
+        if page.can_ask() {
             page.refresh();
         }
 
@@ -209,24 +231,38 @@ impl CloudMonitor {
         Sizes::new()
     }
 
-    /// The key saved for `provider`, as much of it as comes back out.
-    ///
-    /// The products' keys, not the union's: [`CloudProvider::All`] has none of its own.
-    pub fn key(&self, provider: CloudProvider) -> CloudKey {
-        self.keys[provider.index()].clone()
+    /// The company whose list is on the page.
+    pub fn vendor(&self) -> CloudVendor {
+        self.vendor
     }
 
-    /// Whether any key at all has been saved, which is whether there is anything to list.
+    /// The key saved for `vendor`, as much of it as comes back out.
     ///
-    /// Any and not all: an account that reaches one product is an account with machines in it, and the
-    /// board asks the products that have a key and skips the ones that do not.
+    /// One key per company, whichever of its products a machine belongs to.
+    pub fn key(&self, vendor: CloudVendor) -> CloudKey {
+        self.keys[vendor.index()].clone()
+    }
+
+    /// Whether the vendor on the page has a key saved.
+    ///
+    /// The *selected* vendor and not any of them: what this answers is whether the list under it can
+    /// be asked for, and a key saved somewhere else is not a list this page can draw.
     pub fn configured(&self) -> bool {
-        self.keys.iter().any(CloudKey::configured)
+        self.key(self.vendor).configured()
     }
 
-    /// Every machine in the account, as the last list left them.
+    /// Whether there is anything this page could ask for: a key, and a client to sign with.
     ///
-    /// Both products in one list, each row saying which product it came from. Empty before the first
+    /// Two questions and not one because they are answered by different facts — the credentials file,
+    /// and this build — and a vendor that has the first and not the second would spin a request that
+    /// can only come back [`CloudFault::Unsupported`]. See [`CloudVendor::is_wired_up`].
+    pub(crate) fn can_ask(&self) -> bool {
+        self.configured() && self.vendor.is_wired_up()
+    }
+
+    /// Every machine of the vendor on the page, as the last list left them.
+    ///
+    /// Every product in one list, each row saying which product it came from. Empty before the first
     /// answer, and empty after a list that came back with nothing in it — two different screens: see
     /// [`CloudMonitor::state`].
     pub fn instances(&self) -> &[CloudInstance] {
@@ -286,6 +322,7 @@ impl CloudMonitor {
     pub fn update(&mut self, message: Message) {
         match message {
             Message::Tick(now) => self.tick(now),
+            Message::Vendor(vendor) => self.pick_vendor(vendor),
             Message::Select(id) => self.select(id),
             Message::Refresh => self.refresh(),
             Message::Power(action) => self.power(action),
@@ -433,6 +470,31 @@ impl CloudMonitor {
         }
     }
 
+    /// Switches to `vendor`, dropping what the last one left on the page.
+    ///
+    /// The list, the picked row and the footer all belonged to the vendor being left, and an answer
+    /// still on its way is an answer about a list nobody is looking at any more — so the request is
+    /// abandoned rather than waited for: the frame it arrives on would otherwise be a frame that drew
+    /// one company's machines under another company's name.
+    fn pick_vendor(&mut self, vendor: CloudVendor) {
+        if vendor == self.vendor {
+            return;
+        }
+
+        self.abandon();
+        self.vendor = vendor;
+        self.instances.clear();
+        self.failed.clear();
+        self.selected = None;
+        self.notice = None;
+        self.armed = None;
+        self.relist_in = 0;
+
+        if self.can_ask() {
+            self.refresh();
+        }
+    }
+
     /// Picks an instance, or puts the picked one back down.
     fn select(&mut self, id: String) {
         // Picking a row is somebody deciding what to do with it, and a button still armed from the row
@@ -445,13 +507,13 @@ impl CloudMonitor {
         };
     }
 
-    /// Asks for every machine in the account.
+    /// Asks for every machine the selected vendor has.
     ///
-    /// One request, not two: the board asks each product that has a key and merges what comes back,
-    /// so the page has one answer to wait for and one list to draw.
+    /// One request, not one per product: the board asks each product that vendor sells and merges
+    /// what comes back, so the page has one answer to wait for and one list to draw.
     fn refresh(&mut self) {
         self.ask(
-            CloudProvider::All,
+            CloudTarget::Vendor(self.vendor),
             CloudAction::List,
             String::new(),
             String::new(),
@@ -476,13 +538,18 @@ impl CloudMonitor {
         // carries them: StartInstances lives at two endpoints, and its region is the machine's, not
         // the key's.
         let region = instance.region;
-        self.ask(instance.provider, action, instance.id, region);
+        self.ask(
+            CloudTarget::Machine(instance.provider),
+            action,
+            instance.id,
+            region,
+        );
     }
 
     /// Starts a request, if there is one to start.
     fn ask(
         &mut self,
-        provider: CloudProvider,
+        target: CloudTarget,
         action: CloudAction,
         instance: String,
         region: String,
@@ -495,8 +562,9 @@ impl CloudMonitor {
         }
 
         // Nothing to ask with. Not a failure, and not a request that would tell this page anything it
-        // does not already know: the card that says where the key goes is already up.
-        if !self.configured() {
+        // does not already know: the card that says where the key goes — or that this build has no
+        // client for the vendor — is already up.
+        if !self.can_ask() {
             self.state = CloudState::Idle;
             self.collected = true;
             return;
@@ -504,7 +572,7 @@ impl CloudMonitor {
 
         self.armed = None;
 
-        match self.board.cloud().start(provider, action, &instance, &region) {
+        match self.board.cloud().start(target, action, &instance, &region) {
             Ok(()) => {
                 self.state = CloudState::Running;
                 self.collected = false;
@@ -532,11 +600,10 @@ impl CloudMonitor {
     }
 
     /// The keys as the backend has them, which is as much of them as ever comes out.
-    fn read_keys(&self) -> [CloudKey; 2] {
+    fn read_keys(&self) -> [CloudKey; 3] {
         let cloud = self.board.cloud();
-        // The products, not the union: `all` owns no key, and the table it would index does not have
-        // a third row.
-        CloudProvider::PRODUCTS.map(|provider| cloud.key(provider))
+        // The vendors, one key each: the products share their company's.
+        CloudVendor::ALL.map(|vendor| cloud.key(vendor))
     }
 
     /// Frames, and only while this page is waiting for one. See [`CloudMonitor::waiting`].
@@ -596,12 +663,18 @@ impl Drop for CloudMonitor {
 pub(crate) struct Words {
     pub(crate) language: Language,
     pub(crate) title: &'static str,
+    pub(crate) tencent: &'static str,
+    pub(crate) aliyun: &'static str,
+    pub(crate) aws: &'static str,
     pub(crate) cvm: &'static str,
     pub(crate) lighthouse: &'static str,
-    pub(crate) all: &'static str,
+    pub(crate) ecs: &'static str,
+    pub(crate) ec2: &'static str,
     pub(crate) refresh: &'static str,
     pub(crate) no_key: &'static str,
     pub(crate) no_key_note: &'static str,
+    pub(crate) unsupported: &'static str,
+    pub(crate) unsupported_note: &'static str,
     pub(crate) instances: &'static str,
     pub(crate) loading: &'static str,
     pub(crate) empty: &'static str,
@@ -619,12 +692,18 @@ impl Words {
             Language::Chinese => Self {
                 language,
                 title: "云服务",
+                tencent: "腾讯云",
+                aliyun: "阿里云",
+                aws: "AWS",
                 cvm: "云服务器",
                 lighthouse: "轻量应用服务器",
-                all: "全部产品",
+                ecs: "ECS",
+                ec2: "EC2",
                 refresh: "刷新",
-                no_key: "还没有保存密钥",
+                no_key: "这家云还没有保存密钥",
                 no_key_note: "在网页端「云服务」里填写",
+                unsupported: "这家云暂不支持",
+                unsupported_note: "这个版本还没有它的客户端",
                 instances: "实例",
                 loading: "正在查询…",
                 empty: "这个账号没有实例",
@@ -637,12 +716,18 @@ impl Words {
             Language::English => Self {
                 language,
                 title: "Cloud",
+                tencent: "Tencent",
+                aliyun: "Alibaba",
+                aws: "AWS",
                 cvm: "Cloud servers",
                 lighthouse: "Lightweight",
-                all: "All products",
+                ecs: "ECS",
+                ec2: "EC2",
                 refresh: "Refresh",
-                no_key: "No API key yet",
+                no_key: "No API key yet for this vendor",
                 no_key_note: "Fill one in under Cloud on the web page",
+                unsupported: "This vendor is not supported yet",
+                unsupported_note: "This build has no client for it",
                 instances: "Instances",
                 loading: "Querying…",
                 empty: "No instances on this account",
@@ -655,15 +740,25 @@ impl Words {
         }
     }
 
+    /// The name of a company, for the chip that picks it and the list card's heading.
+    pub(crate) fn vendor(&self, vendor: CloudVendor) -> &'static str {
+        match vendor {
+            CloudVendor::Tencent => self.tencent,
+            CloudVendor::Aliyun => self.aliyun,
+            CloudVendor::Aws => self.aws,
+        }
+    }
+
     /// The name of a product, for a row's tag and the line that names a missing half.
     ///
-    /// [`CloudProvider::All`] is not a product but the union of them, and it is named here because the
-    /// list card's heading says what the list is.
+    /// A product and not a company: a vendor's list is a merge of its products, and "where did this
+    /// row come from" is the question that survived the merge.
     pub(crate) fn provider(&self, provider: CloudProvider) -> &'static str {
         match provider {
             CloudProvider::Cvm => self.cvm,
             CloudProvider::Lighthouse => self.lighthouse,
-            CloudProvider::All => self.all,
+            CloudProvider::Ecs => self.ecs,
+            CloudProvider::Ec2 => self.ec2,
         }
     }
 
@@ -766,6 +861,7 @@ impl Words {
             (Language::Chinese, CloudFault::Http) => "返回内容无法识别",
             (Language::Chinese, CloudFault::Api) => "云端拒绝了请求",
             (Language::Chinese, CloudFault::Storage) => "板子没能保存结果",
+            (Language::Chinese, CloudFault::Unsupported) => "这家云暂不支持",
             (Language::English, CloudFault::Failed) => "The request failed",
             (Language::English, CloudFault::Args) => "Bad request",
             (Language::English, CloudFault::NoCredentials) => "No API key",
@@ -776,6 +872,7 @@ impl Words {
             (Language::English, CloudFault::Http) => "The answer could not be read",
             (Language::English, CloudFault::Api) => "The provider refused it",
             (Language::English, CloudFault::Storage) => "The board could not hold it",
+            (Language::English, CloudFault::Unsupported) => "This vendor is not supported yet",
         }
     }
 }

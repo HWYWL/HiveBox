@@ -10,8 +10,8 @@
 //!
 //! # Hosting an app is merging its subscription
 //!
-//! The five apps are hosted as **widgets**: this launcher calls their `view` and `update` itself, so
-//! their state is its state. What a widget cannot carry is an app's *subscriptions* — the one that
+//! The shell's apps are hosted as **widgets**: this launcher calls their `view` and `update` itself,
+//! so their state is its state. What a widget cannot carry is an app's *subscriptions* — the one that
 //! runs a clock (`music-player`) and the one whose *layout* follows the screen (`terminal`) both
 //! express that as a `Subscription`, and a subscription belongs to whoever owns the loop.
 //!
@@ -38,8 +38,19 @@
 //!
 //! # The grid is paged, and the page slides under the finger
 //!
-//! A page is [`PER_PAGE`] apps, four to a row, so the fifteen the catalogue has are two pages:
-//! eight and seven.
+//! A page is [`PER_PAGE`] apps, four to a row, so the sixteen the catalogue has are two pages:
+//! eight and eight.
+//!
+//! # The grid is the shell plus what is installed
+//!
+//! The screen's size is not the only thing this launcher is told: the tile list is too. The catalogue
+//! is the shell's half — the apps compiled into this image — and the tiles after it are the packages
+//! the catalog found on the two volumes. A package's tile is its name, its accent and the first
+//! letter of its name, because a package is not compiled into anything and its bitmap is not baked;
+//! pressing it reads the package, builds a VM and hands the page to `app-host`, which replays the
+//! display list the application writes and delivers the finger to it. The store is what changes that
+//! list, and a page that has installed or removed one is what makes the grid rescan —
+//! [`Launcher::sync_hosted`] is where the indices are moved.
 //! A finger turning one is a **drag**: down on the grid, across, up. iced has no widget for that — a
 //! `button` captures the press it is given, and `Scrollable` scrolls for a wheel, a touch or its own
 //! scrollbar and for nothing else — so the gesture is read by `pomelo-widgets`' pager.
@@ -122,10 +133,12 @@ use std::time::Instant;
 use iced::theme::Palette;
 use iced::widget::{button, column, container, stack, text, Column, Row, Space};
 use iced::{
-    Alignment, Border, Color, Element, Length, Point, Rectangle, Shadow, Size, Subscription, Task,
-    Theme, Vector,
+    Alignment, Border, Color, Element, Font, Length, Point, Rectangle, Shadow, Size, Subscription,
+    Task, Theme, Vector,
 };
 
+use app_host::ui::Fonts;
+use app_host::{Catalog, HostedApp, Installed};
 use calculator::Calculator;
 use clock::Clock;
 use cloud_monitor::CloudMonitor;
@@ -136,6 +149,7 @@ use nas_monitor::NasMonitor;
 use pomelo_hal::Board;
 use power_log::PowerLog;
 use settings::Settings;
+use store::Store;
 use task_viewer::TaskViewer;
 use updater::Updater;
 use terminal::Terminal;
@@ -187,7 +201,7 @@ enum Screen {
 ///
 /// Indices, because that is what the grid hands over when a tile is tapped. The tests assert that
 /// each of these still names the app it says it does, and every entry has one: the catalogue and
-/// the list of apps are the same fifteen things, in the same order.
+/// the list of apps are the same sixteen things, in the same order.
 pub const MUSIC: usize = 0;
 pub const WEB_MANAGER: usize = 1;
 pub const NAS_MONITOR: usize = 2;
@@ -195,7 +209,7 @@ pub const FILES: usize = 3;
 pub const WEATHER: usize = 4;
 pub const GAMES: usize = 5;
 pub const SETTINGS: usize = 6;
-pub const UPDATER: usize = 7;
+pub const STORE: usize = 7;
 pub const TERMINAL: usize = 8;
 pub const TASK_VIEWER: usize = 9;
 pub const CLOCK: usize = 10;
@@ -203,6 +217,9 @@ pub const POWER_LOG: usize = 11;
 pub const CALCULATOR: usize = 12;
 pub const WIFI_MAP: usize = 13;
 pub const CLOUD: usize = 14;
+/// The updater is the last tile on the grid: it is the one that is on its way out, and the store now
+/// holds the position it had — see the catalogue's own docs for both.
+pub const UPDATER: usize = 15;
 
 /// What the launcher reacts to.
 ///
@@ -211,6 +228,14 @@ pub const CLOUD: usize = 14;
 pub enum Message {
     /// An icon was tapped.
     Open(usize),
+    /// A finger on the page of an installed application: which tile it was, and the touch itself.
+    ///
+    /// The index rather than the package's id, because the tile is what the finger touched and the
+    /// page the touch belongs to is the page that index is showing. A rescan of the catalog happens
+    /// between pages, never inside one — see [`Launcher::sync_hosted`].
+    HostedInput(usize, app_abi::Event),
+    /// One frame for the installed application on screen.
+    HostedFrame,
     /// The paged grid turned to `page`.
     PageChanged(usize),
     /// The back button, or hardware button 1 (moves to background).
@@ -278,6 +303,8 @@ pub enum Message {
     /// A message from one of the apps this launcher hosts.
     Calculator(calculator::Message),
     Settings(settings::Message),
+    /// The store's own: a tab, a row's one button, or the frame that reads a download.
+    Store(store::Message),
     /// The updater's own: a row opened, a finger on one of its four buttons, or the frame that reads
     /// what the network answered.
     Updater(updater::Message),
@@ -362,11 +389,32 @@ impl Layer {
     }
 }
 
+/// One installed package, as the grid thinks of it.
+///
+/// The catalog says what is installed; this says what this launcher has done about it. An
+/// application is a package on disk until its tile is pressed, and a VM from then until it is
+/// killed — which is exactly the difference between [`Hosted::app`] being `None` and `Some`.
+struct Hosted {
+    installed: Installed,
+    /// The running application, once its tile has been pressed.
+    app: Option<HostedApp>,
+    /// Why the package could not even be read, when it could not. A package that will not parse is
+    /// a tile that says so rather than a tile that does nothing.
+    error: Option<String>,
+}
+
 /// The launcher.
 pub struct Launcher {
     screen: Screen,
+    /// Every installed package, in the catalog's order: these are the tiles after the shell's.
+    hosted: Vec<Hosted>,
+    /// When this launcher started. The clock an application's frames and events are stamped with.
+    started: Instant,
     calculator: Option<Calculator>,
     settings: Option<Settings>,
+    /// The store. Plain `store` and not `store_app`, for the clock's reason: nothing else in the
+    /// launcher is called that.
+    store: Option<Store>,
     /// The updater. Plain `updater` and not `updater_app`, for the clock's reason: nothing else in
     /// the launcher is called that.
     updater: Option<Updater>,
@@ -434,10 +482,20 @@ impl Launcher {
         let charging = board.power().is_charging().unwrap_or(false);
         let signal = board.wifi().status().signal_bars();
 
+        // What an interrupted install left behind is nobody's: a `.part` file in `.staging` and a
+        // package in `.trash` are both work that was in the middle of being undone when the box
+        // stopped, and neither is ever resumed. This is the boot-time half of the store's promise
+        // that a failed install leaves nothing — the store's own failures clean up as they happen,
+        // and this is the one that did not get the chance.
+        app_host::manager::clean_up(&app_host::Root::standard());
+
         Self {
             screen: Screen::Grid,
+            hosted: scan_hosted(),
+            started: Instant::now(),
             calculator: None,
             settings: None,
+            store: None,
             updater: None,
             music: None,
             terminal: None,
@@ -499,6 +557,9 @@ impl Launcher {
         if let Some(app) = &mut self.settings {
             app.set_preferences(prefs);
         }
+        if let Some(app) = &mut self.store {
+            app.set_preferences(prefs);
+        }
         if let Some(app) = &mut self.updater {
             app.set_preferences(prefs);
         }
@@ -558,6 +619,21 @@ impl Launcher {
             self.calculator = Some(app);
         }
         self.calculator.as_mut().unwrap()
+    }
+
+    /// The store, which is handed the board and reads two of its backends: the network (what the
+    /// repository publishes) and the two volumes a package may live on.
+    ///
+    /// It asks the repository what it has on the way in, for the updater's reason: the page's whole
+    /// subject is what there is to install. The installed list does not need the network, so the
+    /// first thing the page shows is true whether or not the request comes back.
+    pub fn get_or_create_store(&mut self) -> &mut Store {
+        if self.store.is_none() {
+            let mut app = Store::new(Arc::clone(&self.board));
+            app.set_preferences(self.preferences);
+            self.store = Some(app);
+        }
+        self.store.as_mut().unwrap()
     }
 
     /// The updater, which is handed the board and reads three backends through it: the network (the
@@ -904,6 +980,7 @@ impl Launcher {
             TERMINAL => self.terminal = None,
             CALCULATOR => self.calculator = None,
             SETTINGS => self.settings = None,
+            STORE => self.store = None,
             UPDATER => self.updater = None,
             MUSIC => self.music = None,
             WEB_MANAGER => self.web_manager = None,
@@ -916,7 +993,14 @@ impl Launcher {
             WEATHER => self.weather = None,
             GAMES => self.games = None,
             CLOUD => self.cloud = None,
-            _ => {}
+            // An installed package: the VM goes and the package stays, because killing an
+            // application is not uninstalling it. Its tile keeps its place on the grid.
+            _ => {
+                if let Some(at) = self.hosted_at(index) {
+                    self.hosted[at].app = None;
+                    self.hosted[at].error = None;
+                }
+            }
         }
 
         if self.screen == Screen::App(index) {
@@ -930,6 +1014,354 @@ impl Launcher {
         if matches!(self.transition, Some(transition) if transition.layer == Layer::App(index)) {
             self.transition = None;
         }
+    }
+
+    /// How many tiles the grid has: the shell's, then the installed packages'.
+    pub fn tile_count(&self) -> usize {
+        CATALOGUE.len() + self.hosted.len()
+    }
+
+    /// The installed package a combined index names, if it names one.
+    fn hosted_at(&self, index: usize) -> Option<usize> {
+        index
+            .checked_sub(CATALOGUE.len())
+            .filter(|&at| at < self.hosted.len())
+    }
+
+    /// The frame clock, in milliseconds since this launcher started.
+    fn now_ms(&self) -> i64 {
+        self.started.elapsed().as_millis() as i64
+    }
+
+    /// Opens an installed package: reads it, builds the VM, and leaves it on screen.
+    ///
+    /// The package is read here rather than at boot, because a tile is a name and an accent and a
+    /// module is a module. What the read costs is paid once per open, by the person waiting for it —
+    /// which is the trade the plan made when it said "instantiate on open, destroy on exit".
+    fn open_hosted(&mut self, at: usize) {
+        let now = self.now_ms();
+
+        let Some(hosted) = self.hosted.get_mut(at) else {
+            return;
+        };
+
+        if hosted
+            .app
+            .as_ref()
+            .map(HostedApp::is_running)
+            .unwrap_or(false)
+        {
+            return;
+        }
+
+        let package = match app_host::Package::read(&hosted.installed.package_path()) {
+            Ok(package) => package,
+            Err(error) => {
+                hosted.app = None;
+                hosted.error = Some(error.to_string());
+                return;
+            }
+        };
+
+        let data = hosted.installed.dir.join(app_host::catalog::DATA_DIR);
+        let services =
+            app_host::services::DesktopServices::new(&data, hosted.installed.meta.id.clone());
+        let size = (SCREEN as f32, SCREEN as f32);
+        let dir = hosted.installed.dir.clone();
+
+        hosted.error = None;
+        hosted.app = Some(HostedApp::open(
+            &package,
+            dir,
+            Box::new(services),
+            size,
+            1.0,
+            now,
+        ));
+    }
+
+    /// Sends one touch to the installed application on `index`.
+    fn hosted_event(&mut self, index: usize, event: app_abi::Event) {
+        let Some(at) = self.hosted_at(index) else {
+            return;
+        };
+        let Some(hosted) = self.hosted.get_mut(at) else {
+            return;
+        };
+        let Some(app) = hosted.app.as_mut() else {
+            return;
+        };
+
+        if !app.event(event) {
+            if let Some(error) = app.error() {
+                hosted.error = Some(error.to_string());
+            }
+        }
+    }
+
+    /// Hands the installed application on screen one frame.
+    ///
+    /// The exit bit and the failure sentence are read after the frame rather than inside it: both
+    /// are the application's answers to having been asked, and both end in the same place — the page
+    /// stops asking, and the desktop is what is left.
+    fn hosted_frame(&mut self) {
+        let Screen::App(index) = self.screen else {
+            return;
+        };
+        let Some(at) = self.hosted_at(index) else {
+            return;
+        };
+
+        let now = self.now_ms();
+
+        let (failed, exited) = {
+            let Some(hosted) = self.hosted.get_mut(at) else {
+                return;
+            };
+            let Some(app) = hosted.app.as_mut() else {
+                return;
+            };
+
+            let failed = match app.frame(now) {
+                Some(_) => None,
+                None => app.error().map(str::to_string),
+            };
+
+            (failed, app.exited())
+        };
+
+        if let Some(error) = failed {
+            self.hosted[at].error = Some(error);
+        }
+
+        if exited {
+            self.hosted[at].app = None;
+            self.running_apps.retain(|&running| running != index);
+
+            if self.screen == Screen::App(index) {
+                self.screen = Screen::Grid;
+            }
+        }
+    }
+
+    /// Re-reads the catalog and moves what is running onto the new indices.
+    ///
+    /// A package installed or removed while the store was open shifts every tile after it, and
+    /// `running_apps` and the screen are indices into that list. Matching by id — not by position —
+    /// is what makes the shift survivable: an application that is still installed keeps its running
+    /// VM wherever it now sits, and one that was removed takes its VM with it.
+    pub fn sync_hosted(&mut self) {
+        let catalog = Catalog::standard();
+        let before: Vec<String> = self
+            .hosted
+            .iter()
+            .map(|hosted| hosted.installed.meta.id.clone())
+            .collect();
+
+        let mut after: Vec<Hosted> = Vec::with_capacity(catalog.apps().len());
+
+        for installed in catalog.apps() {
+            let app = self
+                .hosted
+                .iter_mut()
+                .find(|hosted| {
+                    hosted.installed.meta.id == installed.meta.id
+                        && hosted.installed.dir == installed.dir
+                })
+                .and_then(|hosted| hosted.app.take());
+
+            after.push(Hosted {
+                installed: installed.clone(),
+                app,
+                error: None,
+            });
+        }
+
+        let unchanged = before.len() == after.len()
+            && before
+                .iter()
+                .zip(&after)
+                .all(|(id, hosted)| id == &hosted.installed.meta.id);
+
+        if unchanged {
+            return;
+        }
+
+        let shell = CATALOGUE.len();
+        let remap = |index: usize| -> Option<usize> {
+            if index < shell {
+                return Some(index);
+            }
+
+            let id = before.get(index - shell)?;
+            after
+                .iter()
+                .position(|hosted| &hosted.installed.meta.id == id)
+                .map(|at| shell + at)
+        };
+
+        let screen = match self.screen {
+            Screen::App(index) => remap(index).map(Screen::App),
+            other => Some(other),
+        };
+        let running: Vec<usize> = self.running_apps.iter().filter_map(|&i| remap(i)).collect();
+
+        self.hosted = after;
+        self.running_apps = running;
+        self.screen = screen.unwrap_or(Screen::Grid);
+        self.transition = None;
+
+        if self.page >= self.pages() {
+            self.page = self.pages().saturating_sub(1);
+        }
+    }
+
+    /// The screen one installed application draws, or the sentence saying why it cannot.
+    fn hosted_screen(&self, index: usize) -> Element<'_, Message> {
+        let Some(hosted) = self.hosted_at(index).and_then(|at| self.hosted.get(at)) else {
+            return self.launcher();
+        };
+
+        let fonts = Fonts {
+            icons: pomelo_material_symbols::font(),
+            ..Fonts::default()
+        };
+
+        if let Some(app) = &hosted.app {
+            if app.is_running() {
+                return app.view(fonts, move |event| Message::HostedInput(index, event));
+            }
+        }
+
+        let sentence = hosted
+            .error
+            .as_deref()
+            .or_else(|| hosted.app.as_ref().and_then(HostedApp::error))
+            .unwrap_or("");
+
+        let name = match self.preferences.language {
+            Language::Chinese => &hosted.installed.meta.name_zh,
+            Language::English => &hosted.installed.meta.name,
+        };
+
+        let ink = if self.preferences.theme.is_light() {
+            Color::from_rgb8(17, 24, 39)
+        } else {
+            Color::WHITE
+        };
+
+        let back = match self.preferences.language {
+            Language::Chinese => "返回桌面",
+            Language::English => "Back to desktop",
+        };
+
+        container(
+            Column::with_children(vec![
+                text(name.clone()).size(26).color(ink).into(),
+                text(sentence.to_string())
+                    .size(15)
+                    .color(Color::from_rgb8(150, 156, 168))
+                    .into(),
+                button(text(back).size(16))
+                    .padding([10, 22])
+                    .on_press(Message::Back)
+                    .into(),
+            ])
+            .spacing(18)
+            .align_x(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .into()
+    }
+
+    /// One installed package's tile: its accent, the first letter of its name, and that name.
+    ///
+    /// The package's own bitmap is not drawn here yet — see `apps.rs` on why the shell's icons are
+    /// baked and this one is a letter — but the accent and the name come from the package, so a
+    /// tile is still the application's own colour and its own word.
+    fn hosted_tile(&self, index: usize) -> Element<'_, Message> {
+        let Some(hosted) = self.hosted_at(index).and_then(|at| self.hosted.get(at)) else {
+            return self.placeholder_tile();
+        };
+
+        let meta = &hosted.installed.meta;
+        let accent = Color::from_rgb8(meta.accent.0, meta.accent.1, meta.accent.2);
+
+        let name = match self.preferences.language {
+            Language::Chinese => &meta.name_zh,
+            Language::English => &meta.name,
+        };
+
+        let initial = name.chars().next().unwrap_or('·').to_string();
+
+        let icon_button = button(
+            container(
+                text(initial)
+                    .size(style::GLYPH)
+                    .font(Font::DEFAULT)
+                    .color(Color::WHITE),
+            )
+            .center_x(Length::Fill)
+            .center_y(Length::Fill),
+        )
+        .width(Length::Fixed(style::ICON))
+        .height(Length::Fixed(style::ICON))
+        .padding(0)
+        .on_press(Message::Open(index))
+        .style(move |_theme, status| accent_icon_style(accent, status));
+
+        let label_display = style::truncate_label(name, style::LABEL_MAX_WIDTH, style::LABEL);
+        let label_color = if self.preferences.theme.is_light() {
+            Color::from_rgb8(17, 24, 39)
+        } else {
+            Color::WHITE
+        };
+
+        let contents = column![
+            icon_button,
+            text(label_display)
+                .size(style::LABEL)
+                .color(label_color)
+                .wrapping(text::Wrapping::None),
+        ]
+        .spacing(style::GLYPH_GAP)
+        .align_x(Alignment::Center);
+
+        container(contents)
+            .width(Length::Fixed(style::TILE_WIDTH))
+            .center_x(Length::Fixed(style::TILE_WIDTH))
+            .into()
+    }
+
+    /// One running application, for the switcher: the shell's own name and accent, or the package's.
+    fn card(&self, index: usize) -> Option<recents::Card> {
+        if let Some(entry) = CATALOGUE.get(index) {
+            return Some(recents::Card {
+                name: entry.localized_name(self.preferences.language).to_string(),
+                accent: entry.accent,
+                glyph: entry.icon.as_glyph().unwrap_or(Icon::APPS),
+            });
+        }
+
+        let meta = &self
+            .hosted_at(index)
+            .and_then(|at| self.hosted.get(at))?
+            .installed
+            .meta;
+
+        let name = match self.preferences.language {
+            Language::Chinese => &meta.name_zh,
+            Language::English => &meta.name,
+        };
+
+        Some(recents::Card {
+            name: name.clone(),
+            accent: meta.accent,
+            glyph: Icon::APPS,
+        })
     }
 
     /// The screen showing the grid.
@@ -979,9 +1411,10 @@ impl Launcher {
 
             for col in 0..style::COLUMNS {
                 let index = first + row * style::COLUMNS + col;
-                let tile: Element<'_, Message> = match CATALOGUE.get(index) {
-                    Some(_) => self.tile(index),
-                    None => self.placeholder_tile(),
+                let tile: Element<'_, Message> = if index < self.tile_count() {
+                    self.tile(index)
+                } else {
+                    self.placeholder_tile()
                 };
 
                 row_widget = row_widget
@@ -1036,9 +1469,9 @@ impl Launcher {
             .into()
     }
 
-    /// How many pages the catalogue makes.
+    /// How many pages the grid makes: the shell's tiles, then the installed packages'.
     fn pages(&self) -> usize {
-        CATALOGUE.len().div_ceil(style::PER_PAGE)
+        self.tile_count().div_ceil(style::PER_PAGE)
     }
 
 
@@ -1183,13 +1616,27 @@ impl Launcher {
         }
     }
 
+    /// The store. One page and no tabs, so the launcher's own back gesture is the way out, exactly
+    /// as it is for the updater's.
+    fn store_screen(&self) -> Element<'_, Message> {
+        if let Some(app) = &self.store {
+            app.view().map(Message::Store)
+        } else {
+            Space::new().into()
+        }
+    }
+
 
     /// One app tile: an icon button and label, sized strictly to [`style::TILE_WIDTH`] width.
     ///
     /// Only the app's application icon is tappable. Surrounding spaces and margins allow swipe
     /// gestures to pass through cleanly to [`pomelo_widgets::pager`].
     fn tile(&self, index: usize) -> Element<'_, Message> {
-        let entry = &CATALOGUE[index];
+        // A tile the catalogue does not have is an installed package: the grid is the shell's list
+        // with the catalog's appended, and this is the one place that boundary is read.
+        let Some(entry) = CATALOGUE.get(index) else {
+            return self.hosted_tile(index);
+        };
 
         let icon_content: Element<'_, Message> = match entry.icon {
             AppIcon::Glyph(glyph) => container(
@@ -1270,10 +1717,11 @@ impl Launcher {
                 Screen::App(current) => current != index,
                 Screen::Grid => true,
             })
-            .filter_map(|&index| {
-                CATALOGUE
-                    .get(index)
-                    .map(|entry| entry.icon.as_glyph().unwrap_or(Icon::APPS))
+            .filter_map(|&index| match CATALOGUE.get(index) {
+                Some(entry) => Some(entry.icon.as_glyph().unwrap_or(Icon::APPS)),
+                // An installed package has no shell glyph to wear, and the generic mark is the
+                // honest one: the row says *an application is running*, not which picture it has.
+                None => self.hosted_at(index).map(|_| Icon::APPS),
             })
             .collect();
 
@@ -1388,6 +1836,30 @@ impl Launcher {
             subs.push(app.subscription().map(Message::Games));
         }
 
+        // An installed application's clock, and the only one it has: a sandbox may not make a timer,
+        // so the frames of the window are what its animation steps on and what its redraw requests
+        // are answered by. Nothing is subscribed for a page that is not one — which is every page
+        // the shell draws — and nothing for a package that is not running.
+        if let Screen::App(index) = self.screen {
+            let running = self
+                .hosted_at(index)
+                .and_then(|at| self.hosted.get(at))
+                .and_then(|hosted| hosted.app.as_ref())
+                .map(HostedApp::is_running)
+                .unwrap_or(false);
+
+            if running {
+                subs.push(iced::window::frames().map(|_| Message::HostedFrame));
+            }
+        }
+
+        // The store's subscription is the updater's, letter for letter: frames only while something
+        // is out — a check, or the download of a package — so a page sitting on a list costs
+        // nothing, and the beat below is what ends the wait on a board with no frames.
+        if let (Screen::App(STORE), Some(app)) = (self.screen, &self.store) {
+            subs.push(app.subscription().map(Message::Store));
+        }
+
         // The updater's subscription is the weather page's, letter for letter: frames only while a check
         // is in flight — see `Updater::waiting` — so a page sitting on a version number costs nothing,
         // and the beat below is what ends the wait on a board with no frames. The two are the same case
@@ -1436,7 +1908,30 @@ impl Launcher {
     /// The only work that comes back is the settings app's: it scrolls its own body when the page
     /// changes, and a widget operation has to travel as a [`Task`] from whoever owns the loop.
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        // An installed application's back is the application's: a sandboxed page has no other way to
+        // hear it, and the press it may not want is still answered by the launcher's own gestures —
+        // the edge swipes — and by a page that is not running at all, which this press takes back to
+        // the desktop. The one press this does *not* take is the hardware key on a live page, which
+        // is the application's to interpret: it may have a sub-page to leave.
+        if matches!(message, Message::Back) {
+            if let Screen::App(index) = self.screen {
+                let live = self
+                    .hosted_at(index)
+                    .and_then(|at| self.hosted.get(at))
+                    .and_then(|hosted| hosted.app.as_ref())
+                    .map(HostedApp::is_running)
+                    .unwrap_or(false);
+
+                if live {
+                    self.hosted_event(index, app_host::hosted::back_event());
+                    return Task::none();
+                }
+            }
+        }
+
         match message {
+            Message::HostedFrame => self.hosted_frame(),
+            Message::HostedInput(index, event) => self.hosted_event(index, event),
             Message::Open(index) => {
                 // Whether this app is opening *over the desktop*, which is the only way one arrives:
                 // the desktop is what an app is drawn over, and two apps are never over each other.
@@ -1463,6 +1958,9 @@ impl Launcher {
                     }
                     SETTINGS => {
                         self.get_or_create_settings();
+                    }
+                    STORE => {
+                        self.get_or_create_store();
                     }
                     UPDATER => {
                         self.get_or_create_updater();
@@ -1500,7 +1998,13 @@ impl Launcher {
                     CLOUD => {
                         self.get_or_create_cloud();
                     }
-                    _ => {}
+                    // An installed package: no `Option` field of its own, because the catalog may
+                    // hold a number of them the shell cannot name at compile time.
+                    _ => {
+                        if let Some(at) = self.hosted_at(index) {
+                            self.open_hosted(at);
+                        }
+                    }
                 }
 
                 // An app whose layout follows the screen is told the size this launcher knows — the
@@ -1641,6 +2145,24 @@ impl Launcher {
                 if let (Screen::App(CLOUD), Some(app)) = (self.screen, &mut self.cloud) {
                     app.update(cloud_monitor::Message::Tick(Instant::now()));
                 }
+
+                // The store is asked the tenth way, and its reason is the updater's: a check is a
+                // wait and a download is a longer one. It is asked only while it *is* the screen,
+                // for the updater's own reason: a download that is behind another app is a download
+                // nobody can watch or stop.
+                if let (Screen::App(STORE), Some(app)) = (self.screen, &mut self.store) {
+                    app.update(store::Message::Tick(Instant::now()));
+                }
+
+                // An installed application on screen is asked for a frame by the beat too. One a
+                // second is slow for an animation and exactly right for a page whose number changes
+                // once a second, and it is the floor under a board whose host serves no frames at
+                // all — the same floor the pages above it stand on.
+                if let Screen::App(index) = self.screen {
+                    if self.hosted_at(index).is_some() {
+                        self.hosted_frame();
+                    }
+                }
             }
             Message::Resized(size) => {
                 self.size = size;
@@ -1670,6 +2192,16 @@ impl Launcher {
             Message::Weather(message) => self.get_or_create_weather().update(message),
             Message::Games(message) => self.get_or_create_games().update(message),
             Message::Cloud(message) => self.get_or_create_cloud().update(message),
+            Message::Store(message) => {
+                // The store installs into the same directories the grid is built from, so a page
+                // that has just changed them is the one thing that makes the grid rescan. Nothing
+                // else moves a tile while the launcher is up.
+                self.get_or_create_store().update(message);
+
+                if self.get_or_create_store().take_changed() {
+                    self.sync_hosted();
+                }
+            }
             Message::Updater(message) => self.get_or_create_updater().update(message),
             Message::Settings(settings::Message::Back) => return self.go_back(),
             Message::Settings(message) => {
@@ -2126,6 +2658,7 @@ impl Launcher {
             TERMINAL => self.terminal_screen(),
             CALCULATOR => self.calculator_screen(),
             SETTINGS => self.settings_screen(),
+            STORE => self.store_screen(),
             UPDATER => self.updater_screen(),
             MUSIC => self.music_screen(),
             WEB_MANAGER => self.web_manager_screen(),
@@ -2138,6 +2671,10 @@ impl Launcher {
             WEATHER => self.weather_screen(),
             GAMES => self.games_screen(),
             CLOUD => self.cloud_screen(),
+            // An installed package: a page the shell knows nothing about beyond the index it was
+            // given. Anything else — an index the catalog has lost since — is the desktop, which is
+            // the one screen that is always there.
+            _ if self.hosted_at(app).is_some() => self.hosted_screen(app),
             _ => self.launcher(),
         }
     }
@@ -2163,6 +2700,7 @@ impl Launcher {
             &self.recent_apps(),
             self.preferences.language,
             self.preferences.theme,
+            &|index| self.card(index),
         )
     }
 
@@ -2253,6 +2791,23 @@ fn lift(colour: Color, lift: f32) -> Color {
     }
 }
 
+/// What is installed, as the grid's tiles: the catalog's order, every package still unopened.
+///
+/// A boot scans and stops there. Reading a module here would be paying for every application at
+/// start-up to draw a tile that is a name, an accent and a letter.
+fn scan_hosted() -> Vec<Hosted> {
+    Catalog::standard()
+        .apps()
+        .iter()
+        .cloned()
+        .map(|installed| Hosted {
+            installed,
+            app: None,
+            error: None,
+        })
+        .collect()
+}
+
 /// An app icon button: accent color at rest, subtly lit when pressed.
 /// For bitmap icons, transparent at rest with a subtle translucent highlight when pressed.
 fn icon_style(entry: &'static Entry, status: button::Status) -> button::Style {
@@ -2273,13 +2828,18 @@ fn icon_style(entry: &'static Entry, status: button::Status) -> button::Style {
         };
     }
 
-    let base_color = entry.color();
+    accent_icon_style(entry.color(), status)
+}
+
+/// The tile's fill, for a colour that came from somewhere other than an [`Entry`].
+///
+/// The same rule either way: the accent at rest, and a white wash over it when pressed — not a
+/// brighter copy, because the accents are saturated and multiplying one clips the channels it is
+/// strongest in. See [`style::TILE_PRESS_LIFT`].
+fn accent_icon_style(accent: Color, status: button::Status) -> button::Style {
     let bg = match status {
-        // A wash of white over the tile rather than a brighter copy of it: the accents are saturated
-        // already — see `apps.rs` — and multiplying one by anything clips the channels it is strongest in
-        // and flashes a colour nobody chose. See [`style::TILE_PRESS_LIFT`].
-        button::Status::Pressed => lift(base_color, style::TILE_PRESS_LIFT),
-        _ => base_color,
+        button::Status::Pressed => lift(accent, style::TILE_PRESS_LIFT),
+        _ => accent,
     };
 
     button::Style {
@@ -2554,6 +3114,11 @@ mod tests {
         assert_eq!(CATALOGUE[WEB_MANAGER].localized_name(Language::Chinese), "网页管理");
         assert_eq!(CATALOGUE[TERMINAL].localized_name(Language::Chinese), "终端");
         assert_eq!(CATALOGUE[SETTINGS].localized_name(Language::Chinese), "设置");
+        assert_eq!(
+            CATALOGUE[STORE].localized_name(Language::Chinese),
+            "应用商店"
+        );
+        assert_eq!(CATALOGUE[STORE].name, "App Store");
         assert_eq!(CATALOGUE[UPDATER].localized_name(Language::Chinese), "更新");
         assert_eq!(CATALOGUE[UPDATER].name, "Update");
         assert_eq!(CATALOGUE[CALCULATOR].localized_name(Language::Chinese), "计算器");
@@ -2585,10 +3150,11 @@ mod tests {
     /// The grid's two pages, in the order they are drawn: the eight the first page holds, which is
     /// the box in use — what it plays, the page it serves, the machine beside it, the files on either,
     /// then the sky, the person holding it, and the two pages about its own software, the settings and
-    /// the updater — then the seven of the second page, which is the box itself: the terminal, what it
+    /// the store — then the eight of the second page, which is the box itself: the terminal, what it
     /// is running, the time it thinks it is, what its battery has been doing, the two that are only
-    /// ever opened to play with, the calculator and the channel map, and the cloud, which is the one
-    /// tile on that page whose subject is not the box at all but the machines in an account.
+    /// ever opened to play with, the calculator and the channel map, the cloud, which is the one tile
+    /// on that page whose subject is not the box at all but the machines in an account, and the
+    /// updater, which is last because it is on its way out.
     ///
     /// Written out rather than derived, because the order *is* the interface: a page and a position
     /// are what a finger learns, and a reshuffle that left this test green would be the one kind of
@@ -2609,21 +3175,22 @@ mod tests {
                 "Weather",
                 "Games",
                 "Settings",
-                "Update",
+                "App Store",
                 "Terminal",
                 "Tasks",
                 "Clock",
                 "Power Log",
                 "Calculator",
                 "Wi-Fi Map",
-                "Cloud"
+                "Cloud",
+                "Update"
             ]
         );
-        assert_eq!(CATALOGUE.len(), 15, "and the fifteen are all the tiles there are");
+        assert_eq!(CATALOGUE.len(), 16, "and the sixteen are all the tiles there are");
         assert_eq!(
             Launcher::new(Arc::new(Board::simulated())).pages(),
             2,
-            "eight and seven"
+            "eight and eight"
         );
     }
 
@@ -3622,6 +4189,84 @@ mod tests {
         assert!(
             launcher.weather.is_none(),
             "and the one that was only backgrounded goes the same way"
+        );
+    }
+
+    /// An installed package is a tile after the shell's and a page of its own — and a package that
+    /// cannot be read is a page that says so, because a tile that does nothing is not an answer.
+    #[test]
+    fn an_installed_package_is_a_tile_after_the_shell_and_a_page_of_its_own() {
+        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
+        assert_eq!(launcher.tile_count(), 16, "the shell alone");
+        assert_eq!(launcher.pages(), 2, "eight and eight");
+
+        let meta = app_host::Meta::parse(
+            r#"{"id":"notes","name":"Notes","name_zh":"笔记","version":"v1.0.0","memory_kb":64}"#,
+        )
+        .expect("a package that parses");
+
+        launcher.hosted.push(Hosted {
+            installed: Installed {
+                meta,
+                source: app_host::Source::Internal,
+                // Nothing is at this path, which is what a package directory that is gone looks
+                // like to the launcher: the read fails, and the page says why.
+                dir: std::path::PathBuf::from("/nonexistent/hivebox-apps/notes"),
+                icon: None,
+                disabled: false,
+            },
+            app: None,
+            error: None,
+        });
+
+        assert_eq!(launcher.tile_count(), 17);
+        assert_eq!(launcher.pages(), 3, "eight, eight and one");
+        assert_eq!(
+            launcher.card(16).expect("a card").name,
+            "笔记",
+            "the sheet says what the package calls itself, in the panel's language"
+        );
+
+        launcher.update(Message::Open(16));
+        assert_eq!(launcher.screen, Screen::App(16));
+        assert!(launcher.hosted[0].error.is_some(), "the read failed");
+
+        // The page is the sentence, not a panic and not a blank screen.
+        let _ = launcher.app_screen(16);
+
+        // A page that is not running gives the back press back to the launcher.
+        launcher.update(Message::Back);
+        assert_eq!(launcher.screen, Screen::Grid);
+    }
+
+    /// The store lives the same four steps as the pages before it — built when its tile is tapped,
+    /// kept while backgrounded, freed on exit — and its own messages reach it and only it.
+    #[test]
+    fn the_store_is_loaded_on_demand_freed_on_kill_and_routed_to() {
+        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
+
+        assert!(launcher.store.is_none());
+
+        launcher.update(Message::Open(STORE));
+        assert!(launcher.store.is_some());
+        assert_eq!(launcher.screen, Screen::App(STORE));
+
+        launcher.update(Message::Back);
+        assert_eq!(launcher.screen, Screen::Grid);
+        assert!(launcher.store.is_some(), "backgrounding keeps it");
+
+        launcher.update(Message::Exit);
+        assert!(launcher.store.is_none(), "killing frees it");
+
+        // A message from the page builds it again if it was not up, and the tab it asks for is the
+        // page's own state: nothing here decides what a page shows.
+        launcher.update(Message::Store(store::Message::Section(
+            store::Section::Updates,
+        )));
+        assert!(launcher.store.is_some());
+        assert_eq!(
+            launcher.get_or_create_store().section(),
+            store::Section::Updates
         );
     }
 

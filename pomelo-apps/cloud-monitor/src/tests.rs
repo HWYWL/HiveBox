@@ -1,9 +1,9 @@
 //! The page's own tests: what it asks the account for, and what it makes of the answer.
 //!
 //! Nothing here names a platform layer, reads a panel or draws a pixel. The account behind these tests is
-//! the HAL's own simulator — three machines over two products, and a round trip that takes three ticks —
-//! so what is asserted is the page's behaviour against an account that behaves the way the trait says an
-//! account does: a request that is asked for, polled, and read exactly once.
+//! the HAL's own simulator — two vendors, four machines between them, and a round trip that takes three
+//! ticks — so what is asserted is the page's behaviour against an account that behaves the way the trait
+//! says an account does: a request that is asked for, polled, and read exactly once.
 //!
 //! The half of that the pages beside it do not have is *stopping a machine*, and it is where most of
 //! these tests are: an arming that expires, an arming a new pick puts down, and a list asked for again
@@ -18,6 +18,7 @@ use iced_test::Simulator;
 use pomelo_hal::sim::SimCloud;
 use pomelo_hal::{
     Board, CloudAction, CloudFault, CloudInstanceState, CloudKey, CloudProvider, CloudState,
+    CloudVendor,
 };
 use pomelo_widgets::preferences::{Language, SystemPreferences, ThemeMode};
 
@@ -62,7 +63,7 @@ fn board_of(cloud: SimCloud) -> Arc<Board> {
     ))
 }
 
-/// A board with an account on it: both products set up, three machines between them.
+/// A board with an account on it: two vendors set up, four machines between them.
 fn board() -> Arc<Board> {
     board_of(SimCloud::new())
 }
@@ -151,6 +152,7 @@ fn the_list_is_read_when_the_account_is_done() {
 
     assert!(!app.busy(), "and then it is over");
     assert_eq!(app.state(), CloudState::Idle);
+    assert_eq!(app.vendor(), CloudVendor::Tencent, "the first vendor with a key");
     assert_eq!(app.instances().len(), 3, "both products in one list");
     assert_eq!(app.instances()[0].name, "web-01");
     assert_eq!(app.instances()[1].state, CloudInstanceState::Stopped);
@@ -296,16 +298,17 @@ fn a_command_asks_for_the_list_again_after_it_lands() {
     );
 }
 
-/// A board with no key is not a board with an empty account, and the page says which of the two it is.
+/// A vendor with no key is not a vendor with an empty account, and the page says which of the two it is.
 #[test]
-fn a_product_with_no_key_says_where_the_key_goes() {
+fn a_vendor_with_no_key_says_where_the_key_goes() {
     let board = board_of(
         SimCloud::new()
-            .without_key(CloudProvider::Cvm)
-            .without_key(CloudProvider::Lighthouse),
+            .without_key(CloudVendor::Tencent)
+            .without_key(CloudVendor::Aliyun),
     );
     let mut app = CloudMonitor::new(Arc::clone(&board));
 
+    assert_eq!(app.vendor(), CloudVendor::Tencent, "the one it opens on");
     assert!(!app.configured());
     assert!(!app.busy(), "nothing was asked, so nothing is spinning");
     assert!(app.instances().is_empty());
@@ -319,19 +322,73 @@ fn a_product_with_no_key_says_where_the_key_goes() {
     assert_eq!(board.cloud().state(), CloudState::Idle);
 }
 
-/// The one key a board has is the product the page lists: somebody who has typed one key in should not
-/// be shown the machines of the product they have not.
+/// The page opens on the vendor somebody has a key for: a person who typed one Alibaba key in is
+/// looking for Alibaba's machines, and "no key" for the company they did not set up is not the screen
+/// they came for.
 #[test]
-fn the_page_lists_the_products_that_have_a_key() {
-    let board = board_of(SimCloud::new().without_key(CloudProvider::Cvm));
+fn the_page_opens_on_the_vendor_that_has_a_key() {
+    let board = board_of(SimCloud::new().without_key(CloudVendor::Tencent));
     let mut app = CloudMonitor::new(Arc::clone(&board));
 
+    assert_eq!(app.vendor(), CloudVendor::Aliyun);
     assert!(app.configured());
     assert!(app.busy(), "which it can list");
 
     settle(&board, &mut app);
-    assert_eq!(app.instances().len(), 1, "only the product with a key");
-    assert_eq!(app.instances()[0].name, "blog");
+    assert_eq!(app.instances().len(), 1, "only the vendor with a key");
+    assert_eq!(app.instances()[0].name, "api-01");
+    assert_eq!(app.instances()[0].provider, CloudProvider::Ecs);
+}
+
+/// Switching vendors is switching lists: the rows of the company being left go, and the other's are
+/// asked for rather than waited for.
+#[test]
+fn picking_another_vendor_replaces_the_list() {
+    let (board, mut app) = listed();
+    assert_eq!(app.instances().len(), 3);
+
+    app.update(Message::Vendor(CloudVendor::Aliyun));
+    assert_eq!(app.vendor(), CloudVendor::Aliyun);
+    assert!(app.instances().is_empty(), "the last company's rows are gone");
+    assert!(app.busy(), "and this one's list is on its way");
+
+    settle(&board, &mut app);
+    assert_eq!(app.instances().len(), 1);
+    assert_eq!(app.instances()[0].name, "api-01");
+    assert_eq!(app.instances()[0].provider, CloudProvider::Ecs);
+}
+
+/// A vendor this build has no client for says so and is not asked: an empty list would read as an
+/// account with no machines, which is a different sentence, and a request would only come back
+/// [`CloudFault::Unsupported`].
+#[test]
+fn a_vendor_with_no_client_is_not_asked() {
+    let (board, mut app) = listed();
+
+    app.update(Message::Vendor(CloudVendor::Aws));
+    assert_eq!(app.vendor(), CloudVendor::Aws);
+    assert!(!app.can_ask());
+    assert!(!app.busy());
+    assert_eq!(app.state(), CloudState::Idle);
+    assert_eq!(board.cloud().state(), CloudState::Idle, "nothing went out");
+
+    app.update(Message::Refresh);
+    assert_eq!(board.cloud().state(), CloudState::Idle, "and nothing does");
+}
+
+/// An answer to a list nobody is looking at any more is dropped with the request: switching mid-flight
+/// must not draw one company's machines under another company's name.
+#[test]
+fn switching_vendor_mid_request_abandons_the_one_in_flight() {
+    let board = board();
+    let mut app = CloudMonitor::new(Arc::clone(&board));
+    assert!(app.busy());
+
+    app.update(Message::Vendor(CloudVendor::Aliyun));
+    settle(&board, &mut app);
+
+    assert_eq!(app.instances().len(), 1);
+    assert_eq!(app.instances()[0].provider, CloudProvider::Ecs);
 }
 
 /// A refusal is read once, kept until a list replaces it, and shown in the page's own words when the
@@ -403,10 +460,15 @@ fn dropping_the_page_abandons_the_request_in_flight() {
 fn the_key_the_page_shows_is_the_masked_one() {
     let (_, app) = listed();
 
-    let key: CloudKey = app.key(CloudProvider::Cvm);
+    let key: CloudKey = app.key(CloudVendor::Tencent);
     assert!(key.configured());
     assert_eq!(key.region, "ap-guangzhou");
     assert!(!key.masked.is_empty());
+
+    // The other company's key is a different row of the table, and its own region.
+    let aliyun: CloudKey = app.key(CloudVendor::Aliyun);
+    assert!(aliyun.configured());
+    assert_eq!(aliyun.region, "cn-hangzhou");
 }
 
 /// The words are in both languages, and the count is said the way each language says it.
@@ -416,6 +478,15 @@ fn the_words_are_in_both_languages() {
     let chinese = Words::of(Language::Chinese);
 
     assert_ne!(english.title, chinese.title);
+    assert_eq!(english.vendor(CloudVendor::Aliyun), "Alibaba");
+    assert_eq!(chinese.vendor(CloudVendor::Tencent), "腾讯云");
+    assert_eq!(english.provider(CloudProvider::Ecs), "ECS");
+    assert_eq!(chinese.provider(CloudProvider::Lighthouse), "轻量应用服务器");
+    assert_eq!(
+        english.fault(CloudFault::Unsupported),
+        "This vendor is not supported yet"
+    );
+
     assert_eq!(english.count(1), "1 instance");
     assert_eq!(english.count(3), "3 instances");
     assert!(chinese.count(3).contains('3'));
@@ -442,7 +513,9 @@ fn the_page_draws_the_machines_it_listed() -> Result<(), iced_test::Error> {
 
     assert!(ui.find("Cloud").is_ok(), "the page says what it is");
     assert!(ui.find("Instances").is_ok(), "the card has a heading");
-    assert!(ui.find("All products").is_ok(), "and says the list is the whole account");
+    assert!(ui.find("Tencent").is_ok(), "the list names the company it is");
+    assert!(ui.find("Alibaba").is_ok(), "and the other companies can be reached");
+    assert!(ui.find("AWS").is_ok(), "even the one with no client");
     assert!(ui.find("web-01").is_ok(), "a machine by name");
     assert!(ui.find("blog").is_ok(), "and the other product's machine");
     assert!(ui.find("Cloud servers").is_ok(), "a row tagged with its product");
@@ -476,20 +549,37 @@ fn the_page_draws_the_commands_for_the_machine_that_is_picked() -> Result<(), ic
     Ok(())
 }
 
-/// The card that stands in for the list when there is no key to list with.
+/// The card that stands in for the list when there is no key to list with — with the chips still on
+/// the page, which is the only way out of a vendor somebody has not set up.
 #[test]
 fn the_page_draws_where_the_key_goes() -> Result<(), iced_test::Error> {
     let board = board_of(
         SimCloud::new()
-            .without_key(CloudProvider::Cvm)
-            .without_key(CloudProvider::Lighthouse),
+            .without_key(CloudVendor::Tencent)
+            .without_key(CloudVendor::Aliyun),
     );
     let mut app = CloudMonitor::new(Arc::clone(&board));
     english(&mut app);
 
     let mut ui = screen(&app, TALL);
-    assert!(ui.find("No API key yet").is_ok());
+    assert!(ui.find("No API key yet for this vendor").is_ok());
     assert!(ui.find("Fill one in under Cloud on the web page").is_ok());
+    assert!(ui.find("Alibaba").is_ok(), "and the other vendors are reachable");
+
+    Ok(())
+}
+
+/// The card that stands in for a vendor this build has no client for: not a missing key, and not an
+/// empty account.
+#[test]
+fn the_page_draws_that_a_vendor_has_no_client() -> Result<(), iced_test::Error> {
+    let (_, mut app) = listed();
+    english(&mut app);
+    app.update(Message::Vendor(CloudVendor::Aws));
+
+    let mut ui = screen(&app, TALL);
+    assert!(ui.find("This vendor is not supported yet").is_ok());
+    assert!(ui.find("This build has no client for it").is_ok());
 
     Ok(())
 }

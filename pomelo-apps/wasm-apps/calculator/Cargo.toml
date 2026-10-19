@@ -1,0 +1,12 @@
+[package]
+name = "calculator-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "The calculator, as an installed package rather than a crate in the firmware"
+license = "GPL-3.0-only"
+
+[dependencies]
+app-sdk = { path = "../../app-sdk" }
+
+[lib]
+crate-type = ["cdylib"]

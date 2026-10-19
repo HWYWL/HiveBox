@@ -4,6 +4,15 @@ CONFIG_IDF_TARGET="esp32s3"
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
 
+# C is built for size, not for debugging.
+#
+# The Rust half of this image has been `-Os`/`-Oz` since the beginning; the C half — ESP-IDF, LVGL,
+# mbedtls, the board HAL — was still on ESP-IDF's `-Og` default, which is a debugging level. A
+# release build has no debugger attached to it. With this on, the image that the wasm runtime pushed
+# past the end of an `ota_0` slot fits again; nothing here was optimised for speed to begin with
+# (see `[profile.release]` in `components/rust_main/Cargo.toml` for the other half of the argument).
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
 # Flash 16MB QIO
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
@@ -111,3 +120,12 @@ CONFIG_ESP_WIFI_ENABLED=y
 # because of it. The 8 MB of PSRAM have room to spare, and IDF's AES/PSA layers fall back to
 # their non-DMA paths for buffers that live there.
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+
+# Cross-signed roots are real roots.
+#
+# Alibaba's `*.aliyuncs.com` chain ends in `GlobalSign Root R46` *as signed by* `GlobalSign Root CA`
+# — a cross-signed copy of a root that is already in the bundle — and mbedTLS without this option
+# refuses to anchor there. Every single `ecs.<region>.aliyuncs.com` handshake came back
+# "No matching trusted root certificate found", which looked like a wrong region list and was a
+# verification flag. Tencent's chain ends in a plain root and never needed it.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY=y

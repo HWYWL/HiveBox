@@ -1,0 +1,39 @@
+[package]
+name = "store"
+version = "0.1.0"
+edition = "2021"
+description = "The application store: what the repository publishes, what is installed, and the press between them"
+license = "GPL-3.0-only"
+
+[dependencies]
+# The runtime's public face: the catalog, the installer and the version comparison. No `ui`: this
+# page draws a list, and the display list's widget belongs to the launcher.
+app-host = { path = "../app-host" }
+
+# The manifest reader and the version rules the repository writes them with. The same crate the
+# update page uses, so a package the store offers and a firmware the update page offers are read by
+# one parser and cannot disagree about a version.
+updater = { path = "../updater", default-features = false }
+
+# The facade. No renderer of its own: `desktop` below decides that, exactly as for every other app.
+iced = { version = "0.14", default-features = false, features = ["thread-pool", "x11", "wayland"] }
+
+# The board: the HTTP client a download goes through, and the two volumes a package may live on.
+pomelo-hal = { git = "https://github.com/pomelos-on-sale/pomelo-hal.git", rev = "20eaa910f0a05cd68684d6aa868fd78457c51be9" }
+
+# The theme tokens and the two preferences this page reads: the language and the theme.
+pomelo-widgets = { git = "https://github.com/pomelos-on-sale/pomelo-widgets.git", rev = "f499da5cc17ef16ced6e6b1e62286bb020837a0b" }
+
+# The store's own glyph, the refresh, and the three the prompt wears.
+pomelo-material-symbols = { git = "https://github.com/pomelos-on-sale/pomelo-material-symbols.git", rev = "7dc390fb1924dc69b375e5ae77806857f798cc58" }
+
+[dev-dependencies]
+# Only the tests build a package by hand: the container's header, and the magic it starts with.
+app-abi = { path = "../app-abi" }
+
+[features]
+# On by default, because a project of its own is a desktop program. The board is the other way
+# round: the launcher depends on this crate with `default-features = false` and the platform layer
+# turns `pomelo` on instead — the two are mutually exclusive inside `iced_renderer`.
+desktop = ["iced/tiny-skia"]
+default = ["desktop"]

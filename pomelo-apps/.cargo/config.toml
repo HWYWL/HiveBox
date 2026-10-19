@@ -1,0 +1,17 @@
+# Settings for the packages, not for the desktop applications.
+#
+# A wasm module's linear memory starts out holding its data *and its stack*, and rustc's default
+# stack for `wasm32-unknown-unknown` is one megabyte. That is four times the sandbox's entire memory
+# budget before a single static has been counted — the first calculator package failed to start with
+# "1,114,112 / 262,144 bytes". Sixty-four kilobytes is what this SDK's formatting and drawing need,
+# and the rest of the module's memory is its own arrays.
+#
+# `--strip-debug` is the other half of a package's size: names and debug sections are half of an
+# unoptimised module and none of what the host executes.
+[target.wasm32-unknown-unknown]
+rustflags = [
+    "-C",
+    "link-arg=-zstack-size=65536",
+    "-C",
+    "link-arg=--strip-debug",
+]

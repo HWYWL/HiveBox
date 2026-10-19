@@ -1,5 +1,4 @@
-//! The simulated cloud account: two products, a few machines each, and a round trip that takes
-//! three ticks.
+//! The simulated cloud account: two vendors, four machines, and a round trip that takes three ticks.
 //!
 //! What it exists for is the panel app: a page that lists somebody's servers cannot be built on a
 //! desktop without servers, and the C side's answer document cannot be produced without a network.
@@ -7,25 +6,29 @@
 //! forget: a request that answered in the same frame it was asked for would let a page be written
 //! that never draws a spinner, and the spinner is most of what a person sees on the device.
 //!
-//! # The two machines are not the same machine
+//! # The machines are not the same machine
 //!
-//! One product has two instances and the other has one, and the two sets are deliberately not
-//! alike: an instance that is up with an address, one that is down with none, one product with a
-//! name somebody chose and one whose name is its id. A list of four identical rows would hide every
-//! layout question a page has to answer.
+//! One product has two instances and another has one, and the sets are deliberately not alike: an
+//! instance that is up with an address, one that is down with none, one product with a name somebody
+//! chose and one whose name is its id, and machines in two different data centres. A list of four
+//! identical rows would hide every layout question a page has to answer.
 //!
 //! # What can be asked of it
 //!
-//! [`SimCloud::without_key`] takes a product's credentials away, which is the one screen a page has
+//! [`SimCloud::without_key`] takes a vendor's credentials away, which is the one screen a page has
 //! that a happy-path simulator never reaches, and [`SimCloud::failing`] makes every request end in a
 //! chosen fault. Both are builders rather than knobs to turn at runtime: what they are for is a
 //! demo's `main.rs` and a test, and both of those know what they want before the first frame.
+//!
+//! AWS is here the way the board has it: a vendor with a row and no client. A list of it answers
+//! [`CloudFault::Unsupported`] whether or not a key is saved, which is the sentence the page has to
+//! be able to say and the one thing a happy-path simulator would never produce.
 
 use crate::error::HalError;
 use crate::traits::CloudBackend;
 use crate::types::{
     CloudAction, CloudAnswer, CloudFault, CloudInstance, CloudInstanceState, CloudKey, CloudProvider,
-    CloudState,
+    CloudState, CloudTarget, CloudVendor,
 };
 
 /// How many ticks an invented request takes before its answer is ready.
@@ -36,15 +39,18 @@ use crate::types::{
 /// [`CloudBackend::tick`].
 const LATENCY: u32 = 3;
 
-/// The region the invented account's machines are in.
+/// The region the invented Tencent account's machines are in.
 const REGION: &str = "ap-guangzhou";
+
+/// The region the invented Alibaba account's machine is in, spelled the way Alibaba spells it.
+const ALIYUN_REGION: &str = "cn-hangzhou";
 
 /// A cloud account that is not there.
 pub struct SimCloud {
-    /// The key per product, indexed by [`CloudProvider::index`].
-    keys: [CloudKey; 2],
-    /// The instances per product, in the order the provider would list them.
-    instances: [Vec<CloudInstance>; 2],
+    /// The key per vendor, indexed by [`CloudVendor::index`].
+    keys: [CloudKey; 3],
+    /// The instances per product, indexed by [`CloudProvider::index`].
+    instances: [Vec<CloudInstance>; 4],
     /// The request in flight, if there is one.
     in_flight: Option<Request>,
     /// The answer waiting to be taken, if there is one.
@@ -59,22 +65,27 @@ pub struct SimCloud {
 
 /// The request in flight: what was asked, and how long is left of the round trip.
 struct Request {
-    provider: CloudProvider,
+    target: CloudTarget,
     action: CloudAction,
     instance: String,
     ticks_left: u32,
 }
 
 impl SimCloud {
-    /// A cloud account with both products set up and three machines on it.
+    /// An account with two vendors set up and four machines on it.
     pub fn new() -> Self {
-        let key = CloudKey {
+        let tencent = CloudKey {
             masked: String::from("AKID1a2b……7z9y"),
             region: String::from(REGION),
         };
 
+        let aliyun = CloudKey {
+            masked: String::from("LTAI4G……8k2m"),
+            region: String::from(ALIYUN_REGION),
+        };
+
         Self {
-            keys: [key.clone(), key],
+            keys: [tencent, aliyun, CloudKey::default()],
             instances: [
                 vec![
                     CloudInstance {
@@ -100,11 +111,21 @@ impl SimCloud {
                     state: CloudInstanceState::Running,
                     ip: String::from("198.51.100.42"),
                     provider: CloudProvider::Lighthouse,
-                    /* Not the same data centre as the other two: a merged list is also a merge of
+                    /* Not the same data centre as the other two: a vendor's list is also a merge of
                      * regions, and a demo that put everything in one would never show a row whose
                      * power command has to name a region. */
                     region: String::from("ap-tokyo"),
                 }],
+                vec![CloudInstance {
+                    id: String::from("i-bp1xy2z3"),
+                    name: String::from("api-01"),
+                    state: CloudInstanceState::Running,
+                    ip: String::from("47.96.1.2"),
+                    provider: CloudProvider::Ecs,
+                    region: String::from(ALIYUN_REGION),
+                }],
+                // AWS has no client in this build, so it has no machines to invent.
+                Vec::new(),
             ],
             in_flight: None,
             answer: None,
@@ -114,13 +135,13 @@ impl SimCloud {
         }
     }
 
-    /// The same account with `provider`'s key taken away.
+    /// The same account with `vendor`'s key taken away.
     ///
     /// The screen a board is on before anybody has typed a key in, and one a page has to draw
     /// rather than skip: nothing about it is a failure, and what it has to say is where the key
     /// goes in.
-    pub fn without_key(mut self, provider: CloudProvider) -> Self {
-        self.keys[provider.index()] = CloudKey::default();
+    pub fn without_key(mut self, vendor: CloudVendor) -> Self {
+        self.keys[vendor.index()] = CloudKey::default();
         self
     }
 
@@ -133,44 +154,45 @@ impl SimCloud {
         self
     }
 
-    /// The instances of `provider`, as the list request would answer with them.
+    /// The instances of one vendor, as its list request would answer with them.
     ///
-    /// `All` is the merge, in the order the page draws the products and the order the C side's merged
-    /// answer puts them in — and only from products that have a key, which is the same rule the board
-    /// follows: a product nobody typed a key for contributes no machines and no complaint.
-    fn list_of(&self, provider: CloudProvider) -> Vec<CloudInstance> {
-        match provider {
-            CloudProvider::All => CloudProvider::PRODUCTS
-                .iter()
-                .filter(|product| self.keys[product.index()].configured())
-                .flat_map(|product| self.instances[product.index()].clone())
-                .collect(),
-            product => self.instances[product.index()].clone(),
+    /// A merge, in the order the page draws the products and the order the C side's answer puts them
+    /// in — and only from a product whose vendor has a key, which is the same rule the board
+    /// follows: a vendor nobody typed a key for contributes no machines and no complaint.
+    fn list_of(&self, vendor: CloudVendor) -> Vec<CloudInstance> {
+        if !self.keys[vendor.index()].configured() {
+            return Vec::new();
         }
-    }
 
-    /// Whether any product has a key, which is what a merged list needs to have somewhere to look.
-    fn any_key(&self) -> bool {
-        CloudProvider::PRODUCTS
+        vendor
+            .products()
             .iter()
-            .any(|product| self.keys[product.index()].configured())
+            .flat_map(|product| self.instances[product.index()].clone())
+            .collect()
     }
 
     /// Turns the request in flight into the answer it earned.
     fn settle(&mut self, request: Request) {
-        let provider = request.provider;
+        let target = request.target;
 
-        /* A merged list needs one key somewhere; a single product needs its own. Which is the same
-         * question the board asks before it opens a socket, and the same answer. */
-        let keyed = match provider {
-            CloudProvider::All => self.any_key(),
-            product => self.keys[product.index()].configured(),
+        let vendor = match target {
+            CloudTarget::Vendor(vendor) => vendor,
+            CloudTarget::Machine(product) => product.vendor(),
         };
 
-        if let Some(fault) = self
-            .fault
-            .or_else(|| (!keyed).then_some(CloudFault::NoCredentials))
-        {
+        /* A vendor this build has no client for says so before anything else, even with a key saved:
+         * that is the whole of what "AWS is in the list" means today. */
+        let keyed = self.keys[vendor.index()].configured();
+
+        if let Some(fault) = self.fault.or_else(|| {
+            if !vendor.is_wired_up() {
+                Some(CloudFault::Unsupported)
+            } else if !keyed {
+                Some(CloudFault::NoCredentials)
+            } else {
+                None
+            }
+        }) {
             self.state = CloudState::Failed(fault);
             // No code and no sentence: those two fields are for what a *provider* wrote down, and
             // a fault is this side's own account of what happened. See `CloudAnswer::Refused`.
@@ -187,22 +209,30 @@ impl SimCloud {
         self.state = CloudState::Done;
         self.answer = Some(match request.action {
             CloudAction::List => CloudAnswer::Instances {
-                provider,
-                /* A merged list has no one region: a region belongs to a key, and the rows can come
-                 * from two of them. A single product's list is the region its key was saved with. */
-                region: match provider {
-                    CloudProvider::All => String::new(),
-                    product => self.keys[product.index()].region.clone(),
-                },
-                instances: self.list_of(provider),
-                // The simulator's two products always answer: there is no network here to lose half
-                // of a list to.
+                vendor,
+                /* A list has no one region: it spans every data centre of every product, and each
+                 * row carries its own. */
+                region: String::new(),
+                instances: self.list_of(vendor),
+                // The simulator's products always answer: there is no network here to lose half of
+                // a list to.
                 failed: Vec::new(),
             },
             action => {
+                let CloudTarget::Machine(product) = target else {
+                    // Unreachable in practice: `start` refuses a power command that names a vendor.
+                    self.state = CloudState::Failed(CloudFault::Args);
+                    self.answer = Some(CloudAnswer::Refused {
+                        fault: CloudFault::Args,
+                        code: String::new(),
+                        message: String::new(),
+                    });
+                    return;
+                };
+
                 // The command has landed by now: the instance was put into its in-between state
                 // when the request started, and this is the other end of it. See `start`.
-                if let Some(instance) = self.instances[provider.index()]
+                if let Some(instance) = self.instances[product.index()]
                     .iter_mut()
                     .find(|instance| instance.id == request.instance)
                 {
@@ -215,7 +245,7 @@ impl SimCloud {
                     }
 
                     CloudAnswer::Accepted {
-                        provider,
+                        provider: product,
                         action,
                         request_id: format!("sim-{:04}", self.serial),
                     }
@@ -241,14 +271,13 @@ impl Default for SimCloud {
 }
 
 impl CloudBackend for SimCloud {
-    fn key(&self, provider: CloudProvider) -> CloudKey {
-        // `all` owns no key: it is the union of two, and the table stays two entries wide.
-        self.keys.get(provider.index()).cloned().unwrap_or_default()
+    fn key(&self, vendor: CloudVendor) -> CloudKey {
+        self.keys.get(vendor.index()).cloned().unwrap_or_default()
     }
 
     fn start(
         &mut self,
-        provider: CloudProvider,
+        target: CloudTarget,
         action: CloudAction,
         instance: &str,
         _region: &str,
@@ -261,9 +290,15 @@ impl CloudBackend for SimCloud {
             return Err(HalError::InvalidArg);
         }
 
-        // `all` is a list's target and nothing else: a power command names one machine, and a machine
-        // belongs to one product's API. The board refuses it, and so does the simulator.
-        if action.is_power() && !provider.is_product() {
+        // A vendor is a list's target and nothing else: a power command names one machine, and a
+        // machine belongs to one product's API. The board refuses it, and so does the simulator.
+        if action.is_power() && !matches!(target, CloudTarget::Machine(_)) {
+            return Err(HalError::InvalidArg);
+        }
+
+        // A list names a vendor, and the board refuses a product there for the same reason: the
+        // number ranges do not overlap, and neither does this.
+        if !action.is_power() && !matches!(target, CloudTarget::Vendor(_)) {
             return Err(HalError::InvalidArg);
         }
 
@@ -272,22 +307,24 @@ impl CloudBackend for SimCloud {
         // also what makes a page's "busy" state reachable at all — a row that only went busy once
         // the answer arrived would never be seen busy.
         if action.is_power() {
-            if let Some(found) = self.instances[provider.index()]
-                .iter_mut()
-                .find(|found| found.id == instance)
-            {
-                found.state = match action {
-                    CloudAction::Start => CloudInstanceState::Starting,
-                    CloudAction::Stop => CloudInstanceState::Stopping,
-                    _ => CloudInstanceState::Rebooting,
-                };
+            if let CloudTarget::Machine(product) = target {
+                if let Some(found) = self.instances[product.index()]
+                    .iter_mut()
+                    .find(|found| found.id == instance)
+                {
+                    found.state = match action {
+                        CloudAction::Start => CloudInstanceState::Starting,
+                        CloudAction::Stop => CloudInstanceState::Stopping,
+                        _ => CloudInstanceState::Rebooting,
+                    };
+                }
             }
         }
 
         self.answer = None;
         self.state = CloudState::Running;
         self.in_flight = Some(Request {
-            provider,
+            target,
             action,
             instance: String::from(instance),
             ticks_left: LATENCY,
@@ -316,15 +353,17 @@ impl CloudBackend for SimCloud {
         // at "starting" for ever.
         if let Some(request) = self.in_flight.take() {
             if request.action.is_power() {
-                if let Some(found) = self.instances[request.provider.index()]
-                    .iter_mut()
-                    .find(|found| found.id == request.instance)
-                {
-                    found.state = match request.action {
-                        CloudAction::Start => CloudInstanceState::Stopped,
-                        CloudAction::Stop => CloudInstanceState::Running,
-                        _ => CloudInstanceState::Running,
-                    };
+                if let CloudTarget::Machine(product) = request.target {
+                    if let Some(found) = self.instances[product.index()]
+                        .iter_mut()
+                        .find(|found| found.id == request.instance)
+                    {
+                        found.state = match request.action {
+                            CloudAction::Start => CloudInstanceState::Stopped,
+                            CloudAction::Stop => CloudInstanceState::Running,
+                            _ => CloudInstanceState::Running,
+                        };
+                    }
                 }
             }
         }
@@ -363,7 +402,9 @@ mod tests {
     fn a_list_takes_its_ticks_and_then_answers() {
         let mut cloud = SimCloud::new();
 
-        cloud.start(CloudProvider::Cvm, CloudAction::List, "", "").unwrap();
+        cloud
+            .start(CloudTarget::Vendor(CloudVendor::Tencent), CloudAction::List, "", "")
+            .unwrap();
         assert_eq!(cloud.state(), CloudState::Running);
         // Nothing to take while the request is in flight, and a page that tried is told so rather
         // than handed a half-built answer.
@@ -373,7 +414,7 @@ mod tests {
         assert_eq!(cloud.state(), CloudState::Done);
 
         let CloudAnswer::Instances {
-            provider,
+            vendor,
             region,
             instances,
             ..
@@ -382,9 +423,12 @@ mod tests {
             panic!("a list should read as instances");
         };
 
-        assert_eq!(provider, CloudProvider::Cvm);
-        assert_eq!(region, REGION);
-        assert_eq!(instances.len(), 2);
+        assert_eq!(vendor, CloudVendor::Tencent);
+        // A list spans regions, so it names none.
+        assert_eq!(region, "");
+        // Both products of the vendor, merged.
+        assert_eq!(instances.len(), 3);
+        assert_eq!(instances[2].provider, CloudProvider::Lighthouse);
         // Taking it is what ends the request: the state goes back to idle and there is no second
         // answer to take.
         assert_eq!(cloud.state(), CloudState::Idle);
@@ -392,12 +436,33 @@ mod tests {
     }
 
     #[test]
+    fn a_list_of_one_vendor_does_not_show_another_vendors_machines() {
+        let mut cloud = SimCloud::new();
+
+        cloud
+            .start(CloudTarget::Vendor(CloudVendor::Aliyun), CloudAction::List, "", "")
+            .unwrap();
+        settled(&mut cloud);
+
+        let CloudAnswer::Instances { vendor, instances, .. } = cloud.take_answer().unwrap() else {
+            panic!("a list should read as instances");
+        };
+
+        assert_eq!(vendor, CloudVendor::Aliyun);
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].provider, CloudProvider::Ecs);
+        assert_eq!(instances[0].region, ALIYUN_REGION);
+    }
+
+    #[test]
     fn a_second_request_while_one_is_in_flight_is_busy() {
         let mut cloud = SimCloud::new();
 
-        cloud.start(CloudProvider::Cvm, CloudAction::List, "", "").unwrap();
+        cloud
+            .start(CloudTarget::Vendor(CloudVendor::Tencent), CloudAction::List, "", "")
+            .unwrap();
         assert_eq!(
-            cloud.start(CloudProvider::Cvm, CloudAction::List, "", ""),
+            cloud.start(CloudTarget::Vendor(CloudVendor::Tencent), CloudAction::List, "", ""),
             Err(HalError::Busy)
         );
     }
@@ -407,10 +472,15 @@ mod tests {
         let mut cloud = SimCloud::new();
 
         cloud
-            .start(CloudProvider::Cvm, CloudAction::Start, "ins-e5f6a7b8", "")
+            .start(
+                CloudTarget::Machine(CloudProvider::Cvm),
+                CloudAction::Start,
+                "ins-e5f6a7b8",
+                "",
+            )
             .unwrap();
         // Busy before the provider has answered, which is what the row draws.
-        assert!(cloud.list_of(CloudProvider::Cvm)[1].state.is_busy());
+        assert!(cloud.instances[CloudProvider::Cvm.index()][1].state.is_busy());
 
         settled(&mut cloud);
         let CloudAnswer::Accepted {
@@ -421,7 +491,10 @@ mod tests {
         };
         assert_eq!(provider, CloudProvider::Cvm);
         assert_eq!(action, CloudAction::Start);
-        assert_eq!(cloud.list_of(CloudProvider::Cvm)[1].state, CloudInstanceState::Running);
+        assert_eq!(
+            cloud.instances[CloudProvider::Cvm.index()][1].state,
+            CloudInstanceState::Running
+        );
     }
 
     #[test]
@@ -429,25 +502,42 @@ mod tests {
         let mut cloud = SimCloud::new();
 
         assert_eq!(
-            cloud.start(CloudProvider::Cvm, CloudAction::Stop, "", ""),
+            cloud.start(CloudTarget::Machine(CloudProvider::Cvm), CloudAction::Stop, "", ""),
             Err(HalError::InvalidArg)
         );
     }
 
     #[test]
-    fn a_product_with_no_key_says_so_rather_than_failing_to_connect() {
-        let mut cloud = SimCloud::new().without_key(CloudProvider::Lighthouse);
+    fn a_power_command_that_names_a_vendor_is_a_bad_argument() {
+        let mut cloud = SimCloud::new();
 
-        assert!(!cloud.key(CloudProvider::Lighthouse).configured());
+        assert_eq!(
+            cloud.start(CloudTarget::Vendor(CloudVendor::Tencent), CloudAction::Stop, "ins-1", ""),
+            Err(HalError::InvalidArg)
+        );
+    }
+
+    #[test]
+    fn a_list_that_names_a_product_is_a_bad_argument() {
+        let mut cloud = SimCloud::new();
+
+        assert_eq!(
+            cloud.start(CloudTarget::Machine(CloudProvider::Cvm), CloudAction::List, "", ""),
+            Err(HalError::InvalidArg)
+        );
+    }
+
+    #[test]
+    fn a_vendor_with_no_key_says_so_rather_than_failing_to_connect() {
+        let mut cloud = SimCloud::new().without_key(CloudVendor::Aliyun);
+
+        assert!(!cloud.key(CloudVendor::Aliyun).configured());
         cloud
-            .start(CloudProvider::Lighthouse, CloudAction::List, "", "")
+            .start(CloudTarget::Vendor(CloudVendor::Aliyun), CloudAction::List, "", "")
             .unwrap();
         settled(&mut cloud);
 
-        assert_eq!(
-            cloud.state(),
-            CloudState::Failed(CloudFault::NoCredentials)
-        );
+        assert_eq!(cloud.state(), CloudState::Failed(CloudFault::NoCredentials));
         let CloudAnswer::Refused { fault, .. } = cloud.take_answer().unwrap() else {
             panic!("no key should read as a refusal");
         };
@@ -455,17 +545,38 @@ mod tests {
     }
 
     #[test]
-    fn a_cancelled_command_leaves_the_machine_where_it_was() {
+    fn aws_is_a_row_with_no_client_and_says_so() {
         let mut cloud = SimCloud::new();
-        let before = cloud.list_of(CloudProvider::Cvm);
 
         cloud
-            .start(CloudProvider::Cvm, CloudAction::Stop, "ins-a1b2c3d4", "")
+            .start(CloudTarget::Vendor(CloudVendor::Aws), CloudAction::List, "", "")
+            .unwrap();
+        settled(&mut cloud);
+
+        // Not "no credentials", which would tell the person to type a key that cannot help yet.
+        assert_eq!(cloud.state(), CloudState::Failed(CloudFault::Unsupported));
+    }
+
+    #[test]
+    fn a_cancelled_command_leaves_the_machine_where_it_was() {
+        let mut cloud = SimCloud::new();
+        let before = cloud.instances[CloudProvider::Cvm.index()].clone();
+
+        cloud
+            .start(
+                CloudTarget::Machine(CloudProvider::Cvm),
+                CloudAction::Stop,
+                "ins-a1b2c3d4",
+                "",
+            )
             .unwrap();
         cloud.cancel().unwrap();
 
         assert_eq!(cloud.state(), CloudState::Idle);
-        assert_eq!(cloud.list_of(CloudProvider::Cvm)[0].state, before[0].state);
+        assert_eq!(
+            cloud.instances[CloudProvider::Cvm.index()][0].state,
+            before[0].state
+        );
         // And nothing of the cancelled request is left to arrive late.
         settled(&mut cloud);
         assert_eq!(cloud.state(), CloudState::Idle);

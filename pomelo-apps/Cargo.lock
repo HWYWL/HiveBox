@@ -87,9 +87,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "app-abi"
+version = "0.1.0"
+
+[[package]]
+name = "app-host"
+version = "0.1.0"
+dependencies = [
+ "app-abi",
+ "iced",
+ "mini-json",
+ "pomelo-hal",
+ "sha2",
+ "wasmi",
+]
+
+[[package]]
 name = "app-launcher"
 version = "0.1.0"
 dependencies = [
+ "app-abi",
+ "app-host",
  "calculator",
  "clock",
  "cloud-monitor",
@@ -104,12 +122,20 @@ dependencies = [
  "pomelo-widgets",
  "power-log",
  "settings",
+ "store",
  "task-viewer",
  "terminal",
  "updater",
  "weather",
  "web-manager",
  "wifi-map",
+]
+
+[[package]]
+name = "app-sdk"
+version = "0.1.0"
+dependencies = [
+ "app-abi",
 ]
 
 [[package]]
@@ -325,6 +351,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "calculator-wasm"
+version = "0.1.0"
+dependencies = [
+ "app-sdk",
+]
+
+[[package]]
 name = "calloop"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -447,6 +480,13 @@ dependencies = [
  "pomelo-hal",
  "pomelo-material-symbols",
  "pomelo-widgets",
+]
+
+[[package]]
+name = "clock-wasm"
+version = "0.1.0"
+dependencies = [
+ "app-sdk",
 ]
 
 [[package]]
@@ -1434,6 +1474,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "indexmap-nostd"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e04e2fd2b8188ea827b32ef11de88377086d690286ab35747ef7f9bf3ccb590"
+
+[[package]]
 name = "interpolate_name"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1746,6 +1792,10 @@ checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "mini-json"
+version = "0.1.0"
 
 [[package]]
 name = "miniz_oxide"
@@ -3090,6 +3140,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "spin"
+version = "0.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3100,6 +3156,19 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "store"
+version = "0.1.0"
+dependencies = [
+ "app-abi",
+ "app-host",
+ "iced",
+ "pomelo-hal",
+ "pomelo-material-symbols",
+ "pomelo-widgets",
+ "updater",
+]
 
 [[package]]
 name = "strict-num"
@@ -3514,6 +3583,7 @@ name = "updater"
 version = "0.1.0"
 dependencies = [
  "iced",
+ "mini-json",
  "pomelo-hal",
  "pomelo-material-symbols",
  "pomelo-widgets",
@@ -3609,6 +3679,46 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23f0c9c52aa7cd7d77769a4cfe2a9adb1b331f489a41d912ce14513d5ab995c6"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "wasmi"
+version = "0.31.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77a8281d1d660cdf54c76a3efa9ddd0c270cada1383a995db3ccb43d166456c7"
+dependencies = [
+ "smallvec",
+ "spin",
+ "wasmi_arena",
+ "wasmi_core",
+ "wasmparser-nostd",
+]
+
+[[package]]
+name = "wasmi_arena"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "104a7f73be44570cac297b3035d76b169d6599637631cf37a1703326a0727073"
+
+[[package]]
+name = "wasmi_core"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dcf1a7db34bff95b85c261002720c00c3a6168256dcb93041d3fa2054d19856a"
+dependencies = [
+ "downcast-rs",
+ "libm",
+ "num-traits",
+ "paste",
+]
+
+[[package]]
+name = "wasmparser-nostd"
+version = "0.100.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5a015fe95f3504a94bb1462c717aae75253e39b9dd6c3fb1062c934535c64aa"
+dependencies = [
+ "indexmap-nostd",
 ]
 
 [[package]]

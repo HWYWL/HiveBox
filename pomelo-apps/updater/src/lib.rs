@@ -73,7 +73,6 @@
 //! where two buttons are honest, because there is something to choose between and the box cannot use
 //! what it has just taken until it has been reset. See [`Message::Restart`].
 
-mod json;
 mod release;
 pub mod style;
 #[cfg(test)]
@@ -89,7 +88,7 @@ use iced::{Element, Subscription, Theme};
 use pomelo_hal::{Board, HalError, HttpFault, HttpState, Sink, VolumeKind};
 use pomelo_widgets::preferences::{Language, SystemPreferences, ThemeMode};
 
-pub use release::{Kind, Manifest, Release, Version, MANIFEST_URL};
+pub use release::{AppRelease, Kind, Manifest, Release, Version, MANIFEST_URL};
 
 /// Where the glyph tables live, on whichever mount the card was given.
 ///

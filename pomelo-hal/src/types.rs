@@ -1188,87 +1188,182 @@ pub enum SystemEvent {
     Tick,
 }
 
-/// Which of the cloud provider's two server products a page is showing — or both at once.
+/// Whose cloud a page is looking at: the first question, and the first screen.
 ///
-/// Two products and not one, because that is what they are: an elastic cloud server and a
-/// lightweight one are two APIs, with two endpoint names, two versions and two shapes of answer.
-/// One account and one API key reach both; nothing else about them is shared.
+/// The order is the C side's (`HAL_CLOUD_VENDOR_*`), because it is also the order of the sections in
+/// the credentials file. A vendor is what a key belongs to and what a list names; a product (see
+/// [`CloudProvider`]) is what a single machine belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum CloudVendor {
+    /// 腾讯云: CVM and 轻量应用服务器, one key, two APIs.
+    #[default]
+    Tencent,
+    /// 阿里云: ECS. One key, one API, a region in the host name.
+    Aliyun,
+    /// AWS: EC2. In the list, with a key if one is saved, and no client yet.
+    Aws,
+}
+
+impl CloudVendor {
+    /// Every vendor, in the order a page draws them.
+    pub const ALL: [CloudVendor; 3] =
+        [CloudVendor::Tencent, CloudVendor::Aliyun, CloudVendor::Aws];
+
+    /// Where this vendor sits, as the C side's vendor code.
+    pub fn index(self) -> usize {
+        match self {
+            CloudVendor::Tencent => 0,
+            CloudVendor::Aliyun => 1,
+            CloudVendor::Aws => 2,
+        }
+    }
+
+    /// The vendor whose code is `index`, when it is one this build knows.
+    pub fn from_index(index: usize) -> Option<CloudVendor> {
+        CloudVendor::ALL.get(index).copied()
+    }
+
+    /// The vendor as the wire spells it: `tencent`, `aliyun`, `aws`.
+    pub fn name(self) -> &'static str {
+        match self {
+            CloudVendor::Tencent => "tencent",
+            CloudVendor::Aliyun => "aliyun",
+            CloudVendor::Aws => "aws",
+        }
+    }
+
+    /// The vendor a query or an answer names. The older product names are accepted because a
+    /// bookmark, a `curl` line and an older page all still say `cvm` for a Tencent key.
+    pub fn from_name(name: &str) -> Option<CloudVendor> {
+        let name = name.trim();
+
+        match name {
+            _ if name.eq_ignore_ascii_case("tencent")
+                || name.eq_ignore_ascii_case("cvm")
+                || name.eq_ignore_ascii_case("lighthouse") =>
+            {
+                Some(CloudVendor::Tencent)
+            }
+            _ if name.eq_ignore_ascii_case("aliyun") || name.eq_ignore_ascii_case("alibaba") => {
+                Some(CloudVendor::Aliyun)
+            }
+            _ if name.eq_ignore_ascii_case("aws") || name.eq_ignore_ascii_case("amazon") => {
+                Some(CloudVendor::Aws)
+            }
+            _ => None,
+        }
+    }
+
+    /// The products this vendor sells, which is what a list of it walks.
+    pub fn products(self) -> &'static [CloudProvider] {
+        match self {
+            CloudVendor::Tencent => &[CloudProvider::Cvm, CloudProvider::Lighthouse],
+            CloudVendor::Aliyun => &[CloudProvider::Ecs],
+            CloudVendor::Aws => &[CloudProvider::Ec2],
+        }
+    }
+
+    /// Whether this build can actually ask this vendor anything.
+    ///
+    /// AWS is a name and a place to keep a key until its signature is written. Saying so is better
+    /// than an empty list that looks like an account with no machines.
+    pub fn is_wired_up(self) -> bool {
+        matches!(self, CloudVendor::Tencent | CloudVendor::Aliyun)
+    }
+}
+
+/// One product: an API with machines behind it.
 ///
-/// The order of the products is the C side's (`HAL_CLOUD_CVM`, `HAL_CLOUD_LIGHTHOUSE`), because it
-/// is also the order of the two accounts in the credentials file.
-///
-/// [`CloudProvider::All`] is not a product: it is the target of a *list*. It is the C side's
-/// `HAL_CLOUD_ALL`, which asks every provider that has a key and merges the answers into one list
-/// with a `kind` on each row. A power action always names one machine, so it always names one
-/// product — which is why every row carries the product it belongs to.
+/// Four and not two, because Tencent sells two kinds of server and Alibaba and AWS sell one each,
+/// and each is a different endpoint with a different signature. The order is the C side's
+/// (`HAL_CLOUD_CVM`, `HAL_CLOUD_LIGHTHOUSE`, `HAL_CLOUD_ECS`, `HAL_CLOUD_EC2`); the `name` of each is
+/// the wire's `kind`, which is what a power command names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum CloudProvider {
-    /// The elastic one, whose instance ids begin `ins-`.
+    /// 腾讯云 云服务器, whose instance ids begin `ins-`.
     #[default]
     Cvm,
-    /// The fixed-price one, whose instance ids begin `lhins-`.
+    /// 腾讯云 轻量应用服务器, whose instance ids begin `lhins-`.
     Lighthouse,
-    /// Both at once, for a list: every provider with a key on file, merged into one answer.
-    All,
+    /// 阿里云 ECS, whose instance ids begin `i-`.
+    Ecs,
+    /// AWS EC2, whose instance ids also begin `i-` — which is why a row's `kind` is sent back.
+    Ec2,
 }
 
 impl CloudProvider {
-    /// The two real products, in the order a page draws them. [`CloudProvider::All`] is not one.
-    pub const PRODUCTS: [CloudProvider; 2] = [CloudProvider::Cvm, CloudProvider::Lighthouse];
+    /// Every product, in the order a page draws them.
+    pub const PRODUCTS: [CloudProvider; 4] = [
+        CloudProvider::Cvm,
+        CloudProvider::Lighthouse,
+        CloudProvider::Ecs,
+        CloudProvider::Ec2,
+    ];
 
-    /// Where this provider sits, as the C side's provider code — `hal_cloud_start`'s first argument.
-    ///
-    /// The number is not this crate's invention, and the two agree only because
-    /// [`CloudProvider::PRODUCTS`] is written in the C side's order — see
-    /// [`CloudProvider::from_index`], which is the way back. [`CloudProvider::All`] is 2, the C
-    /// side's `HAL_CLOUD_ALL`, and is nobody's key: the credentials file is two entries wide.
+    /// Where this product sits, as the C side's product code.
     pub fn index(self) -> usize {
         match self {
             CloudProvider::Cvm => 0,
             CloudProvider::Lighthouse => 1,
-            CloudProvider::All => 2,
+            CloudProvider::Ecs => 2,
+            CloudProvider::Ec2 => 3,
         }
     }
 
-    /// The provider whose code is `index`, when it is one this build knows.
+    /// The product whose code is `index`, when it is one this build knows.
     pub fn from_index(index: usize) -> Option<CloudProvider> {
-        CloudProvider::PRODUCTS
-            .get(index)
-            .copied()
-            .or(match index {
-                2 => Some(CloudProvider::All),
-                _ => None,
-            })
+        CloudProvider::PRODUCTS.get(index).copied()
     }
 
-    /// The provider as the wire spells it: `cvm`, `lighthouse`, or `all`.
+    /// The product as the wire spells it, and as a row carries it: `cvm`, `lighthouse`, `ecs`, `ec2`.
     pub fn name(self) -> &'static str {
         match self {
             CloudProvider::Cvm => "cvm",
             CloudProvider::Lighthouse => "lighthouse",
-            CloudProvider::All => "all",
+            CloudProvider::Ecs => "ecs",
+            CloudProvider::Ec2 => "ec2",
         }
     }
 
-    /// Whether this is a product with machines of its own, rather than the union of them.
-    ///
-    /// The one question a page asks before it addresses a machine: a power command goes to a
-    /// product, and a row that said `All` would be a row with nowhere to send it.
-    pub fn is_product(self) -> bool {
-        self != CloudProvider::All
-    }
-
-    /// The provider an answer's `provider` field names, including `all`.
+    /// The product an answer's `kind` names.
     pub fn from_name(name: &str) -> Option<CloudProvider> {
         let name = name.trim();
-
-        if name.eq_ignore_ascii_case("all") {
-            return Some(CloudProvider::All);
-        }
 
         CloudProvider::PRODUCTS
             .into_iter()
             .find(|provider| provider.name().eq_ignore_ascii_case(name))
+    }
+
+    /// The company that sells this product.
+    pub fn vendor(self) -> CloudVendor {
+        match self {
+            CloudProvider::Cvm | CloudProvider::Lighthouse => CloudVendor::Tencent,
+            CloudProvider::Ecs => CloudVendor::Aliyun,
+            CloudProvider::Ec2 => CloudVendor::Aws,
+        }
+    }
+}
+
+/// What a `start` call names: a vendor for a list, a product for a command.
+///
+/// The two halves are given disjoint numbers on the way to the C side — vendors are `0..=2`,
+/// machines are `16..=19` (`HAL_CLOUD_MACHINE_BASE`) — so passing one where the other belongs is an
+/// argument error and not a plausible-looking request sent to the wrong place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CloudTarget {
+    /// Every machine this company has, across all of its products and regions.
+    Vendor(CloudVendor),
+    /// One machine's power, through the product its row came from.
+    Machine(CloudProvider),
+}
+
+impl CloudTarget {
+    /// The C side's number for this target.
+    pub fn index(self) -> usize {
+        match self {
+            CloudTarget::Vendor(vendor) => vendor.index(),
+            CloudTarget::Machine(provider) => 16 + provider.index(),
+        }
     }
 }
 
@@ -1469,14 +1564,14 @@ pub struct CloudInstance {
     pub ip: String,
     /// Which product this machine belongs to — the API a power command for it has to be sent to.
     ///
-    /// Carried on the row rather than assumed from the answer, because a merged list is exactly two
-    /// APIs in one: the row above may be a lightweight machine and the row below an elastic one,
-    /// and the two take the same command at different endpoints. Never [`CloudProvider::All`].
+    /// Carried on the row rather than assumed from the answer, because a merged list is exactly the
+    /// products of one vendor in one: the row above may be a lightweight machine and the row below an
+    /// elastic one, and the two take the same command at different endpoints.
     pub provider: CloudProvider,
     /// The data centre it lives in (`ap-guangzhou`, `ap-tokyo`, …).
     ///
-    /// Both APIs answer about one region per call, so a merged list is also every data centre in
-    /// one — and a power command has to name the region its machine is in, not the key's own.
+    /// Each product answers about one region per call, so a vendor's list is also every data centre
+    /// in one — and a power command has to name the region its machine is in, not the key's own.
     pub region: String,
 }
 
@@ -1544,11 +1639,14 @@ pub enum CloudFault {
     /// The answer could not be held: it did not fit the board's buffer, or the credentials file
     /// could not be read or written. A fault of the board rather than of the network.
     Storage,
+    /// This vendor is in the list but not in this build: AWS, whose signature is not written yet.
+    /// Not a missing key and not a network problem, and saying so beats an empty list.
+    Unsupported,
 }
 
 impl CloudFault {
-    /// All ten, in the C side's order, for a test that wants to walk them.
-    pub const ALL: [CloudFault; 10] = [
+    /// All eleven, in the C side's order, for a test that wants to walk them.
+    pub const ALL: [CloudFault; 11] = [
         CloudFault::Failed,
         CloudFault::Args,
         CloudFault::NoCredentials,
@@ -1559,6 +1657,7 @@ impl CloudFault {
         CloudFault::Http,
         CloudFault::Api,
         CloudFault::Storage,
+        CloudFault::Unsupported,
     ];
 
     /// The name this fault goes by on the wire, which is also the page's error string.
@@ -1579,6 +1678,7 @@ impl CloudFault {
             CloudFault::Http => "cloud_http",
             CloudFault::Api => "cloud_api",
             CloudFault::Storage => "cloud_storage",
+            CloudFault::Unsupported => "cloud_unsupported",
         }
     }
 
@@ -1606,18 +1706,17 @@ impl CloudFault {
 pub enum CloudAnswer {
     /// What the keys own.
     Instances {
-        /// Which list this is: one product's, or [`CloudProvider::All`] for a merged one.
-        provider: CloudProvider,
-        /// The region it was read from, as the key's file holds it. Empty for a merged list, whose
-        /// rows can come from two regions at once — the region is a property of a *key*, and a row
-        /// knows which key listed it.
+        /// Which vendor's list this is. A list is asked per vendor, because that is the screen a
+        /// person is on when they ask it.
+        vendor: CloudVendor,
+        /// The region it was read from, as the key's file holds it. Empty for a list, which spans
+        /// every region: the region is a property of a *row* now, and each row carries its own.
         region: String,
-        /// The instances, in the order the providers listed them: one product's, or each product's
-        /// in turn. Every row says which product it came from.
+        /// The instances, in the order the products listed them: every region of the first, then
+        /// every region of the second. Every row says which product and which region it came from.
         instances: Vec<CloudInstance>,
-        /// The products whose call failed on a merged list, so a page can say "轻量的这次没取到"
-        /// instead of quietly drawing half of what somebody owns. Empty for a single product's
-        /// list, which either arrived or answered with something else entirely.
+        /// The products whose calls failed, so a page can say "轻量的这次没取到" instead of quietly
+        /// drawing half of what somebody owns.
         failed: Vec<CloudProvider>,
     },
     /// The provider took a power command.

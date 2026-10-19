@@ -2180,10 +2180,10 @@ static esp_err_t handle_restart(httpd_req_t *req)
 /* ---------------------------------------------------------------------------
  * The cloud servers
  *
- * Five endpoints behind the page's cloud view: what is saved for each provider, saving a key,
- * forgetting one, and the two that actually reach Tencent Cloud.
+ * Five endpoints behind the page's cloud view: what is saved for each vendor, saving a key,
+ * forgetting one, and the two that actually reach a cloud.
  *
- * The two that reach it are the only handlers in this file that wait for something slower than the
+ * The two that reach one are the only handlers in this file that wait for something slower than the
  * filesystem. They wait by polling `hal_cloud_state` on a hundred-millisecond tick, which looks like
  * a busy loop and is not: the work is on a task of `board_cloud.c`'s own, and the polling here is
  * what a frame loop does with the same API one screen over. The waiting costs this one connection
@@ -2203,28 +2203,69 @@ static esp_err_t handle_restart(httpd_req_t *req)
  * the wait is the scan's 45 seconds plus room for the answer to be copied out. */
 #define WEB_CLOUD_WAIT_MS     50000
 
-/** Which provider the query named, or -1. `all` is what the page sends for a merged list; `cvm` and
- * `lighthouse` are still accepted, and the numbers too, so that a `curl` can use what `board_hal.h`
- * defines. */
-static int32_t cloud_provider_arg(httpd_req_t *req)
+/** Which vendor the query named, or -1.
+ *
+ * A list names a vendor, because that is the question the page asks first: "我的阿里云服务器". The
+ * older `provider=` is still read, and both Tencent products map to the one vendor, because a key
+ * belongs to the company: `?provider=cvm` and `?provider=lighthouse` are the same key and the same
+ * list now. The numbers work too, so a `curl` can use what `board_hal.h` defines.
+ *
+ * No parameter at all means Tencent: every stored key before vendors existed was one. */
+static int32_t cloud_vendor_arg(httpd_req_t *req)
 {
     char name[32];
 
-    if (!query_string(req, "provider", name, sizeof name)) {
+    if (query_string(req, "vendor", name, sizeof name)) {
+        if (strcasecmp(name, "tencent") == 0 || strcmp(name, "0") == 0) {
+            return HAL_CLOUD_VENDOR_TENCENT;
+        }
+        if (strcasecmp(name, "aliyun") == 0 || strcasecmp(name, "alibaba") == 0 ||
+            strcmp(name, "1") == 0) {
+            return HAL_CLOUD_VENDOR_ALIYUN;
+        }
+        if (strcasecmp(name, "aws") == 0 || strcasecmp(name, "amazon") == 0 ||
+            strcmp(name, "2") == 0) {
+            return HAL_CLOUD_VENDOR_AWS;
+        }
+
         return -1;
     }
 
-    if (strcasecmp(name, "cvm") == 0 || strcmp(name, "0") == 0) {
-        return HAL_CLOUD_CVM;
+    if (query_string(req, "provider", name, sizeof name)) {
+        if (strcasecmp(name, "cvm") == 0 || strcasecmp(name, "lighthouse") == 0 ||
+            strcasecmp(name, "tencent") == 0) {
+            return HAL_CLOUD_VENDOR_TENCENT;
+        }
+        if (strcasecmp(name, "ecs") == 0 || strcasecmp(name, "aliyun") == 0) {
+            return HAL_CLOUD_VENDOR_ALIYUN;
+        }
+        if (strcasecmp(name, "ec2") == 0 || strcasecmp(name, "aws") == 0) {
+            return HAL_CLOUD_VENDOR_AWS;
+        }
+
+        return -1;
     }
-    if (strcasecmp(name, "lighthouse") == 0 || strcmp(name, "1") == 0) {
-        return HAL_CLOUD_LIGHTHOUSE;
+
+    return HAL_CLOUD_VENDOR_TENCENT;
+}
+
+/** Which product a power command is aimed at, or -1.
+ *
+ * The page sends back the `kind` of the row the button was on, which is the only thing that says
+ * whether `StopInstances` goes to CVM or to Alibaba's ECS -- the ids of the two look alike. */
+static int32_t cloud_machine_arg(httpd_req_t *req)
+{
+    char name[32];
+
+    if (!query_string(req, "kind", name, sizeof name) &&
+        !query_string(req, "provider", name, sizeof name)) {
+        return -1;
     }
-    /* `all` is every provider with a key, merged into one answer. It is a list's target only: the
-     * power endpoint refuses it, because a machine is what a power action names. */
-    if (strcasecmp(name, "all") == 0) {
-        return HAL_CLOUD_ALL;
-    }
+
+    if (strcasecmp(name, "cvm") == 0)        return HAL_CLOUD_CVM;
+    if (strcasecmp(name, "lighthouse") == 0) return HAL_CLOUD_LIGHTHOUSE;
+    if (strcasecmp(name, "ecs") == 0)        return HAL_CLOUD_ECS;
+    if (strcasecmp(name, "ec2") == 0)        return HAL_CLOUD_EC2;
 
     return -1;
 }
@@ -2247,37 +2288,35 @@ static int32_t cloud_action_arg(httpd_req_t *req)
     return -1;
 }
 
-/* What is saved, and nothing that could be used to sign anything.
+/* What is saved for one vendor, and nothing that could be used to sign anything.
  *
- * There is one Tencent Cloud key, not one per product: the same SecretId and SecretKey can list both
- * CVM and Lighthouse machines, and the page has one box to type them into. The C layer still keeps
- * two copies -- each product signs against its own endpoint and keeps its own region -- and this
- * answer is the one the person recognises.
+ * A key belongs to a company: one Tencent SecretId reaches CVM and Lighthouse both, and one Alibaba
+ * AccessKey reaches every ECS region. So this answer is per vendor, and the page asks it once per
+ * card on the vendor screen.
  *
- * The SecretId comes back masked and the SecretKey does not come back at all, which is what makes it
- * safe for the page to ask this on every visit: a saved key draws as "AKID……wxyz" and a browser tab
- * that is left open on this page is not a tab holding a working credential. */
+ * The access key id comes back masked and the secret does not come back at all, which is what makes
+ * it safe for the page to ask this on every visit: a saved key draws as "AKID……wxyz" and a browser
+ * tab that is left open on this page is not a tab holding a working credential. */
 static esp_err_t handle_cloud_status(httpd_req_t *req)
 {
+    const int32_t vendor = cloud_vendor_arg(req);
+    if (vendor < 0) {
+        return send_blocked(req, "vendor must be tencent, aliyun or aws");
+    }
+
     char masked[HAL_CLOUD_SECRET_ID_MAX + 8];
     char region[HAL_CLOUD_REGION_MAX];
-    bool saved = false;
 
     masked[0] = '\0';
     region[0] = '\0';
 
-    for (int32_t provider = 0; provider < HAL_CLOUD_PROVIDER_COUNT; provider++) {
-        if (hal_cloud_credentials_get(provider, masked, sizeof masked, region, sizeof region) ==
-            ESP_OK) {
-            saved = true;
-            break;
-        }
-    }
+    const bool saved =
+        hal_cloud_credentials_get(vendor, masked, sizeof masked, region, sizeof region) == ESP_OK;
 
     web_buf_t buf;
     buf_init(&buf, 512);
-    buf_printf(&buf, "{\"saved\":%s,\"secret_id\":\"%s\",\"region\":\"%s\"}", saved ? "true" : "false",
-               masked, region);
+    buf_printf(&buf, "{\"saved\":%s,\"secret_id\":\"%s\",\"region\":\"%s\"}",
+               saved ? "true" : "false", masked, region);
 
     if (buf.full) {
         buf_free(&buf);
@@ -2290,20 +2329,24 @@ static esp_err_t handle_cloud_status(httpd_req_t *req)
     return ret;
 }
 
-/* Saves the Tencent Cloud key, for both products at once.
+/* Saves one vendor's key.
  *
- * The key is taken as three query parameters like everything else this page sends, so a SecretKey
- * with a `+` or an `&` in it arrives whole: the page encodes, `url_decode` decodes, and neither end
- * guesses. What it is *not* is checked against Tencent here -- a key that is the wrong shape is
- * refused, and a key that is simply wrong is found out by the first request that uses it, with the
- * API's own sentence about why.
+ * The key is taken as query parameters like everything else this page sends, so a secret with a `+`
+ * or an `&` in it arrives whole: the page encodes, `url_decode` decodes, and neither end guesses.
+ * What it is *not* is checked against the API here -- a key that is the wrong shape is refused, and a
+ * key that is simply wrong is found out by the first request that uses it, with the API's own
+ * sentence about why.
  *
- * One key, two copies underneath: CVM and Lighthouse sign against different endpoints, so each keeps
- * its own record. The page never has to know that, and the region it no longer asks for defaults to
- * `ap-guangzhou` -- a list scans every data centre anyway.
+ * The region is optional and defaults to the vendor's first data centre: a list scans every region
+ * anyway, and the saved one is only what a power command falls back to.
  */
 static esp_err_t handle_cloud_remember(httpd_req_t *req)
 {
+    const int32_t vendor = cloud_vendor_arg(req);
+    if (vendor < 0) {
+        return send_blocked(req, "vendor must be tencent, aliyun or aws");
+    }
+
     char secret_id[HAL_CLOUD_SECRET_ID_MAX];
     char secret_key[HAL_CLOUD_SECRET_KEY_MAX];
     char region[HAL_CLOUD_REGION_MAX];
@@ -2320,39 +2363,42 @@ static esp_err_t handle_cloud_remember(httpd_req_t *req)
         region[0] = '\0';
     }
 
-    for (int32_t provider = 0; provider < HAL_CLOUD_PROVIDER_COUNT; provider++) {
-        const esp_err_t err = hal_cloud_credentials_set(provider, region, secret_id, secret_key);
+    const esp_err_t err = hal_cloud_credentials_set(vendor, region, secret_id, secret_key);
 
-        if (err == ESP_ERR_INVALID_ARG) {
-            return send_error(req, "400 Bad Request", "cloud_key_shape",
-                              "a key must be printable ASCII, without quotes or backslashes");
-        }
-        if (err == ESP_ERR_INVALID_SIZE) {
-            return send_error(req, "400 Bad Request", "cloud_key_long", "the key is too long");
-        }
-        if (err != ESP_OK) {
-            return send_error(req, "500 Internal Server Error", "write_failed", esp_err_to_name(err));
-        }
+    if (err == ESP_ERR_INVALID_ARG) {
+        return send_error(req, "400 Bad Request", "cloud_key_shape",
+                          "a key must be printable ASCII, without quotes or backslashes");
+    }
+    if (err == ESP_ERR_INVALID_SIZE) {
+        return send_error(req, "400 Bad Request", "cloud_key_long", "the key is too long");
+    }
+    if (err != ESP_OK) {
+        return send_error(req, "500 Internal Server Error", "write_failed", esp_err_to_name(err));
     }
 
-    ESP_LOGI(TAG, "cloud key saved");
+    ESP_LOGI(TAG, "cloud key saved for %s", vendor == HAL_CLOUD_VENDOR_ALIYUN   ? "aliyun"
+                                            : vendor == HAL_CLOUD_VENDOR_AWS ? "aws"
+                                                                             : "tencent");
 
     return send_json(req, "{\"ok\":true}");
 }
 
-/* Forgets the key, both copies of it.
+/* Forgets one vendor's key.
  *
  * Forgetting a key that was never there is what the caller asked for, and the answer to it is that
- * there is no key. */
+ * there is no key. The other vendors' keys are not touched: a person who sells their Tencent
+ * machines does not thereby lose their Alibaba ones. */
 static esp_err_t handle_cloud_forget(httpd_req_t *req)
 {
-    for (int32_t provider = 0; provider < HAL_CLOUD_PROVIDER_COUNT; provider++) {
-        const esp_err_t err = hal_cloud_credentials_forget(provider);
+    const int32_t vendor = cloud_vendor_arg(req);
+    if (vendor < 0) {
+        return send_blocked(req, "vendor must be tencent, aliyun or aws");
+    }
 
-        if (err != ESP_OK && err != ESP_ERR_NOT_FOUND) {
-            return send_error(req, "500 Internal Server Error", "forget_failed",
-                              esp_err_to_name(err));
-        }
+    const esp_err_t err = hal_cloud_credentials_forget(vendor);
+
+    if (err != ESP_OK && err != ESP_ERR_NOT_FOUND) {
+        return send_error(req, "500 Internal Server Error", "forget_failed", esp_err_to_name(err));
     }
 
     ESP_LOGI(TAG, "cloud key forgotten");
@@ -2410,26 +2456,23 @@ static esp_err_t cloud_await(httpd_req_t *req, esp_err_t started)
 
 static esp_err_t handle_cloud_list(httpd_req_t *req)
 {
-    const int32_t provider = cloud_provider_arg(req);
-    if (provider < 0) {
-        return send_blocked(req, "provider must be cvm or lighthouse");
+    const int32_t vendor = cloud_vendor_arg(req);
+    if (vendor < 0) {
+        return send_blocked(req, "vendor must be tencent, aliyun or aws");
     }
 
-    char region[HAL_CLOUD_REGION_MAX];
-    if (!query_string(req, "region", region, sizeof region)) {
-        region[0] = '\0';
-    }
-
-    return cloud_await(req, hal_cloud_start(provider, HAL_CLOUD_ACTION_LIST, region, ""));
+    /* The region is not passed: a list asks every data centre of that vendor and merges the answers,
+     * which is the difference between "my machines" and "the ones I happened to buy in one place". */
+    return cloud_await(req, hal_cloud_start(vendor, HAL_CLOUD_ACTION_LIST, "", ""));
 }
 
 /* Power off, power on, reboot. One instance per call: the page draws one button per row, and a bulk
  * action is a page that can stop ten machines with one mis-tap. */
 static esp_err_t handle_cloud_power(httpd_req_t *req)
 {
-    const int32_t provider = cloud_provider_arg(req);
-    if (provider < 0) {
-        return send_blocked(req, "provider must be cvm or lighthouse");
+    const int32_t product = cloud_machine_arg(req);
+    if (product < 0) {
+        return send_blocked(req, "kind must be cvm, lighthouse, ecs or ec2");
     }
 
     const int32_t action = cloud_action_arg(req);
@@ -2447,7 +2490,8 @@ static esp_err_t handle_cloud_power(httpd_req_t *req)
         region[0] = '\0';
     }
 
-    return cloud_await(req, hal_cloud_start(provider, action, region, instance));
+    return cloud_await(req, hal_cloud_start(HAL_CLOUD_MACHINE_BASE + product, action, region,
+                                            instance));
 }
 
 /* ---------------------------------------------------------------------------

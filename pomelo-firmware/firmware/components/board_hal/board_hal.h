@@ -903,18 +903,28 @@ uint16_t hal_web_get_port(void);
 void hal_web_set_app_name(const char *name);
 
 /* ---------------------------------------------------------------------------
- * Cloud servers (Tencent Cloud).
+ * Cloud servers (Tencent Cloud, Alibaba Cloud, AWS).
  *
  * The board's second outbound client, and deliberately not the same shape as the
- * first: a cloud call is a POST with a JSON body signed by a SecretKey, so this
- * is its own entry point rather than another argument on `hal_http_*`.
+ * first: a cloud call is a POST signed by an access key, so this is its own
+ * entry point rather than another argument on `hal_http_*`.
  * `board_cloud.c` has the whole of why.
  *
- * Two providers, four actions between them:
+ * Two levels, because a person has machines at more than one company and each
+ * company is asked its own way:
  *
- *   HAL_CLOUD_CVM         腾讯云 · 云服务器          (ins-…)
- *   HAL_CLOUD_LIGHTHOUSE  腾讯云 · 轻量应用服务器    (lhins-…)
- *   HAL_CLOUD_ALL         两家的并集，只用于 LIST —— 一次问你存了密钥的每一家
+ *   HAL_CLOUD_VENDOR_TENCENT   腾讯云        CVM (ins-…) + 轻量 (lhins-…)
+ *   HAL_CLOUD_VENDOR_ALIYUN    阿里云        ECS (i-…)
+ *   HAL_CLOUD_VENDOR_AWS       AWS           EC2 (i-…, 还没接上)
+ *
+ *   HAL_CLOUD_CVM / LIGHTHOUSE / ECS / EC2   the products, one API each
+ *
+ * A *list* names a vendor (`hal_cloud_start(HAL_CLOUD_VENDOR_*…)`) and comes
+ * back with everything that vendor's products own, merged, each row carrying
+ * its `kind`. A *command* names the product (`HAL_CLOUD_MACHINE_BASE + kind`),
+ * which is what a row's `kind` is for. The two ranges do not overlap on purpose:
+ * 0..2 are vendors and 16..19 are machines, so a caller cannot pass one where
+ * the other is meant and get a plausible answer.
  *
  *   HAL_CLOUD_ACTION_LIST    what the key owns
  *   HAL_CLOUD_ACTION_START  power on
@@ -927,39 +937,49 @@ void hal_web_set_app_name(const char *name);
  * The document is the same one the page's cloud routes hand to a browser, so
  * both surfaces read the same words:
  *
- *   {"ok":1,"provider":"cvm","region":"ap-guangzhou","count":1,
- *    "instances":[{"id":"ins-…","name":"…","state":"RUNNING","ip":"1.2.3.4","kind":"cvm"}]}
- *   {"ok":1,"provider":"all","region":"","count":2,
- *    "instances":[{"id":"lhins-…",…,"kind":"lighthouse"},{"id":"ins-…",…,"kind":"cvm"}],
- *    "failed":["lighthouse"]}                        -- 这一家的这次没取到
- *   {"ok":1,"provider":"cvm","action":"stop","request_id":"…"}
+ *   {"ok":1,"vendor":"tencent","count":2,
+ *    "instances":[{"id":"lhins-…","name":"…","state":"RUNNING","ip":"…",
+ *                  "kind":"lighthouse","region":"ap-tokyo"}, …],
+ *    "failed":["cvm"]}                               -- 这一家这次没取到
+ *   {"ok":1,"kind":"ecs","action":"stop","request_id":"…"}
  *   {"error":"cloud_clock"}                          -- one of the faults below
  *   {"error":"cloud_api","code":"…","message":"…"}   -- the API refused
  *
- * `kind` is on every row, including the single-provider answers: a merged list
- * is a list of machines from two APIs, and a button has to know which API to
- * send `StartInstances` to. `HAL_CLOUD_ALL` is not a key's owner — the key table
- * is still two entries wide (`HAL_CLOUD_PROVIDER_COUNT`).
+ * A vendor with two products costs two APIs per region, which is why a list is
+ * one call per region per product and why the whole scan has a time budget.
  *
- * The keys are plaintext in `/internal/AppData/CLOUD/cloud.conf`, like the Wi-Fi
- * password and the NAS logins. A SecretKey is worse to leak than either of those
- * — it can stop or destroy everything the account owns — so give this board a
- * CAM sub-account whose policy names only the instances it may touch.
+ * The keys are plaintext in `/internal/AppData/CLOUD/cloud.conf`, one section
+ * per vendor, like the Wi-Fi password and the NAS logins. An access key is worse
+ * to leak than either of those — it can stop or destroy everything the account
+ * owns — so give this board a sub-account whose policy names only the instances
+ * it may touch.
  * ------------------------------------------------------------------------- */
 
-/** Both providers, and the count, which is what the key table is sized by. */
+/** 第一层：云服务商。列表以它为目标。 */
+#define HAL_CLOUD_VENDOR_TENCENT  0
+#define HAL_CLOUD_VENDOR_ALIYUN   1
+#define HAL_CLOUD_VENDOR_AWS      2
+#define HAL_CLOUD_VENDOR_COUNT    3
+
+/** 第二层：产品，一台机器属于一个。列表行的 `kind` 就是它。 */
 #define HAL_CLOUD_CVM             0
 #define HAL_CLOUD_LIGHTHOUSE      1
-#define HAL_CLOUD_PROVIDER_COUNT  2
+#define HAL_CLOUD_ECS             2
+#define HAL_CLOUD_EC2             3
+#define HAL_CLOUD_PROVIDER_COUNT  4
 
 /**
- * 「全部服务器」：一次请求把存了密钥的每一家都问一遍，答案合并成一张列表。
+ * 机器编号的起点。
  *
- * 只对 `HAL_CLOUD_ACTION_LIST` 有意义 —— 开关机总得指名一台机器，所以带
- * `HAL_CLOUD_ALL` 的电源动作会被 `hal_cloud_start` 拒掉。它只是列表的目标，不是任何
- * 一份密钥的主人，所以 `HAL_CLOUD_PROVIDER_COUNT` 仍然是 2，密钥表不因它变宽。
+ * `hal_cloud_start` 的第一个参数是「要问谁」：列表问的是服务商（0..2），电源命令问的
+ * 是一台机器的产品（`HAL_CLOUD_MACHINE_BASE + 产品号`）。两段号码不重叠，所以把服务商
+ * 当机器传、或把机器当服务商传，都落在 `hal_cloud_start` 的参数检查里而不是变成一个
+ * 看似成功的错请求。
  */
-#define HAL_CLOUD_ALL             2
+#define HAL_CLOUD_MACHINE_BASE    16
+
+/** 这个服务商还接不上（AWS）：不是密钥的问题，也不是网络的问题。 */
+#define HAL_CLOUD_FAULT_UNSUPPORTED 10
 
 #define HAL_CLOUD_ACTION_LIST     0
 #define HAL_CLOUD_ACTION_START    1
@@ -1006,12 +1026,12 @@ void hal_web_set_app_name(const char *name);
 #define HAL_CLOUD_SECRET_KEY_MAX  64
 /** `ap-guangzhou` and its siblings. */
 #define HAL_CLOUD_REGION_MAX      32
-/** `ins-xxxxxxxx` or `lhins-xxxxxxxx`. */
+/** `ins-xxxxxxxx`, `lhins-xxxxxxxx` or `i-xxxxxxxx`. */
 #define HAL_CLOUD_INSTANCE_MAX    48
 /** The most of an instance name this layer will carry, in bytes of UTF-8. */
 #define HAL_CLOUD_NAME_MAX        96
-/** The most the key file may be. Two sections of three short lines, and room to spare. */
-#define HAL_CLOUD_CONF_MAX        512
+/** The most the key file may be. Three sections of three short lines, and room to spare. */
+#define HAL_CLOUD_CONF_MAX        768
 
 /** @brief Allocate what this needs and read the keys. Idempotent; called by everything below.
  *
@@ -1024,21 +1044,22 @@ esp_err_t hal_cloud_init(void);
 
 /** @brief Begin a request. Non-blocking.
  *
- * @param provider `HAL_CLOUD_CVM`, `HAL_CLOUD_LIGHTHOUSE`, or `HAL_CLOUD_ALL` for a list of every
- *                 provider that has a key (a power action naming `HAL_CLOUD_ALL` is invalid).
+ * @param target   `HAL_CLOUD_ACTION_LIST` 时是服务商（`HAL_CLOUD_VENDOR_*`），
+ *                 其它动作时是机器所属的产品（`HAL_CLOUD_MACHINE_BASE + HAL_CLOUD_CVM/…`）。
+ *                 两段号码不重叠，传错会得到 ESP_ERR_INVALID_ARG。
  * @param action   One of the `HAL_CLOUD_ACTION_*` actions.
  * @param region   `ap-guangzhou` and its siblings, or NULL/"" to use the one saved with the key.
- *                 Ignored by `HAL_CLOUD_ALL`, which asks each provider in the region its key was
- *                 saved with.
+ *                 A list ignores it: every region of that vendor is asked and the answers merged.
  * @param instance The instance id, and ignored by `HAL_CLOUD_ACTION_LIST`.
  *
  * Requesting one while another is in flight is ESP_ERR_INVALID_STATE and changes nothing. A request
- * that cannot be sent — no key, no network, no clock — is ESP_OK with the state failed, and the
- * reason in the answer: it is a request the caller asked for and the page has to draw.
+ * that cannot be sent — no key, no network, no clock, a vendor that is not wired up — is ESP_OK
+ * with the state failed, and the reason in the answer: it is a request the caller asked for and the
+ * page has to draw.
  *
  * @return ESP_OK, ESP_ERR_INVALID_ARG, ESP_ERR_INVALID_STATE, or ESP_ERR_NO_MEM.
  */
-esp_err_t hal_cloud_start(int32_t provider, int32_t action, const char *region,
+esp_err_t hal_cloud_start(int32_t target, int32_t action, const char *region,
                           const char *instance);
 
 /** @brief Where the request is: `HAL_CLOUD_IDLE`, `RUNNING`, `DONE` or `FAILED`. */
@@ -1086,31 +1107,34 @@ size_t hal_cloud_take_answer(char *out, size_t capacity);
  */
 void hal_cloud_cancel(void);
 
-/** @brief Whether this provider has a key, with a masked copy of its SecretId.
+/** @brief Whether this vendor has a key, with a masked copy of its access key id.
+ *
+ * A key belongs to a vendor and not to a product: one Tencent key reaches both CVM and
+ * Lighthouse, which is why the section in the file is `[tencent]` and not two of them.
  *
  * The mask is the first four characters and the last four (`AKID……wxyz`): enough to tell which key
- * is on file, and deliberately not enough to use. The SecretKey is never handed out by anything in
+ * is on file, and deliberately not enough to use. The secret is never handed out by anything in
  * this header — a page that has saved one cannot read it back.
  *
- * @return ESP_OK, ESP_ERR_NOT_FOUND when this provider has no key, or ESP_ERR_INVALID_ARG.
+ * @return ESP_OK, ESP_ERR_NOT_FOUND when this vendor has no key, or ESP_ERR_INVALID_ARG.
  */
-esp_err_t hal_cloud_credentials_get(int32_t provider, char *out_masked, size_t capacity,
+esp_err_t hal_cloud_credentials_get(int32_t vendor, char *out_masked, size_t capacity,
                                     char *out_region, size_t region_capacity);
 
-/** @brief Save a key for one provider, leaving the other's alone. Written to flash.
+/** @brief Save a key for one vendor, leaving the others' alone. Written to flash.
  *
- * The two strings must be printable ASCII without quotes or backslashes: what Tencent issues always
- * is, and refusing the rest here is what keeps a pasted newline out of the file this layer both
- * writes and reads.
+ * The two strings must be printable ASCII without quotes or backslashes: what Tencent and Alibaba
+ * issue always is, and refusing the rest here is what keeps a pasted newline out of the file this
+ * layer both writes and reads.
  *
  * @return ESP_OK, ESP_ERR_INVALID_ARG for a key that is empty or not that shape,
  *         ESP_ERR_INVALID_SIZE for one that is too long, or what the filesystem said.
  */
-esp_err_t hal_cloud_credentials_set(int32_t provider, const char *region, const char *secret_id,
+esp_err_t hal_cloud_credentials_set(int32_t vendor, const char *region, const char *secret_id,
                                     const char *secret_key);
 
-/** @brief Forget one provider's key. ESP_ERR_NOT_FOUND when there was none. */
-esp_err_t hal_cloud_credentials_forget(int32_t provider);
+/** @brief Forget one vendor's key. ESP_ERR_NOT_FOUND when there was none. */
+esp_err_t hal_cloud_credentials_forget(int32_t vendor);
 
 /* ---------------------------------------------------------------------------
  * Log ring.

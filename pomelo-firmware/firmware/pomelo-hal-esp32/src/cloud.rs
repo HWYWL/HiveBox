@@ -1,9 +1,10 @@
 //! The board as a client of a cloud provider's API.
 //!
-//! A thin `extern "C"` binding over `components/board_hal/board_cloud.c`, which signs the request
-//! with TC3-HMAC-SHA256, sends it with `esp_http_client`, and renders the answer as a small JSON
-//! document. What crosses the boundary is a provider, an action, an instance id, a state, a fault
-//! and the bytes of an answer — the same things [`CloudBackend`] names, and nothing about
+//! A thin `extern "C"` binding over `components/board_hal/board_cloud.c`, which signs the request —
+//! TC3-HMAC-SHA256 for Tencent, the RPC HMAC-SHA1 scheme for Alibaba — sends it with
+//! `esp_http_client`, and renders the answer as a small JSON document. What crosses the boundary is
+//! a target (a vendor to list, or a product to act through), an action, an instance id, a state, a
+//! fault and the bytes of an answer — the same things [`CloudBackend`] names, and nothing about
 //! signatures, regions or certificates.
 //!
 //! The one piece of state that stays here is nothing at all: the C side owns the request, the worker
@@ -31,7 +32,7 @@ use pomelo_hal::cloud_answer;
 use pomelo_hal::error::HalError;
 use pomelo_hal::traits::CloudBackend;
 use pomelo_hal::types::{
-    CloudAction, CloudAnswer, CloudFault, CloudKey, CloudProvider, CloudState,
+    CloudAction, CloudAnswer, CloudFault, CloudKey, CloudState, CloudTarget, CloudVendor,
 };
 
 /// The C header's vocabulary, mirrored whole.
@@ -43,12 +44,18 @@ use pomelo_hal::types::{
 mod ffi {
     use core::ffi::{c_char, c_int};
 
-    /// `HAL_CLOUD_*` providers, from `board_hal.h`.
+    /// `HAL_CLOUD_VENDOR_*`, from `board_hal.h`: what a list names.
+    pub const VENDOR_TENCENT: c_int = 0;
+    pub const VENDOR_ALIYUN: c_int = 1;
+    pub const VENDOR_AWS: c_int = 2;
+
+    /// `HAL_CLOUD_*` products: what a machine belongs to, and the offset the C side gives them.
     pub const PROVIDER_CVM: c_int = 0;
     pub const PROVIDER_LIGHTHOUSE: c_int = 1;
-    /// `HAL_CLOUD_ALL`: not a product and the owner of no key, only the target of a merged list.
-    /// Named here because [`CloudProvider`] can send it and the C side has to recognise it.
-    pub const PROVIDER_ALL: c_int = 2;
+    pub const PROVIDER_ECS: c_int = 2;
+    pub const PROVIDER_EC2: c_int = 3;
+    /// `HAL_CLOUD_MACHINE_BASE`: the gap that keeps a machine's number from reading as a vendor's.
+    pub const MACHINE_BASE: c_int = 16;
 
     /// `HAL_CLOUD_ACTION_*`, from `board_hal.h`.
     pub const ACTION_LIST: c_int = 0;
@@ -74,10 +81,11 @@ mod ffi {
     pub const FAULT_HTTP: c_int = 7;
     pub const FAULT_API: c_int = 8;
     pub const FAULT_STORAGE: c_int = 9;
+    pub const FAULT_UNSUPPORTED: c_int = 10;
 
     extern "C" {
         pub fn hal_cloud_start(
-            provider: c_int,
+            target: c_int,
             action: c_int,
             region: *const c_char,
             instance: *const c_char,
@@ -87,7 +95,7 @@ mod ffi {
         pub fn hal_cloud_take_answer(out: *mut c_char, capacity: usize) -> usize;
         pub fn hal_cloud_cancel();
         pub fn hal_cloud_credentials_get(
-            provider: c_int,
+            vendor: c_int,
             out_masked: *mut c_char,
             capacity: usize,
             out_region: *mut c_char,
@@ -101,7 +109,7 @@ mod ffi {
 /// The C side's own `CLOUD_ANSWER_MAX`, and it has to be at least that or a long list would be
 /// truncated on the way across: `hal_cloud_take_answer` copies what fits and says how much it
 /// copied, so a smaller buffer here is a list with its last instances missing. On the heap rather
-/// than on the stack — six kilobytes is a large frame on a task with eight kilobytes of stack.
+/// than on the stack — six kilobytes is a large frame on a task with ten kilobytes of stack.
 const ANSWER_CAPACITY: usize = 6144;
 
 /// The masked secret id's buffer: `HAL_CLOUD_SECRET_ID_MAX`, from `board_hal.h`.
@@ -139,6 +147,7 @@ fn fault_from(code: c_int) -> CloudFault {
         ffi::FAULT_HTTP => CloudFault::Http,
         ffi::FAULT_API => CloudFault::Api,
         ffi::FAULT_STORAGE => CloudFault::Storage,
+        ffi::FAULT_UNSUPPORTED => CloudFault::Unsupported,
         // `FAULT_UNREACHABLE` and everything a C side that has been changed under this one might
         // send: a request that did not come back is a request that did not come back, and the fault
         // that sends a person to look at the network is the honest one to guess.
@@ -161,13 +170,13 @@ fn text(buffer: &[u8]) -> String {
 }
 
 impl CloudBackend for EspCloud {
-    fn key(&self, provider: CloudProvider) -> CloudKey {
+    fn key(&self, vendor: CloudVendor) -> CloudKey {
         let mut masked = [0u8; MASKED_CAPACITY];
         let mut region = [0u8; REGION_CAPACITY];
 
         let code = unsafe {
             ffi::hal_cloud_credentials_get(
-                provider.index() as c_int,
+                vendor.index() as c_int,
                 masked.as_mut_ptr() as *mut _,
                 masked.len(),
                 region.as_mut_ptr() as *mut _,
@@ -175,7 +184,7 @@ impl CloudBackend for EspCloud {
             )
         };
 
-        // `ESP_ERR_NOT_FOUND` is the answer for a provider nobody has saved a key for, and it is
+        // `ESP_ERR_NOT_FOUND` is the answer for a vendor nobody has saved a key for, and it is
         // not an error: an empty `CloudKey` is what that screen is drawn from. So is every other
         // code, since the two buffers were zeroed and read as empty.
         if code != 0 {
@@ -190,7 +199,7 @@ impl CloudBackend for EspCloud {
 
     fn start(
         &mut self,
-        provider: CloudProvider,
+        target: CloudTarget,
         action: CloudAction,
         instance: &str,
         region: &str,
@@ -202,7 +211,7 @@ impl CloudBackend for EspCloud {
 
         let code = unsafe {
             ffi::hal_cloud_start(
-                provider.index() as c_int,
+                target.index() as c_int,
                 action.index() as c_int,
                 region.as_ptr(),
                 instance.as_ptr(),

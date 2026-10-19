@@ -5,9 +5,10 @@
 //! ```
 //!
 //! iced builds the state with [`CloudMonitor::new`], then owns the loop. The board is the HAL's
-//! desktop simulator, which is the whole point of the window: its account has both products set up,
-//! two servers on one and one on the other, and one of the two is stopped — so there is a list to
-//! read, a row to pick, and a power button with something to do.
+//! desktop simulator, which is the whole point of the window: its account has two vendors set up —
+//! three servers on Tencent's two products and one on Alibaba's — and one of them is stopped, so
+//! there is a list to read, a row to pick, a vendor to switch to, and a power button with something
+//! to do.
 //!
 //! The simulator only advances when somebody calls `tick`, and a desktop run has no firmware loop to do
 //! it. The device's own backend is event-driven and its `tick` is a no-op, so this is a desktop-only

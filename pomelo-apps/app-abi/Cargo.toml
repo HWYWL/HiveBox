@@ -1,0 +1,10 @@
+[package]
+name = "app-abi"
+version = "0.1.0"
+edition = "2021"
+description = "The contract between a HiveBox application package and the host that runs it"
+license = "GPL-3.0-only"
+
+# `no_std` and no dependencies: this crate is compiled into every wasm application as well as into
+# the firmware, and it must not drag a runtime into either side of the boundary.
+[dependencies]

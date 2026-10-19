@@ -24,6 +24,7 @@
 
 use crate::types::{
     CloudAction, CloudAnswer, CloudFault, CloudInstance, CloudInstanceState, CloudProvider,
+    CloudVendor,
 };
 
 /// Reads the answer document `board_cloud.c` writes.
@@ -46,12 +47,12 @@ pub fn parse(document: &str) -> CloudAnswer {
     }
 
     if let Some(value) = field(document, "instances") {
-        let provider = provider_of(document);
+        let vendor = vendor_of(document);
 
         return CloudAnswer::Instances {
-            provider,
+            vendor,
             region: field(document, "region").map(text_of).unwrap_or_default(),
-            instances: instances_in(value, provider),
+            instances: instances_in(value, vendor),
             failed: providers_in(field(document, "failed").unwrap_or_default()),
         };
     }
@@ -86,6 +87,17 @@ fn provider_of(document: &str) -> CloudProvider {
         .unwrap_or(CloudProvider::Cvm)
 }
 
+/// The vendor a list document is about.
+///
+/// A document from a board older than vendors says `provider` instead, and its two product names are
+/// both Tencent's — which is why [`CloudVendor::from_name`] reads them.
+fn vendor_of(document: &str) -> CloudVendor {
+    field(document, "vendor")
+        .or_else(|| field(document, "provider"))
+        .and_then(|value| CloudVendor::from_name(&text_of(value)))
+        .unwrap_or_default()
+}
+
 /// The instances of a list, read out of the text between `instances` and the end of the document.
 ///
 /// One object at a time, by the braces: the document is flat and its objects have no braces inside
@@ -96,21 +108,19 @@ fn provider_of(document: &str) -> CloudProvider {
 /// at is not a row worth drawing. A document truncated inside an object keeps whatever whole
 /// objects came before it, which is the answer to "did the buffer fill up" that a person can use.
 ///
-/// `kind` on a row is which API listed it. A merged list has one on every row — that is how a list
-/// of two APIs is a list of machines and not a list of lines — and a row that has none (a document
-/// from a board that only knew one product) is the document's own provider.
-fn instances_in(list: &str, provider: CloudProvider) -> Vec<CloudInstance> {
+/// `kind` on a row is which API listed it. A vendor's list is a merge of its products — Tencent's is
+/// two APIs, Alibaba's one — and every row says which; a row that has none (a document from a board
+/// that sold one product) is that vendor's first product, which is the honest guess rather than a
+/// row nothing can be sent for.
+fn instances_in(list: &str, vendor: CloudVendor) -> Vec<CloudInstance> {
     let mut instances = Vec::new();
     let mut rest = list;
 
-    // `all` is a document's word for "these came from both", and no row can be a power command's
-    // target: a row without a `kind` in a merged list is a row from a board that could not say, and
-    // the first product is the honest guess rather than a row nothing can be sent for.
-    let fallback = if provider.is_product() {
-        provider
-    } else {
-        CloudProvider::Cvm
-    };
+    let fallback = vendor
+        .products()
+        .first()
+        .copied()
+        .unwrap_or(CloudProvider::Cvm);
 
     while let Some(start) = rest.find('{') {
         let after = &rest[start + 1..];
@@ -131,7 +141,6 @@ fn instances_in(list: &str, provider: CloudProvider) -> Vec<CloudInstance> {
             ip: field(object, "ip").map(text_of).unwrap_or_default(),
             provider: field(object, "kind")
                 .and_then(|value| CloudProvider::from_name(&text_of(value)))
-                .filter(|kind| kind.is_product())
                 .unwrap_or(fallback),
             // The data centre the row was listed from. Empty only in a document from a board that
             // did not say, where the power command falls back to the key's own region.
@@ -151,7 +160,6 @@ fn providers_in(list: &str) -> Vec<CloudProvider> {
         .skip(1)
         .step_by(2)
         .filter_map(CloudProvider::from_name)
-        .filter(|provider| provider.is_product())
         .collect()
 }
 
@@ -232,7 +240,7 @@ mod tests {
     #[test]
     fn a_list_reads_back_as_instances() {
         let document = concat!(
-            r#"{"ok":1,"provider":"lighthouse","region":"ap-guangzhou","instances":["#,
+            r#"{"ok":1,"vendor":"tencent","region":"","instances":["#,
             r#"{"id":"lhins-aaa","name":"blog","state":"RUNNING","ip":"1.2.3.4","#,
             r#""kind":"lighthouse","region":"ap-tokyo"},"#,
             r#"{"id":"lhins-bbb","name":"","state":"STOPPED","ip":""}"#,
@@ -240,7 +248,7 @@ mod tests {
         );
 
         let CloudAnswer::Instances {
-            provider,
+            vendor,
             region,
             instances,
             ..
@@ -249,13 +257,19 @@ mod tests {
             panic!("a list should read as instances");
         };
 
-        assert_eq!(provider, CloudProvider::Lighthouse);
-        assert_eq!(region, "ap-guangzhou");
+        assert_eq!(vendor, CloudVendor::Tencent);
+        // A list spans data centres, so it names none; the rows carry their own.
+        assert!(region.is_empty());
         assert_eq!(instances.len(), 2);
         assert_eq!(instances[0].id, "lhins-aaa");
         assert_eq!(instances[0].name, "blog");
         assert_eq!(instances[0].state, CloudInstanceState::Running);
         assert_eq!(instances[0].ip, "1.2.3.4");
+        // The product each row belongs to is what a power command names, and it is on the row.
+        assert_eq!(instances[0].provider, CloudProvider::Lighthouse);
+        // A row with no `kind` is the vendor's first product, not a row with nowhere to send a
+        // command.
+        assert_eq!(instances[1].provider, CloudProvider::Cvm);
         // The data centre a row was listed from, which is the one a power command has to name: a key
         // saved in Guangzhou must not stop a machine in Tokyo.
         assert_eq!(instances[0].region, "ap-tokyo");
@@ -371,17 +385,18 @@ mod tests {
 
     #[test]
     fn a_merged_list_carries_the_product_on_every_row() {
-        // The document a panel asks for now: one call, both APIs, one list. `kind` is what a power
-        // button is addressed by, so a row without one would be a row whose button went nowhere.
+        // The document a panel asks for now: one vendor, every product it sells, one list. `kind` is
+        // what a power button is addressed by, so a row without one would be a row whose button went
+        // nowhere.
         let document = concat!(
-            r#"{"ok":1,"provider":"all","region":"","instances":["#,
+            r#"{"ok":1,"vendor":"tencent","region":"","instances":["#,
             r#"{"id":"lhins-aaa","name":"blog","state":"RUNNING","ip":"1.2.3.4","kind":"lighthouse"},"#,
             r#"{"id":"ins-bbb","name":"web","state":"STOPPED","ip":"5.6.7.8","kind":"cvm"}"#,
             r#"],"count":2}"#,
         );
 
         let CloudAnswer::Instances {
-            provider,
+            vendor,
             region,
             instances,
             failed,
@@ -390,7 +405,7 @@ mod tests {
             panic!("a merged list should read as instances");
         };
 
-        assert_eq!(provider, CloudProvider::All);
+        assert_eq!(vendor, CloudVendor::Tencent);
         assert!(region.is_empty());
         assert!(failed.is_empty());
         assert_eq!(instances.len(), 2);
@@ -401,7 +416,7 @@ mod tests {
     #[test]
     fn a_merged_list_names_the_half_that_did_not_come_back() {
         let document = concat!(
-            r#"{"ok":1,"provider":"all","region":"","instances":["#,
+            r#"{"ok":1,"vendor":"tencent","region":"","instances":["#,
             r#"{"id":"lhins-aaa","state":"RUNNING","kind":"lighthouse"}"#,
             r#"],"count":1,"failed":["cvm"]}"#,
         );

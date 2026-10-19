@@ -19,7 +19,8 @@ A window that feels slow is a *debug* build — iced's tiny-skia rasteriser is s
 
 | app | what it is |
 | :--- | :--- |
-| `app-launcher` | the home screen: a paged grid of tiles, and the one app that is not a leaf — it hosts the other five as widgets (`view`/`update` called by the launcher, so their state is its state) and merges the subscription of whichever one is on screen |
+| `app-launcher` | the home screen: a paged grid of tiles, and the one app that is not a leaf — it hosts the others as widgets (`view`/`update` called by the launcher, so their state is its state) and merges the subscription of whichever one is on screen |
+| `store` | what the repository publishes, what is installed, and the press between them: three lists, one download at a time, and the prompt a press ends on |
 | `calculator` | keys, a display and the arithmetic |
 | `music-player` | a playlist, a transport and a readout, over the HAL's audio backend |
 | `settings` | a list of sections, one of which is a live Wi-Fi page with a password prompt |
@@ -27,6 +28,23 @@ A window that feels slow is a *debug* build — iced's tiny-skia rasteriser is s
 | `task-viewer` | the `htop` of this board: the scheduler's tasks, their stacks and the two memory pools |
 | `web-manager` | the LAN management server's switch and its address |
 | `nas-monitor` | another computer on the network — a NAS — as cards and a disk table |
+
+## Applications as packages
+
+An application no longer has to be compiled into the image. A `.hbapp` is a manifest, a WebAssembly
+module and an icon; `app-host` instantiates the module and replays the display list it writes into its
+own memory, and `store` downloads the package, checks its size and SHA-256 against the repository's
+manifest, and renames it into `/internal/AppData/apps/<id>/` or `/sdcard/apps/<id>/`. The two
+volumes are both read at boot, one copy per application, and neither is one of the two OTA slots — so
+a firmware update does not take an installed application with it.
+
+| crate | what it is |
+| :--- | :--- |
+| `app-abi` | the contract across the sandbox boundary: opcodes, event layout, error codes, capabilities, and the package's container header |
+| `app-host` | the runtime: a `wasmi` instance with fuel and memory limits, the installer, the catalog over the two volumes, and the display list |
+| `app-sdk` | the side an application is written against — the `App` trait, the display-list builder, hit testing — with no `std` |
+| `mini-json` | the parser the repository's manifest and a package's metadata are both read with |
+| `wasm-apps/*` | the applications that are packages rather than crates: `cargo build --target wasm32-unknown-unknown`, packed by `tools/build_apps.py` |
 
 ## What it depends on
 

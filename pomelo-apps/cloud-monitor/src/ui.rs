@@ -12,7 +12,7 @@ use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{button, container, row, scrollable, text, Column, Space};
 use iced::{Alignment, Border, Color, Element, Length};
 
-use pomelo_hal::{CloudAction, CloudInstance};
+use pomelo_hal::{CloudAction, CloudInstance, CloudVendor};
 use pomelo_material_symbols::{self as icons, Icon};
 use pomelo_widgets::preferences::ThemeMode;
 
@@ -25,18 +25,30 @@ pub(crate) fn page(app: &CloudMonitor) -> Element<'_, Message> {
     let sizes = app.sizes();
     let words = Words::of(app.preferences.language);
 
-    // One list, not one per product: the board merges the products it has a key for, and each row
-    // says which of them it came from. There is nothing left for a person to switch between.
-    let mut cards: Vec<Element<'_, Message>> = Vec::new();
+    // The vendor chips are drawn whatever the vendor's state is: they are how a person reaches the
+    // company they do have a key for, so hiding them behind "no key" would be a page with no way out.
+    let mut cards: Vec<Element<'_, Message>> = vec![vendors(app, &words, sizes, mode)];
 
-    if app.configured() {
+    if !app.vendor().is_wired_up() {
+        // A company this build has no client for. Not a missing key — there is nowhere a key would
+        // get it asked — and not an empty account either.
+        cards.push(message(
+            &words,
+            words.unsupported,
+            words.unsupported_note,
+            sizes,
+            mode,
+        ));
+    } else if app.configured() {
+        // One list per vendor, not one per product: the board merges the products that vendor sells,
+        // and each row says which of them it came from. There is nothing left to switch between.
         cards.push(list(app, &words, sizes, mode));
 
         if let Some(commands) = commands(app, &words, sizes, mode) {
             cards.push(commands);
         }
     } else {
-        // The one card this page has for a board with no credentials: where the key goes, and not a
+        // The one card this page has for a vendor with no credentials: where the key goes, and not a
         // failure — nothing has been asked of anybody's account yet.
         cards.push(message(
             &words,
@@ -87,7 +99,9 @@ fn header<'a>(app: &CloudMonitor, words: &Words, sizes: Sizes, theme: ThemeMode)
     // One line under the title, and it is whichever of the four things there is to say is the most
     // useful: what to do about a missing key, that a request is running, what the last one had to say,
     // or how many machines the list holds. See `Words::refused`.
-    let (status, colour) = if !app.configured() {
+    let (status, colour) = if !app.vendor().is_wired_up() {
+        (words.unsupported.to_string(), style::muted(theme))
+    } else if !app.configured() {
         (words.no_key.to_string(), style::muted(theme))
     } else if app.busy() {
         (words.loading.to_string(), style::muted(theme))
@@ -126,9 +140,9 @@ fn header<'a>(app: &CloudMonitor, words: &Words, sizes: Sizes, theme: ThemeMode)
         .align_y(Alignment::Center),
     )
     // Nothing to press while there is nothing to ask with, and nothing to ask for while a request is
-    // already in flight: see `CloudMonitor::ask`.
+    // already in flight: see `CloudMonitor::ask` and `CloudMonitor::can_ask`.
     .on_press_maybe(
-        (app.configured() && !app.busy()).then_some(Message::Refresh),
+        (app.can_ask() && !app.busy()).then_some(Message::Refresh),
     )
     .padding([6.0, 10.0])
     .style(move |_theme, status| {
@@ -155,7 +169,56 @@ fn header<'a>(app: &CloudMonitor, words: &Words, sizes: Sizes, theme: ThemeMode)
     .into()
 }
 
-/// The list of every machine in the account.
+/// The three companies, as chips: the one being looked at is filled in.
+///
+/// Drawn even when there is nothing to show for the chip that is picked — that is what makes "no key
+/// for this one" a screen a person can walk away from, and what they use to reach the company they
+/// did set up. The picked chip is not a button: pressing it would ask for the list already on the
+/// page, and a chip that cannot be pressed is better drawn as chosen.
+fn vendors<'a>(
+    app: &CloudMonitor,
+    words: &Words,
+    sizes: Sizes,
+    theme: ThemeMode,
+) -> Element<'a, Message> {
+    let mut chips: Vec<Element<'a, Message>> = Vec::new();
+
+    for vendor in CloudVendor::ALL {
+        let picked = vendor == app.vendor();
+        // White on the page's colour either way round: the accent is a mid blue, and the theme's own
+        // ink on it is nearly unreadable in one of the two themes and merely poor in the other.
+        let ink = if picked {
+            Color::WHITE
+        } else {
+            style::ink(theme)
+        };
+
+        chips.push(
+            button(text(words.vendor(vendor)).size(sizes.small).color(ink))
+                .on_press_maybe((!picked).then_some(Message::Vendor(vendor)))
+                .padding([6.0, 10.0])
+                .style(move |_theme, status| {
+                    let fill = if picked {
+                        style::accent()
+                    } else if is_pressed(status) {
+                        style::track(theme)
+                    } else {
+                        style::card(theme)
+                    };
+
+                    button_style(fill, style::ink(theme), style::RADIUS / 2.0)
+                })
+                .into(),
+        );
+    }
+
+    row(chips)
+        .spacing(style::GAP / 2.0)
+        .width(Length::Fill)
+        .into()
+}
+
+/// The list of every machine the selected vendor has.
 fn list<'a>(
     app: &'a CloudMonitor,
     words: &Words,
@@ -211,9 +274,15 @@ fn list<'a>(
 
     card(
         Column::with_children(vec![
-            // Every product's machines in one card, so the hint says so rather than naming a region
-            // that only one of the two keys would have.
-            card_row(Icon::CLOUD, words.instances, words.all, sizes, theme),
+            // Every product of one company in one card, so the hint names the company rather than a
+            // region only one of its keys would have.
+            card_row(
+                Icon::CLOUD,
+                words.instances,
+                words.vendor(app.vendor()),
+                sizes,
+                theme,
+            ),
             Column::with_children(rows).spacing(style::GAP / 2.0).into(),
         ])
         .spacing(style::GAP / 2.0)

@@ -29,10 +29,28 @@ use pomelo_material_symbols::{self as icons, Icon};
 use pomelo_widgets::{Language, ThemeMode};
 
 use crate::style;
-use crate::{Message, CATALOGUE};
+use crate::Message;
+
+/// One running app as the sheet draws it: what it is called, and the two things that identify it.
+///
+/// A card is built by the launcher rather than looked up here, because the grid's later tiles are
+/// installed packages and this module is about the sheet, not about where a name came from.
+pub struct Card {
+    pub name: String,
+    pub accent: (u8, u8, u8),
+    pub glyph: Icon,
+}
 
 /// The sheet as an element, over `apps` — the running ones, the most recent first.
-pub fn view<'a>(apps: &[usize], language: Language, theme_mode: ThemeMode) -> Element<'a, Message> {
+///
+/// `card` answers what an index names, and `None` for an index nothing names: an application that was
+/// uninstalled while it was running is a card that has gone, not one wearing another's name.
+pub fn view<'a>(
+    apps: &[usize],
+    language: Language,
+    theme_mode: ThemeMode,
+    card: &dyn Fn(usize) -> Option<Card>,
+) -> Element<'a, Message> {
     let ink = match theme_mode {
         ThemeMode::Dark => Color::WHITE,
         ThemeMode::Light => Color::BLACK,
@@ -101,7 +119,7 @@ pub fn view<'a>(apps: &[usize], language: Language, theme_mode: ThemeMode) -> El
         list = list.push(notice_card(nothing_running(language), muted, slab));
     } else {
         for &index in apps {
-            list = list.push(running_card(index, language, ink, muted, slab));
+            list = list.push(running_card(index, ink, muted, slab, card));
         }
     }
 
@@ -131,19 +149,19 @@ pub fn view<'a>(apps: &[usize], language: Language, theme_mode: ThemeMode) -> El
 /// One running app: which one it is, and the cross that stops it.
 fn running_card<'a>(
     index: usize,
-    language: Language,
     ink: Color,
     muted: Color,
     slab: Color,
+    card: &dyn Fn(usize) -> Option<Card>,
 ) -> Element<'a, Message> {
-    // An index the catalogue does not have. The grid cannot put one in `running_apps`, and an empty
+    // An index nothing names: an application uninstalled while it was in the background. An empty
     // card is a better answer than one wearing another app's name — see `Launcher::view`.
-    let Some(entry) = CATALOGUE.get(index) else {
+    let Some(card) = card(index) else {
         return Space::new().into();
     };
 
-    let accent = Color::from_rgb8(entry.accent.0, entry.accent.1, entry.accent.2);
-    let glyph = entry.icon.as_glyph().unwrap_or(Icon::APPS);
+    let accent = Color::from_rgb8(card.accent.0, card.accent.1, card.accent.2);
+    let glyph = card.glyph;
 
     let icon = container(
         container(
@@ -183,7 +201,7 @@ fn running_card<'a>(
     let line = Row::with_children(vec![
         icon.into(),
         Space::new().width(Length::Fixed(style::GLYPH_GAP)).into(),
-        text(entry.localized_name(language))
+        text(card.name)
             .size(style::RECENTS_NAME_FONT)
             .color(ink)
             .into(),
@@ -300,7 +318,7 @@ fn nothing_running(language: Language) -> &'static str {
 mod tests {
     use super::*;
 
-    use crate::{CALCULATOR, MUSIC, TERMINAL};
+    use crate::{CALCULATOR, CATALOGUE, MUSIC, TERMINAL};
 
     /// Every word exists in both languages, and the two are not the same word.
     ///
@@ -327,13 +345,21 @@ mod tests {
     /// and an index the catalogue does not have (which draws nothing rather than the wrong name).
     #[test]
     fn the_sheet_builds_for_every_shape_of_list() {
+        let card = |index: usize| {
+            CATALOGUE.get(index).map(|entry| Card {
+                name: entry.name.to_string(),
+                accent: entry.accent,
+                glyph: entry.icon.as_glyph().unwrap_or(Icon::APPS),
+            })
+        };
+
         for apps in [vec![], vec![MUSIC], vec![MUSIC, TERMINAL, CALCULATOR]] {
             for theme_mode in [ThemeMode::Dark, ThemeMode::Light] {
-                let _ = view(&apps, Language::Chinese, theme_mode);
-                let _ = view(&apps, Language::English, theme_mode);
+                let _ = view(&apps, Language::Chinese, theme_mode, &card);
+                let _ = view(&apps, Language::English, theme_mode, &card);
             }
         }
 
-        let _ = view(&[99], Language::English, ThemeMode::Dark);
+        let _ = view(&[99], Language::English, ThemeMode::Dark, &card);
     }
 }

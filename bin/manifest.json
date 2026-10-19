@@ -1,20 +1,39 @@
 {
-  "generated": "2026-10-16T07:58:09Z",
+  "generated": "2026-10-19T07:23:23Z",
   "firmware": {
-    "version": "v0.10.4-20261016",
-    "file": "hivebox-ota-v0.10.4-20261016.bin",
-    "size": 5911536,
-    "sha256": "6ce15f076f531fe2ace9ca1b1fd1f1cb24210dbcdf467546e42cb21bc731044c"
+    "version": "v0.10.5-20261019",
+    "file": "hivebox-ota-v0.10.5-20261019.bin",
+    "size": 6185840,
+    "sha256": "1fd0fbe26f5c11ab53586696c88fbccf6ac2fe870d3d81425220aed0894dc6bc"
   },
-  "font": {
-    "version": "v3",
-    "file": "hivebox-font-24px-v3.bin",
-    "size": 2268084,
-    "sha256": "1cfb6b3e3b688b8480148fe466540421707ed819bad1786dda6a3ffd18ae0e54",
-    "face": {
-      "file": "hivebox-face-v3.otf",
-      "size": 1910512,
-      "sha256": "0f486329cba8b65eda2dd5652992ddf7d372e2c2adea8ec34c3439ce3e0ce900"
+  "apps": [
+    {
+      "id": "calculator",
+      "name": "Calculator",
+      "name_zh": "计算器",
+      "version": "v0.1.0",
+      "file": "hivebox-app-calculator-v0.1.0.hbapp",
+      "size": 14726,
+      "sha256": "b32a4ca54bc34c57deadfb7e09f2d0ad3d5f591c88cf52e1ade34348af4914dd",
+      "abi": 1,
+      "accent": "#F69E22",
+      "description": "四则运算，键位与内置版一致",
+      "glyph": "calculate",
+      "permissions": 0
+    },
+    {
+      "id": "clock",
+      "name": "Clock",
+      "name_zh": "时钟",
+      "version": "v0.1.0",
+      "file": "hivebox-app-clock-v0.1.0.hbapp",
+      "size": 10574,
+      "sha256": "94cd9dd7fc43a744d73756461c0dc564a95ad843d1942f0b260407cb3fe22bb7",
+      "abi": 1,
+      "accent": "#D63384",
+      "description": "时间来自宿主时钟，含开机时长",
+      "glyph": "schedule",
+      "permissions": 0
     }
-  }
+  ]
 }

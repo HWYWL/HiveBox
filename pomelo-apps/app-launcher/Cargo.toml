@@ -28,6 +28,13 @@ iced = { version = "0.14", default-features = false, features = ["thread-pool", 
 # From GitHub by revision: a sibling repository, and this project builds on its own.
 pomelo-hal = { git = "https://github.com/pomelos-on-sale/pomelo-hal.git", rev = "20eaa910f0a05cd68684d6aa868fd78457c51be9" }
 
+# The runtime the store installs packages *for*: the catalog a boot scans, the installer's cleanup,
+# and — through `ui` — the canvas an installed application's display list is drawn with.
+app-host = { path = "../app-host", features = ["ui"] }
+
+# The shapes of a touch and the layout of a display list, shared with the runtime and the SDK.
+app-abi = { path = "../app-abi" }
+
 # The apps it hosts, as widgets. `default-features = false` everywhere so that the *renderer* is this
 # project's or the firmware's choice and never a child's: their `desktop` default would otherwise
 # decide it from inside a dependency.
@@ -40,6 +47,7 @@ music-player = { path = "../music-player", default-features = false }
 power-log = { path = "../power-log", default-features = false }
 nas-monitor = { path = "../nas-monitor", default-features = false }
 settings = { path = "../settings", default-features = false }
+store = { path = "../store", default-features = false }
 task-viewer = { path = "../task-viewer", default-features = false }
 terminal = { path = "../terminal", default-features = false }
 updater = { path = "../updater", default-features = false }

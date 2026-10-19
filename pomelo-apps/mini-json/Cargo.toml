@@ -1,0 +1,10 @@
+[package]
+name = "mini-json"
+version = "0.1.0"
+edition = "2021"
+description = "Just enough JSON to read a release manifest and an application package's metadata"
+license = "GPL-3.0-only"
+
+# No dependencies on purpose: this crate is linked into the firmware image, where a JSON library
+# would be several hundred kilobytes to read four strings out of a document.
+[dependencies]

@@ -31,15 +31,17 @@ x11 = []
 wayland = []
 
 [dependencies]
-# Both of these are repositories of their own, so they arrive over git like any other
-# third-party crate: a path dependency only resolves where the directories happen to lie next to
-# each other, which is true inside `pomelo-os` and nowhere else. `pomelo-os` patches both git
-# sources back to its submodules, so a build there uses the checkouts that are open.
+# Both of these are repositories of their own, and upstream they arrive over git like any other
+# third-party crate. Here they are the sibling checkouts: a `[patch]` in the consuming root cannot
+# reach an *optional* git dependency that a feature turns on — the one case where a board build (which
+# turns `renderer` on) still went to the network for a crate sitting in this tree — so the checkout
+# that is open is named directly. A build of this crate outside `pomelo-os` reads these two lines as
+# the git URLs they were.
 #
 # The panel's RGB565 frame buffer and its pack functions, and -- with `renderer` on -- the renderer
 # itself, over the same rasteriser.
-pomelo-gfx = { git = "ssh://git@github.com/pomelos-on-sale/pomelo-gfx.git" }
-iced-pomelo-gfx = { git = "ssh://git@github.com/pomelos-on-sale/iced-pomelo-gfx.git", optional = true }
+pomelo-gfx = { path = "../pomelo-gfx" }
+iced-pomelo-gfx = { path = "../iced-pomelo-gfx", optional = true }
 
 # Only the renderer has glyph tables, and only the renderer has to ask which face one belongs to:
 # a table's header carries the SHA-256 of the font it was baked from, and `fonts` compares that with

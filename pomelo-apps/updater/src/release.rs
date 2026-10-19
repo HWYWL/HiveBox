@@ -34,7 +34,7 @@
 //! build comparable to a release: three commits past `v0.6.0` is *not* newer than `v0.7.0`, and the
 //! comparison is a comparison of the tags rather than of the strings.
 
-use crate::json;
+use mini_json as json;
 
 /// Where the manifest lives.
 ///
@@ -187,11 +187,94 @@ pub struct Face {
     pub sha256: String,
 }
 
+/// One application package the repository publishes.
+///
+/// The manifest carries what the store needs to draw a row *before* downloading anything: the names,
+/// the version, the size, the accent, and the one sentence under the name. The package's own metadata
+/// repeats it, and the package is the truth at install time — a manifest that disagree with it is a
+/// manifest that is one release stale, not a package that will not install.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppRelease {
+    pub id: String,
+    pub name: String,
+    pub name_zh: String,
+    pub version: Version,
+    /// The file's name on the repository, which is also its name in `bin/`.
+    pub file: String,
+    pub size: u64,
+    pub sha256: String,
+    /// The ABI major the package was built for.
+    pub abi: u16,
+    /// `#RRGGBB`, as a string: the store draws it and the launcher's tile uses the package's own.
+    pub accent: String,
+    pub description: String,
+    /// The Material Symbols glyph's name, when the package has no bitmap icon.
+    pub glyph: String,
+    /// What the package may ask the host for; a bitset, shown in the store as words.
+    pub permissions: u32,
+}
+
+impl AppRelease {
+    /// Where this package is, on the repository: the manifest's own directory, like every other file.
+    pub fn url(&self) -> String {
+        url_of(&self.file)
+    }
+
+    /// One element of the manifest's `apps` array, when it names enough to install.
+    ///
+    /// An entry without an id, a file or a version is skipped rather than being shown half-read: the
+    /// store's rows all do the same thing with a package (download it), and one that cannot be named
+    /// is a row whose button would fail.
+    fn read(object: &str) -> Option<Self> {
+        let id = json::string(object, "id")?.to_string();
+        let file = json::string(object, "file")?.to_string();
+
+        let version = Version::from_file_name(&file)
+            .or_else(|| json::string(object, "version").and_then(Version::parse))?;
+
+        let name = json::string(object, "name").unwrap_or(&id).to_string();
+        let name_zh = json::string(object, "name_zh").unwrap_or(&name).to_string();
+
+        Some(Self {
+            id,
+            name,
+            name_zh,
+            version,
+            file,
+            size: json::number(object, "size").unwrap_or(0),
+            sha256: json::string(object, "sha256").unwrap_or_default().to_string(),
+            abi: json::number(object, "abi")
+                .and_then(|abi| u16::try_from(abi).ok())
+                .unwrap_or(app_abi_major()),
+            accent: json::string(object, "accent")
+                .unwrap_or("#7C8392")
+                .to_string(),
+            description: json::string(object, "description")
+                .unwrap_or("")
+                .to_string(),
+            glyph: json::string(object, "glyph").unwrap_or("").to_string(),
+            permissions: json::number(object, "permissions")
+                .and_then(|bits| u32::try_from(bits).ok())
+                .unwrap_or(0),
+        })
+    }
+}
+
+/// The ABI major this firmware implements, restated as a fallback for a manifest that omits it.
+///
+/// `app-abi` is the definition; the updater does not depend on it because it never runs a package.
+/// A manifest that omits the field is describing a package built for this firmware.
+fn app_abi_major() -> u16 {
+    1
+}
+
 /// What the repository has, as its own manifest said.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Manifest {
     pub firmware: Option<Release>,
     pub font: Option<Release>,
+    /// The application packages, in the order the manifest lists them.
+    pub apps: Vec<AppRelease>,
 }
 
 impl Manifest {
@@ -203,10 +286,20 @@ impl Manifest {
     /// for all three. The release it *did* find is still a release, so a manifest naming only the
     /// firmware is a page that still offers a firmware update.
     pub fn parse(document: &str) -> Self {
+        let apps = json::array(document, "apps")
+            .map(|items| items.into_iter().filter_map(AppRelease::read).collect())
+            .unwrap_or_default();
+
         Self {
             firmware: Release::read(document, Kind::Firmware),
             font: Release::read(document, Kind::Font),
+            apps,
         }
+    }
+
+    /// The package the repository publishes for an id, if it has one.
+    pub fn app(&self, id: &str) -> Option<&AppRelease> {
+        self.apps.iter().find(|app| app.id == id)
     }
 
     /// What the repository has of one kind.
@@ -218,8 +311,12 @@ impl Manifest {
     }
 
     /// Whether it named anything at all.
+    ///
+    /// The packages count: a manifest that names only applications is what the store publishes
+    /// between firmware releases, and reading it as "not a manifest" would empty the store's lists
+    /// over a perfectly good answer.
     pub fn is_empty(&self) -> bool {
-        self.firmware.is_none() && self.font.is_none()
+        self.firmware.is_none() && self.font.is_none() && self.apps.is_empty()
     }
 }
 
@@ -458,6 +555,64 @@ mod tests {
         assert!(manifest.font.is_none());
         assert!(manifest.firmware.is_some());
         assert!(!manifest.is_empty());
+    }
+
+    /// A manifest may name only applications: between firmware releases that is exactly what the
+    /// repository publishes, and a document that names a list of packages is not an empty one.
+    #[test]
+    fn a_manifest_may_name_only_applications() {
+        let document = r##"{
+            "apps": [
+                {"id": "calculator", "name": "Calculator", "name_zh": "计算器",
+                 "file": "hivebox-app-calculator-v0.1.0.hbapp", "size": 14726,
+                 "sha256": "b32a", "abi": 1, "accent": "#F69E22",
+                 "description": "四则运算", "glyph": "calculate", "permissions": 0},
+                {"id": "clock", "file": "hivebox-app-clock-v0.2.0.hbapp", "version": "v0.2.0"}
+            ]
+        }"##;
+
+        let manifest = Manifest::parse(document);
+
+        assert!(!manifest.is_empty(), "a list of packages is not an empty manifest");
+        assert_eq!(manifest.apps.len(), 2);
+
+        let calculator = manifest.app("calculator").expect("the calculator");
+        assert_eq!(calculator.version.text(), "v0.1.0");
+        assert_eq!(calculator.name_zh, "计算器");
+        assert_eq!(calculator.accent, "#F69E22");
+        assert_eq!(calculator.size, 14_726);
+        assert_eq!(calculator.glyph, "calculate");
+        assert!(calculator
+            .url()
+            .ends_with("/hivebox-app-calculator-v0.1.0.hbapp"));
+
+        // The second entry names its version in a field rather than in the file name, and a
+        // manifest that omits the ABI is describing a package built for this firmware.
+        let clock = manifest.app("clock").expect("the clock");
+        assert_eq!(clock.version.text(), "v0.2.0");
+        assert_eq!(clock.abi, 1);
+        assert_eq!(clock.permissions, 0);
+        assert!(clock.sha256.is_empty());
+    }
+
+    /// Half an entry is not a row: the store's rows all download a file, and one that cannot be
+    /// named is a button that would fail.
+    #[test]
+    fn an_application_entry_that_is_half_named_is_skipped() {
+        let document = r#"{
+            "apps": [
+                {"id": "no-file"},
+                {"file": "hivebox-app-no-id-v1.hbapp"},
+                {"id": "kept", "file": "hivebox-app-kept-v1.hbapp"},
+                {"id": "no-version", "file": "hivebox-app-no-version.hbapp"}
+            ]
+        }"#;
+
+        let manifest = Manifest::parse(document);
+
+        assert_eq!(manifest.apps.len(), 1);
+        assert_eq!(manifest.apps[0].id, "kept");
+        assert_eq!(manifest.apps[0].version.text(), "v1");
     }
 
     /// A release whose name carries no version is read from the field beside it, and one that names a

@@ -46,6 +46,16 @@ README 与发布工作流都指着它，不能改），`hivebox-ota-<版本>.bin
 每种产物只留最新的一份：`bin/` 里旧版本的固件/字库会被删掉，和这个仓库的做法一致 ——
 每次提交删掉旧的、只提交最新的。
 
+**应用包是清单里的第三个数组 `apps`。**它和固件、字库不是一回事：那两项是「机器自己用的」
+（一个槽、一张表），而应用包是**给人装、给人卸**的，所以清单里是一项一个条目，商店按它画
+「可安装」那一栏。条目的内容由 `tools/build_apps.py` 从包本身读出来，写进 `bin/apps.json`；
+这个脚本用 `--apps` 把那份片段并进清单，同时把 `.hbapp` 平铺进 `bin/`（名字里的 id 与版本
+就是清单里的 id 与版本），并按 **id** 清理旧版本 —— 一个应用同时只该有一个包在 `bin/`，否则
+清单里留哪个都是猜。
+
+应用包的下载地址和固件、字库一样是「清单所在目录 + `file`」，所以 `file` 只能是一个名字，
+不能带目录：带目录的条目在这里就被拒绝，而不是等到商店把包下到 `bin/` 之外的地方去。
+
 用法：
 
     python tools/publish_bin.py                      # 两份镜像取默认构建产物，字库用 --card-dir 给
@@ -53,6 +63,7 @@ README 与发布工作流都指着它，不能改），`hivebox-ota-<版本>.bin
     python tools/publish_bin.py --font /path/to/hivebox-font-24px-v1.bin
     python tools/publish_bin.py --version v0.7.0 --font-version 1
     python tools/publish_bin.py --app build/firmware.bin   # 应用镜像不在合并镜像旁边时
+    python tools/publish_bin.py --apps bin/apps.json       # 把 build_apps.py 的片段并进清单
     python tools/publish_bin.py --dry-run            # 只打印会做什么
 
 `--font` 与 `--card-dir` 只能给一个（清单里 `font` 只有一项，而包是两者里更强的那种），
@@ -112,6 +123,12 @@ FONT_GLOB = re.compile(r"^hivebox-font-.*\.bin$")
 #
 #    版本必须和表的**完全相同**，这一点由 `card_pair` 认死；这里只管名字长什么样。
 CARD_FACE_GLOB = re.compile(r"^hivebox-face-.*\.otf$")
+
+# 6. 应用包的命名规则：`hivebox-app-<id>-<版本>.hbapp`，与 `build_apps.py` 写出的名字一致。
+#
+#    捕获 id 是为了按 id 清理：应用包和固件不同，`bin/` 里可以同时有十几个不同的应用，
+#    每个只该有一版。id 的字符集与 `app-host` 的 `validate_id` 一致（小写字母、数字、`-`、`_`）。
+APP_GLOB = re.compile(r"^hivebox-app-(?P<id>[a-z0-9][a-z0-9_-]*)-v[0-9][^/\\]*\.hbapp$")
 
 
 def display_path(path):
@@ -404,6 +421,133 @@ def publish_font_package(pair, bin_dir, dry_run):
     }
 
 
+def read_app_fragment(path):
+    """读 `build_apps.py` 写的片段，返回 `(条目, 出错说明)`。
+
+    片段是 `{"apps": [...]}`，每个条目至少要有 `id` 与 `file`：前者是目录名与去重的键，
+    后者既是下载地址的最后一段，也是 `bin/` 里的名字。`file` 带目录会被拒绝 —— 商店把清单里
+    的名字原样拼在清单目录后面，带目录的条目会下到别处去。
+
+    版本从**文件名**里读，和清单里的引用方（`updater::Version::from_file_name`）同一条规则：
+    条目里的 `version` 字段只用来核对，不参与命名。
+    """
+    if not os.path.isfile(path):
+        return None, f"找不到应用片段：{display_path(path)}"
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            document = json.load(f)
+    except (OSError, ValueError) as error:
+        return None, f"读不了应用片段 {display_path(path)}：{error}"
+
+    entries = document.get("apps") if isinstance(document, dict) else None
+    if not isinstance(entries, list) or not entries:
+        return None, f"{display_path(path)} 里没有 apps 数组（先跑 tools/build_apps.py）"
+
+    seen = set()
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return None, f"{display_path(path)} 的 apps 里有一项不是对象"
+
+        app_id = entry.get("id")
+        name = entry.get("file")
+
+        if not isinstance(app_id, str) or not app_id:
+            return None, f"{display_path(path)} 的某一项没有 id"
+        if not isinstance(name, str) or not name:
+            return None, f"{app_id} 没有 file"
+        if not APP_GLOB.match(name):
+            return None, (
+                f"{app_id} 的包名不是 `hivebox-app-<id>-v<版本>.hbapp`：{name}"
+                "（商店把 file 当 URL 的最后一段，也当 bin/ 里的名字）"
+            )
+
+        if "/" in name or "\\" in name:
+            return None, f"{app_id} 的 file 带了目录：{name}"
+
+        if app_id in seen:
+            return None, f"应用片段里有两个 {app_id}：一个应用一次只能发布一版"
+        seen.add(app_id)
+
+        if not os.path.isfile(os.path.join(os.path.dirname(os.path.abspath(path)), name)):
+            return None, f"应用片段提到的包不在它旁边：{name}"
+
+    return entries, None
+
+
+def prune_apps(directory, app_id, keep, dry_run):
+    """删掉 `directory` 里同一个 id 的其它版本，只留 `keep`。
+
+    与固件、字库的 `prune` 不同，这里按**每个 id 各留一份**：一个应用只有一版是清单会指的，
+    留着旧包既是没人下载的字节，也会让 `build_apps.py` 下次读到的片段和实际文件对不上。
+    """
+    if not os.path.isdir(directory):
+        return []
+
+    victims = []
+    for name in sorted(os.listdir(directory)):
+        if name == keep or not APP_GLOB.match(name):
+            continue
+        if APP_GLOB.match(name).group("id") != app_id:
+            continue
+        victims.append(name)
+
+    for name in victims:
+        path = os.path.join(directory, name)
+        if dry_run:
+            print(f"[dry-run] 删除旧版本：{name}")
+        else:
+            os.remove(path)
+            print(f"[-] 删除旧版本：{name}")
+
+    return victims
+
+
+def publish_apps(entries, source_dir, bin_dir, dry_run):
+    """把应用包平铺进 `bin/`，返回写进清单 `apps` 的那一份。
+
+    大小与摘要**重新算**，不信片段里写的那两个数：片段是上一次构建的产物，而这个函数是
+    发布这一步 —— 清单里的 sha256 是商店核对下载的凭据，它必须是 `bin/` 里那个文件的值。
+    """
+    published = []
+
+    for entry in sorted(entries, key=lambda item: item["id"]):
+        name = entry["file"]
+        source = os.path.join(source_dir, name)
+        target = os.path.join(bin_dir, name)
+
+        if os.path.abspath(source) == os.path.abspath(target):
+            # 片段就在 bin/ 里（`build_apps.py` 的默认输出），文件已经在该在的地方了。
+            size = os.path.getsize(target)
+            digest = sha256_of(target)
+            if not dry_run:
+                print(f"[=] 已在 bin/：{name}（{size} 字节）")
+        else:
+            size, digest = place(source, bin_dir, name, dry_run)
+
+        prune_apps(bin_dir, entry["id"], name, dry_run)
+
+        published.append(
+            {
+                "id": entry["id"],
+                "name": entry.get("name") or entry["id"],
+                "name_zh": entry.get("name_zh") or entry.get("name") or entry["id"],
+                "version": entry.get("version") or version_from_file_name(name),
+                "file": name,
+                "size": size,
+                "sha256": digest,
+                "abi": entry.get("abi", 1),
+                "accent": entry.get("accent", "#7C8392"),
+                "description": entry.get("description", ""),
+                "glyph": entry.get("glyph", ""),
+                "permissions": entry.get("permissions", 0),
+            }
+        )
+
+    return published
+
+
 def write_manifest(directory, manifest, dry_run):
     """把清单写下来，缩进两格 —— 它是要提交进仓库、被人读的。"""
     path = os.path.join(directory, "manifest.json")
@@ -445,6 +589,11 @@ def main():
         help="字体包的目录（字体 `hivebox-face-*.otf` 与它的表 `hivebox-font-*.bin` 各一份）；"
         "给就把这一对平铺进 bin/ 并写进清单的 font 项（表当 `file`，字体当 `face`）",
     )
+    parser.add_argument(
+        "--apps",
+        help="应用包片段（`build_apps.py` 写的 `apps.json`）；给就把其中的包平铺进 bin/，"
+        "并写进清单的 apps 数组 —— 商店的「可安装」那一栏读的就是它",
+    )
     parser.add_argument("--bin", default=DEFAULT_BIN_DIR, help="输出目录（默认仓库根的 bin/）")
     parser.add_argument("--dry-run", action="store_true", help="只打印会做什么，不落盘")
     args = parser.parse_args()
@@ -485,6 +634,15 @@ def main():
     card = None
     if args.card_dir:
         card, problem = card_pair(args.card_dir)
+        if problem:
+            print(f"[!] {problem}")
+            return 1
+
+    # 应用包也是先认后写：片段里的每个 id、每个包名、每个文件都要在，否则这一版的一个应用
+    # 会以「清单里有、bin/ 里没有」的形态发出去，而商店按下按钮才发现。
+    apps = None
+    if args.apps:
+        apps, problem = read_app_fragment(args.apps)
         if problem:
             print(f"[!] {problem}")
             return 1
@@ -559,6 +717,12 @@ def main():
             "sha256": font_sha,
         }
 
+    app_entries = []
+    if apps is not None:
+        source_dir = os.path.dirname(os.path.abspath(args.apps))
+        app_entries = publish_apps(apps, source_dir, args.bin, args.dry_run)
+        manifest["apps"] = app_entries
+
     write_manifest(args.bin, manifest, args.dry_run)
 
     published = [
@@ -569,6 +733,8 @@ def main():
         published.append(f"{font_name} + {os.path.basename(card[0])}（{card[2]} 的一对）")
     elif font_name:
         published.append(font_name)
+    if app_entries:
+        published.append(f"{len(app_entries)} 个应用包")
 
     print("[*] 完成。bin/ 现在有：" + "、".join(published))
     return 0

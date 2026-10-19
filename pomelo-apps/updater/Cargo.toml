@@ -26,6 +26,10 @@ pomelo-widgets = { git = "https://github.com/pomelos-on-sale/pomelo-widgets.git"
 # The icons: the two rows' glyphs, the download and the check.
 pomelo-material-symbols = { git = "https://github.com/pomelos-on-sale/pomelo-material-symbols.git", rev = "7dc390fb1924dc69b375e5ae77806857f798cc58" }
 
+# The manifest reader, now with arrays: the store's `apps` list is a list of objects, and the
+# updater's copy of this reader only knew objects.
+mini-json = { path = "../mini-json" }
+
 [features]
 # On by default, because a project of its own is a desktop program: iced needs *a* renderer, and this is
 # the one that needs no GPU. The board is the other way round — `rust_main` and `app-launcher` depend on

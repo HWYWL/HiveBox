@@ -732,12 +732,13 @@ textarea.code.wrap { white-space: pre-wrap; word-break: break-word; }
   <section id="view-cloud" hidden>
     <div class="group">
       <div class="group-title">服务商</div>
+      <div class="chips" id="cloudVendors"></div>
       <div class="card" style="padding:14px">
         <div class="row" style="padding:0">
           <svg class="ic sm"><use href="#i-cloud"/></svg>
           <div class="row-main">
-            <div class="row-name">腾讯云</div>
-            <div class="row-meta">云服务器 CVM 与轻量应用服务器，一把密钥，全部地域</div>
+            <div class="row-name" id="cloudVendorName">腾讯云</div>
+            <div class="row-meta" id="cloudVendorNote">云服务器 CVM 与轻量应用服务器，一把密钥，全部地域</div>
           </div>
           <span class="row-meta" id="cloudState">未保存密钥</span>
         </div>
@@ -751,7 +752,7 @@ textarea.code.wrap { white-space: pre-wrap; word-break: break-word; }
             <svg class="ic sm" style="color:var(--green)"><use href="#i-check"/></svg>
             <div class="row-main">
               <div class="row-name" id="cloudSavedId">—</div>
-              <div class="row-meta">SecretKey 只写在设备里，读不回来</div>
+              <div class="row-meta" id="cloudSecretNote">SecretKey 只写在设备里，读不回来</div>
             </div>
           </div>
           <div class="bar-actions" style="padding:12px 0 0;margin:0">
@@ -774,7 +775,7 @@ textarea.code.wrap { white-space: pre-wrap; word-break: break-word; }
           </div>
         </div>
         <div class="pv-note" style="padding:10px 0 0;text-align:left" id="cloudOut">
-          密钥和 Wi-Fi 密码一样写在这台设备的文件里，网页只读得回一个打了码的 SecretId ——
+          密钥和 Wi-Fi 密码一样写在这台设备的文件里，网页只读得回一个打了码的密钥 ID ——
           面板上的「云服务」应用用的是同一份。
         </div>
       </div>
@@ -1033,13 +1034,14 @@ const ERRORS = {
   cloud_creds: "还没有密钥，先在下面存一份",
   cloud_offline: "设备现在没有网络",
   cloud_clock: "设备的时间还没对上，先同步一次时间",
-  cloud_unreachable: "连不上腾讯云的接口",
+  cloud_unreachable: "连不上云的接口",
   cloud_tls: "接口的证书没有验过，看看设备的时间",
   cloud_http: "接口回了一个看不懂的应答",
-  cloud_api: "腾讯云拒绝了这次请求",
+  cloud_api: "云拒绝了这次请求",
   cloud_storage: "这个应答在设备上放不下",
   cloud_busy: "设备上已经有一条云命令在跑，等它回来",
-  cloud_timeout: "腾讯云没有在时限内回话",
+  cloud_timeout: "云没有在时限内回话",
+  cloud_unsupported: "这个版本还没有这家云的客户端",
   network: "连不上设备，看看是否还在同一个网络里"
 };
 const RESET_REASONS = {
@@ -1069,7 +1071,9 @@ const state = {
   servers: null,         // the last /api/nas/list answer: [{ host, user, port }]
   editing: null,         // the host the server form is correcting, or null when it is adding one
   cloud: null,           // the last /api/cloud/status answer: { saved, secret_id, region }
+  cloud_vendor: "tencent", // whose key and list the cloud view is showing
   cloud_editing: false,  // the key form is open over a saved key
+  cloud_reload: false,   // a read was asked for while one was already on its way
   cloud_rows: null,      // the last /api/cloud/list rows, or null before the first answer
   cloud_failed: [],      // providers that merged list could not reach
   cloud_loading: false,  // a list is being read, which is what the skeleton is for
@@ -2498,15 +2502,52 @@ async function nasClear() {
 
 /* --- the cloud ------------------------------------------------------------- */
 
-/* One account, one key. CVM and Lighthouse are two endpoints underneath, but a person has one
-   Tencent Cloud account and types one SecretId; the page never asks which product a machine is. The
-   row says it instead, because that is the only thing the product name is still good for. */
-const CLOUD_PRODUCTS = {
-  cvm: "云服务器",
-  lighthouse: "轻量应用服务器"
+/* One company, one key, and its servers through however many APIs it sells them by. A person has one
+   Tencent Cloud account and types one SecretId that reaches CVM and Lighthouse both, and one Alibaba
+   key that reaches ECS; the page never asks which product a machine is. The row says it instead,
+   because that is the only thing the product name is still good for. */
+const CLOUD_VENDORS = {
+  tencent: {
+    name: "腾讯云",
+    products: "CVM · 轻量",
+    note: "云服务器 CVM 与轻量应用服务器，一把密钥，全部地域",
+    console: "腾讯云",
+    /* 每一家对同一对东西叫法不同，而一个人只认得自己那家控制台上的名字。 */
+    id_label: "SecretId",
+    id_example: "AKID…",
+    secret_label: "SecretKey",
+    hint: "在腾讯云控制台建一个子账号密钥，给它这个账号的读权限和开关机权限就够了。"
+  },
+  aliyun: {
+    name: "阿里云",
+    products: "ECS",
+    note: "云服务器 ECS，一把密钥，全部地域",
+    console: "阿里云",
+    id_label: "AccessKey ID",
+    id_example: "LTAI…",
+    secret_label: "AccessKey Secret",
+    hint: "在阿里云控制台建一个 RAM 子账号密钥，给它这个账号的读权限和开关机权限就够了。"
+  },
+  aws: {
+    name: "AWS",
+    products: "EC2",
+    note: "EC2，密钥可以先存着，这个版本还没有它的客户端",
+    console: "AWS",
+    id_label: "Access Key ID",
+    id_example: "AKIA…",
+    secret_label: "Secret Access Key",
+    hint: "在 AWS 控制台建一个 IAM 用户密钥；这个版本还没有它的签名，存下来也只是存着。"
+  }
 };
 
-/* Data centres, in the names a person uses. A merged list scans every one of them, and two machines
+const CLOUD_PRODUCTS = {
+  cvm: "云服务器",
+  lighthouse: "轻量应用服务器",
+  ecs: "ECS",
+  ec2: "EC2"
+};
+
+/* Data centres, in the names a person uses. A vendor's list scans every one of them, and two machines
    can share a name, so the row says where it is. Anything not in here is shown as it came. */
 const CLOUD_ZONES = {
   "ap-beijing": "北京", "ap-chengdu": "成都", "ap-chongqing": "重庆", "ap-guangzhou": "广州",
@@ -2515,7 +2556,15 @@ const CLOUD_ZONES = {
   "ap-mumbai": "孟买", "ap-taipei": "台北", "ap-shenzhen": "深圳",
   "ap-siliconvalley": "硅谷", "na-siliconvalley": "硅谷", "na-ashburn": "弗吉尼亚",
   "na-toronto": "多伦多", "ap-frankfurt": "法兰克福", "eu-frankfurt": "法兰克福",
-  "ap-moscow": "莫斯科", "eu-moscow": "莫斯科", "ap-saopaulo": "圣保罗", "sa-saopaulo": "圣保罗"
+  "ap-moscow": "莫斯科", "eu-moscow": "莫斯科", "ap-saopaulo": "圣保罗", "sa-saopaulo": "圣保罗",
+  "cn-hangzhou": "杭州", "cn-shanghai": "上海", "cn-beijing": "北京", "cn-shenzhen": "深圳",
+  "cn-chengdu": "成都", "cn-qingdao": "青岛", "cn-zhangjiakou": "张家口",
+  "cn-huhehaote": "呼和浩特", "cn-wulanchabu": "乌兰察布", "cn-heyuan": "河源",
+  "cn-guangzhou": "广州", "cn-nanjing": "南京", "cn-fuzhou": "福州", "cn-hongkong": "香港",
+  "ap-southeast-1": "新加坡", "ap-southeast-2": "悉尼", "ap-southeast-3": "吉隆坡",
+  "ap-southeast-5": "雅加达", "ap-northeast-1": "东京", "ap-northeast-2": "首尔",
+  "us-west-1": "硅谷", "us-east-1": "弗吉尼亚", "eu-central-1": "法兰克福",
+  "eu-west-1": "伦敦", "me-east-1": "迪拜"
 };
 
 /* What the API's state words mean. Two providers spell the same idea differently -- CVM says
@@ -2539,7 +2588,7 @@ const CLOUD_DONE = {
   reboot: "已请求重启"
 };
 
-/* A cloud answer is a document, not just an `ok`. When Tencent refuses, the answer carries the API's
+/* A cloud answer is a document, not just an `ok`. When the cloud refuses, the answer carries the API's
    own code and message, and those two are the sentence somebody needs -- `UnauthorizedOperation` says
    what to fix and `cloud_api` does not -- so this reads the answer itself instead of going through
    `api()`, which flattens every failure into the code table. */
@@ -2575,14 +2624,63 @@ async function cloudCall(endpoint, params, method) {
 function cloudStatus() { return state.cloud || null; }
 function cloudSaved() { const status = cloudStatus(); return !!(status && status.saved); }
 
+/* Whose key and list this view is showing. Every request below names it: a key belongs to a company,
+   and the board keeps one per company. */
+function cloudVendor() {
+  return state.cloud_vendor in CLOUD_VENDORS ? state.cloud_vendor : "tencent";
+}
+function cloudVendorInfo() { return CLOUD_VENDORS[cloudVendor()]; }
+
+/* AWS is a name and a place to keep a key until its signature is written: saying so is better than an
+   empty list that reads as an account with no machines. */
+function cloudSupported() { return cloudVendor() !== "aws"; }
+
 function cloudNote(text) { $("cloudOut").textContent = text; }
+
+/* The three companies as chips. The selected one is not a link: pressing it would read the list the
+   page is already showing. */
+function cloudVendorChips() {
+  return Object.keys(CLOUD_VENDORS).map((key) => {
+    const vendor = CLOUD_VENDORS[key];
+    const here = key === cloudVendor();
+    return '<button class="chip ' + (here ? "on" : "") + '" data-vendor="' + esc(key) + '">' +
+      '<svg class="ic sm"><use href="#i-cloud"/></svg>' +
+      '<span class="chip-txt"><span class="chip-name">' + esc(vendor.name) + "</span>" +
+      '<span class="chip-sub">' + esc(vendor.products) + "</span></span></button>";
+  }).join("");
+}
+
+/* A different company is a different list. What is on the page belongs to the vendor being left, so
+   the status and the rows are both dropped rather than redrawn under another company's name. */
+async function cloudPick(vendor) {
+  if (!(vendor in CLOUD_VENDORS) || vendor === cloudVendor()) return;
+
+  /* A power command names a row that is on screen and takes a second or two; switching under it would
+     leave the page showing one company while the toast talks about a machine of another. */
+  if (state.cloud_busy) { toast("等这次开关机结束再换一家"); return; }
+
+  state.cloud_vendor = vendor;
+  state.cloud = null;
+  state.cloud_rows = null;
+  state.cloud_failed = [];
+  state.cloud_editing = false;
+  $("cloudId").value = "";
+  $("cloudSecret").value = "";
+  renderCloud();
+
+  await loadCloud(true);
+
+  /* Asked for only when there is something to ask with and somebody to ask: AWS answers the request
+     with "not supported", and a page that read that as a list would be drawing a failure as a page. */
+  if (cloudSaved() && cloudSupported()) loadCloudList(true);
+}
 
 /* What is saved, said in words rather than put in the boxes. The board hands back a masked SecretId
    and never the SecretKey, so there is nothing to fill in from here: the form is for *replacing* what
    is there, which is why a saved key shows as a card with 编辑 and 删除 rather than as filled boxes. */
 async function loadCloud(quiet) {
   try {
-    state.cloud = await cloudCall("/api/cloud/status");
+    state.cloud = await cloudCall("/api/cloud/status", { vendor: cloudVendor() });
   } catch (error) {
     if (!quiet) toast(error.message, "bad");
     return;
@@ -2595,35 +2693,61 @@ function renderCloud() {
   const status = cloudStatus();
   const saved = cloudSaved();
   const editing = state.cloud_editing;
+  const vendor = cloudVendorInfo();
+  const supported = cloudSupported();
 
-  $("cloudState").textContent = saved ? "已保存密钥" : "未保存密钥";
+  $("cloudVendors").innerHTML = cloudVendorChips();
+  $("cloudVendorName").textContent = vendor.name;
+  $("cloudVendorNote").textContent = vendor.note;
+  $("cloudState").textContent = !supported ? "暂不支持" : saved ? "已保存密钥" : "未保存密钥";
   $("cloudSavedView").hidden = !saved || editing;
   $("cloudForm").hidden = saved && !editing;
   $("cloudCancel").hidden = !editing;
+  $("cloudScan").disabled = !supported;
 
   if (saved) {
     $("cloudSavedId").textContent = status.secret_id;
+    $("cloudSecretNote").textContent = vendor.secret_label + " 只写在设备里，读不回来";
   }
 
-  $("cloudId").placeholder = saved ? "新的 SecretId" : "SecretId，例如 AKID…";
-  $("cloudSecret").placeholder = saved ? "新的 SecretKey" : "SecretKey";
+  /* The two boxes are named after the vendor's own console: somebody copying an "AccessKey ID" out
+     of the Alibaba Cloud page should not have to work out that this is the SecretId here. */
+  $("cloudId").placeholder = saved
+    ? "新的 " + vendor.id_label
+    : vendor.id_label + "，例如 " + vendor.id_example;
+  $("cloudSecret").placeholder = saved ? "新的 " + vendor.secret_label : vendor.secret_label;
 
-  cloudNote(saved
-    ? "已保存 " + status.secret_id + "，面板上的「云服务」用的是同一份。读取列表会扫一遍云服务器" +
-      "和轻量的所有地域，机器多时第一次会慢一点。"
-    : "在腾讯云控制台建一个子账号密钥，给它这个账号的读权限和开关机权限就够了。");
+  if (!supported) {
+    cloudNote("这个版本还没有 " + vendor.name + " 的签名：密钥可以先存着，读取列表和开关机都还做不到。");
+  } else if (saved) {
+    cloudNote("已保存 " + status.secret_id + "，面板上的「云服务」应用用的是同一份。读取列表会扫一遍" +
+      vendor.name + "的每种服务器、每个地域，机器多时第一次会慢一点。");
+  } else {
+    cloudNote(vendor.hint);
+  }
 
   renderCloudList();
 }
 
 function renderCloudList() {
   const box = $("cloudList");
+  const vendor = cloudVendorInfo();
+
+  if (!cloudSupported()) {
+    box.innerHTML =
+      '<div class="row"><svg class="ic sm" style="color:var(--label-2)"><use href="#i-cloud"/></svg>' +
+      '<div class="row-main"><div class="row-name">这家云暂不支持</div>' +
+      '<div class="row-meta">这个版本还没有 ' + esc(vendor.name) +
+      " 的客户端，列不出它的机器。</div></div></div>";
+    return;
+  }
 
   if (!cloudSaved()) {
     box.innerHTML =
       '<div class="row"><svg class="ic sm" style="color:var(--label-2)"><use href="#i-cloud"/></svg>' +
       '<div class="row-main"><div class="row-name">先存一份密钥</div>' +
-      '<div class="row-meta">上面填好 SecretId 和 SecretKey，这里就会列出这个账号里的机器。</div>' +
+      '<div class="row-meta">上面填好 ' + esc(vendor.id_label) + " 和 " + esc(vendor.secret_label) +
+      "，这里就会列出这个账号里的机器。</div>" +
       "</div></div>";
     return;
   }
@@ -2636,8 +2760,8 @@ function renderCloudList() {
     box.innerHTML =
       '<div class="row"><svg class="ic sm" style="color:var(--label-2)"><use href="#i-cloud"/></svg>' +
       '<div class="row-main"><div class="row-name">还没有读过列表</div>' +
-      '<div class="row-meta">点下面的「读取实例列表」，设备会带着这份密钥去问一次腾讯云，' +
-      "云服务器和轻量的所有地域都会问到。</div></div></div>";
+      '<div class="row-meta">点下面的「读取实例列表」，设备会带着这份密钥去问一次' +
+      esc(vendor.name) + "，它的每种服务器、每个地域都会问到。</div></div></div>";
     return;
   }
 
@@ -2646,8 +2770,8 @@ function renderCloudList() {
   if (!state.cloud_rows.length && !failed.length) {
     box.innerHTML =
       '<div class="row"><svg class="ic sm" style="color:var(--label-2)"><use href="#i-cloud"/></svg>' +
-      '<div class="row-main"><div class="row-name">这个账号里没有机器</div>' +
-      '<div class="row-meta">云服务器和轻量的所有地域都问过了，一台也没有。</div></div></div>';
+      '<div class="row-main"><div class="row-name">这家云里没有机器</div>' +
+      '<div class="row-meta">它的所有服务器、所有地域都问过了，一台也没有。</div></div></div>';
     return;
   }
 
@@ -2698,31 +2822,61 @@ async function loadCloudList(quiet) {
     state.cloud_rows = null;
     state.cloud_failed = [];
     renderCloudList();
-    cloudNote("还没有密钥，设备没有东西可以拿去签名。先在上面存一份。");
+    cloudNote("还没有密钥，设备没有东西可以拿去签名。先在" + cloudVendorInfo().console +
+      "控制台建一份，填在上面。");
     return;
   }
 
+  /* The board serves one cloud request at a time and answers a second with "busy", so a read already
+     on its way is waited for rather than raced: the flag says to read again as soon as it lands. */
+  if (state.cloud_loading) { state.cloud_reload = true; return; }
+
+  const asked = cloudVendor();
   state.cloud_loading = true;
+  state.cloud_reload = false;
   renderCloudList();
-  cloudNote("正在扫描云服务器和轻量的所有地域，机器多时第一次会慢一点…");
+  cloudNote("正在扫描" + CLOUD_VENDORS[asked].name + "的所有服务器、所有地域，机器多时第一次会慢一点…");
+
+  let rows = [];
+  let failed = [];
+  let note = "";
 
   try {
-    const answer = await cloudCall("/api/cloud/list", { provider: "all" });
-    state.cloud_rows = answer.instances || [];
-    state.cloud_failed = answer.failed || [];
-    cloudNote("读到 " + state.cloud_rows.length + " 台机器" +
-      (state.cloud_failed.length ? "，有一类没有返回，列表可能不全" : "") + "。");
+    const answer = await cloudCall("/api/cloud/list", { vendor: asked });
+    if (asked === cloudVendor()) {
+      rows = answer.instances || [];
+      failed = answer.failed || [];
+      note = "读到 " + rows.length + " 台机器" +
+        (failed.length ? "，有一类没有返回，列表可能不全" : "") + "。";
+    }
   } catch (error) {
     /* An empty list, not a kept one: the rows on screen were the account's answer to a question that
        was just refused, and leaving them up would be showing machines this page cannot act on. */
-    state.cloud_rows = [];
-    state.cloud_failed = [];
-    cloudNote("没能读到列表：" + (error.message || error));
-    if (!quiet) toast(error.message || String(error), "bad");
+    if (asked === cloudVendor()) {
+      note = "没能读到列表：" + (error.message || error);
+      if (!quiet) toast(error.message || String(error), "bad");
+    }
   }
 
+  /* The page may have moved to another company while that was in flight, in which case this answer
+     belongs to a list nobody is looking at any more — and the vendor now on screen still needs one. */
+  if (asked !== cloudVendor()) {
+    state.cloud_loading = false;
+    state.cloud_reload = false;
+    loadCloudList(true);
+    return;
+  }
+
+  state.cloud_rows = rows;
+  state.cloud_failed = failed;
   state.cloud_loading = false;
+  if (note) cloudNote(note);
   renderCloudList();
+
+  if (state.cloud_reload) {
+    state.cloud_reload = false;
+    loadCloudList(true);
+  }
 }
 
 async function cloudSave() {
@@ -2730,9 +2884,10 @@ async function cloudSave() {
   const secret_key = $("cloudSecret").value;
 
   /* Both halves, always. There is no "keep the old one" path: the board stores a whole key or none,
-     and a SecretId with no SecretKey is a pair that cannot sign anything. */
+     and an id with no secret is a pair that cannot sign anything. */
   if (!secret_id || !secret_key) {
-    cloudNote("SecretId 和 SecretKey 都要填。");
+    const vendor = cloudVendorInfo();
+    cloudNote(vendor.id_label + " 和 " + vendor.secret_label + " 都要填。");
     return;
   }
 
@@ -2740,6 +2895,7 @@ async function cloudSave() {
 
   try {
     await cloudCall("/api/cloud/remember", {
+      vendor: cloudVendor(),
       secret_id: secret_id,
       secret_key: secret_key
     }, "POST");
@@ -2766,8 +2922,8 @@ async function cloudForget() {
 
   const sure = await confirmSheet({
     title: "删除这份密钥？",
-    note: cloudStatus().secret_id,
-    hint: "设备上的「云服务」应用也会跟着不能用了。",
+    note: cloudVendorInfo().name + " · " + cloudStatus().secret_id,
+    hint: "面板上的「云服务」应用也会跟着看不到这家云的机器。",
     ok: "删除",
     danger: true
   });
@@ -2776,7 +2932,7 @@ async function cloudForget() {
   cloudNote("正在删除…");
 
   try {
-    await cloudCall("/api/cloud/forget", null, "POST");
+    await cloudCall("/api/cloud/forget", { vendor: cloudVendor() }, "POST");
   } catch (error) {
     cloudNote("删除失败：" + (error.message || error));
     return;
@@ -2811,7 +2967,7 @@ async function cloudPower(action, id, name, kind, region) {
 
   try {
     await cloudCall("/api/cloud/power", {
-      provider: kind,
+      kind: kind,
       action: action,
       instance: id,
       region: region || ""
@@ -3887,6 +4043,13 @@ $("view-cloud").addEventListener("click", (event) => {
     $("cloudId").value = "";
     $("cloudSecret").value = "";
     renderCloud();
+    return;
+  }
+
+  /* The chips are redrawn on every answer, so which company was picked is read off the click too. */
+  const vendor = on("[data-vendor]");
+  if (vendor) {
+    cloudPick(vendor.dataset.vendor);
     return;
   }
 
