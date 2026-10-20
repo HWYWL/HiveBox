@@ -1,10 +1,10 @@
 {
-  "generated": "2026-10-20T04:55:09Z",
+  "generated": "2026-10-20T08:57:53Z",
   "firmware": {
-    "version": "v0.11.0-20261020",
-    "file": "hivebox-ota-v0.11.0-20261020.bin",
+    "version": "v0.11.1-20261020",
+    "file": "hivebox-ota-v0.11.1-20261020.bin",
     "size": 5781504,
-    "sha256": "406c2874698b8ef1e1d790a6e793d3f71f58ecfb24cf426b36035ebc851453d6"
+    "sha256": "86c861d92b2195989d0fcef271589e0f6ff43c1557adb1545f1feb64ccdf3fe7"
   },
   "font": {
     "version": "v3",
