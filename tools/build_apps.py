@@ -53,6 +53,7 @@ PERMISSIONS = {
     "WIFI": 16,
     "CLOUD": 32,
     "FILES": 64,
+    "WEB": 128,
 }
 
 # Which import needs which bit. Deliberately exhaustive over the `host` module: an import that is
@@ -376,6 +377,42 @@ CATALOGUE = [
         memory_kb=512,
         permissions=PERMISSIONS["CLOUD"],
         glyph="cloud_sync",
+    ),
+    App(
+        id="files",
+        crate_name="files-wasm",
+        name="Files",
+        name_zh="文件管理",
+        version="v0.1.0",
+        accent="#A66F4A",
+        description="两个卷里的目录：进去、退出来、删除",
+        memory_kb=512,
+        permissions=PERMISSIONS["FILES"],
+        glyph="folder_open",
+    ),
+    App(
+        id="music-player",
+        crate_name="music-player-wasm",
+        name="Music",
+        name_zh="音乐",
+        version="v0.1.0",
+        accent="#E94560",
+        description="卡上 music 目录里的曲目，解码在固件那一侧",
+        memory_kb=512,
+        permissions=PERMISSIONS["FILES"] | PERMISSIONS["AUDIO"],
+        glyph="music_note",
+    ),
+    App(
+        id="web-manager",
+        crate_name="web-manager-wasm",
+        name="Web Manager",
+        name_zh="网页管理",
+        version="v0.1.0",
+        accent="#2384F5",
+        description="板子那个 HTTP 服务的开关与地址",
+        memory_kb=256,
+        permissions=PERMISSIONS["WEB"],
+        glyph="public",
     ),
 ]
 

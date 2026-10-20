@@ -879,6 +879,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "files-wasm"
+version = "0.1.0"
+dependencies = [
+ "app-sdk",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1841,6 +1848,13 @@ dependencies = [
  "pomelo-hal",
  "pomelo-material-symbols",
  "pomelo-widgets",
+]
+
+[[package]]
+name = "music-player-wasm"
+version = "0.1.0"
+dependencies = [
+ "app-sdk",
 ]
 
 [[package]]
@@ -3960,6 +3974,13 @@ dependencies = [
  "pomelo-hal",
  "pomelo-material-symbols",
  "pomelo-widgets",
+]
+
+[[package]]
+name = "web-manager-wasm"
+version = "0.1.0"
+dependencies = [
+ "app-sdk",
 ]
 
 [[package]]

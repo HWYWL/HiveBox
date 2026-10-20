@@ -253,6 +253,46 @@ pub trait Services {
         code::UNSUPPORTED
     }
 
+    // -------------------------------------------------------------------------------------------
+    // What is on the two volumes (permission `FILES`).
+    // -------------------------------------------------------------------------------------------
+
+    /// Opens a directory for reading. One is open at a time; opening another closes the first.
+    ///
+    /// A path that is not under one of the volume mount points, or that contains a `..`, is refused
+    /// rather than cleaned up: an application that asks for somewhere else is not an application
+    /// that mistyped, and the answer has to be one it can see.
+    fn dir_open(&mut self, _path: &str) -> i32 {
+        code::UNSUPPORTED
+    }
+
+    /// The next entry as one line, `kind\tname\tsize`; `None` at the end.
+    fn dir_next(&mut self, _out: &mut [u8]) -> Option<usize> {
+        None
+    }
+
+    /// Closes the open directory.
+    fn dir_close(&mut self) {}
+
+    /// Deletes a file, or a directory with everything under it.
+    fn path_remove(&mut self, _path: &str) -> i32 {
+        code::UNSUPPORTED
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // The board's own web server (permission `WEB`).
+    // -------------------------------------------------------------------------------------------
+
+    /// Whether the server is up, and the address a browser on this network would open.
+    fn web_status(&mut self) -> Option<(bool, String)> {
+        None
+    }
+
+    /// Starts the server on its default port, or stops it.
+    fn web_set(&mut self, _on: bool) -> i32 {
+        code::UNSUPPORTED
+    }
+
     /// One line on the serial log.
     fn log(&mut self, _message: &str) {}
 

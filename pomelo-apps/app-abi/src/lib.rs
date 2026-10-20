@@ -42,11 +42,12 @@ pub const ABI_MAJOR: u16 = 1;
 /// * `1` added the network, the box's own readings and the speaker.
 /// * `2` added the radio.
 /// * `3` added the machines beside the box and the ones in an account.
+/// * `4` added the two volumes' file listings and the board's web server.
 ///
 /// An application built against `1.0` still runs on this host: every addition is an import it never
 /// calls. An application built against `1.3` on a `1.0` host fails at instantiation, which is the
 /// answer the store draws as "needs a newer system".
-pub const ABI_MINOR: u16 = 3;
+pub const ABI_MINOR: u16 = 4;
 
 /// Packs a major and a minor into the word [`export::ABI_VERSION`] returns.
 pub const fn version_word(major: u16, minor: u16) -> u32 {
@@ -217,6 +218,38 @@ pub mod host {
     pub const CLOUD_TAKE: &str = "hb_cloud_take";
     /// `() -> i32`: abandons the request in flight.
     pub const CLOUD_CANCEL: &str = "hb_cloud_cancel";
+
+    // -------------------------------------------------------------------------------------------
+    // v1.4: what is on the two volumes, and the board's own web server.
+    // -------------------------------------------------------------------------------------------
+
+    /// `(path_ptr, path_len) -> i32`: opens a directory on one of the volumes for reading. One is
+    /// open at a time; opening another closes the first. Requires [`super::perm::FILES`].
+    ///
+    /// The path must sit under one of the volume mount points the storage backend reports. Anything
+    /// with a `..` in it is refused outright: the listing is the one place an application could
+    /// otherwise walk out of the two directories it was meant to see.
+    pub const DIR_OPEN: &str = "hb_dir_open";
+    /// `(out_ptr, out_len) -> i32`: writes the next entry as one line, `kind\tname\tsize`, where
+    /// `kind` is one of [`super::dir_entry`]. Returns the line's length, or [`super::code::END`] when
+    /// there is nothing more to read. Directories come first, then files, each
+    /// by name: the order a person looking for something expects, and one the application does not
+    /// have to sort for itself.
+    pub const DIR_NEXT: &str = "hb_dir_next";
+    /// `() -> i32`: closes the open directory.
+    pub const DIR_CLOSE: &str = "hb_dir_close";
+    /// `(path_ptr, path_len) -> i32`: deletes a file, or a directory with everything under it.
+    /// Requires [`super::perm::FILES`]. The path is checked the way [`DIR_OPEN`] checks it, because
+    /// the same walk out would be a worse thing to do here.
+    pub const PATH_REMOVE: &str = "hb_path_remove";
+    /// `(out_ptr, out_len) -> i32`: writes the board's web server as one line, `running\turl` —
+    /// `1` or `0`, and the address a browser on this network would open, which is empty while the
+    /// server is down or the box is off the network. Requires [`super::perm::WEB`].
+    pub const WEB_STATUS: &str = "hb_web_status";
+    /// `(on: u32) -> i32`: starts the server on its default port, or stops it. Requires
+    /// [`super::perm::WEB`]. The board is the authority afterwards: read [`WEB_STATUS`] rather than
+    /// believing the call, which is what the panel over the same switch does.
+    pub const WEB_SET: &str = "hb_web_set";
 
     /// `()`: asks the host for another frame without an input event — what an application does when
     /// something it started asynchronously has finished.
@@ -425,6 +458,18 @@ pub mod key {
 
 /// What an application may ask the host to do on its behalf.
 ///
+/// What the kind on a line [`host::DIR_NEXT`] wrote means.
+///
+/// Two kinds and not six: a volume on this board holds files and directories and nothing else — no
+/// links, no devices, no sockets — and an application that had to know about those would be asking a
+/// question this host cannot answer.
+pub mod dir_entry {
+    /// A file. It has a size.
+    pub const FILE: u32 = 0;
+    /// A directory. It can be opened.
+    pub const DIR: u32 = 1;
+}
+
 /// A package's metadata carries the union of the bits it needs; the host refuses an import whose bit
 /// is not set, and the store shows the list before a person installs it. The bits are powers of two
 /// and grow by appending, so the meaning of an old bit never changes.
@@ -445,9 +490,15 @@ pub mod perm {
     pub const CLOUD: u32 = 1 << 5;
     /// The two volumes' file listings, beyond the application's own directory.
     pub const FILES: u32 = 1 << 6;
+    /// The board's own web server: read whether it is up, and switch it.
+    ///
+    /// The widest bit here, and the reason the store shows the list before a person installs
+    /// anything: a server with no password is open to everyone on the same network, and this is the
+    /// switch that opens it.
+    pub const WEB: u32 = 1 << 7;
 
     /// Every bit this ABI defines.
-    pub const ALL: u32 = NETWORK | SYSTEM | AUDIO | NAS | WIFI | CLOUD | FILES;
+    pub const ALL: u32 = NETWORK | SYSTEM | AUDIO | NAS | WIFI | CLOUD | FILES | WEB;
 
     /// The permission a host function needs, by its name, or `None` for the calls that need none.
     ///
@@ -483,6 +534,11 @@ pub mod perm {
             | super::host::CLOUD_STATE
             | super::host::CLOUD_TAKE
             | super::host::CLOUD_CANCEL => CLOUD,
+            super::host::DIR_OPEN
+            | super::host::DIR_NEXT
+            | super::host::DIR_CLOSE
+            | super::host::PATH_REMOVE => FILES,
+            super::host::WEB_STATUS | super::host::WEB_SET => WEB,
             _ => return None,
         })
     }
@@ -506,6 +562,9 @@ pub mod code {
     pub const INVALID: i32 = -4;
     /// The storage or the transport answered with a failure.
     pub const IO: i32 = -5;
+    /// There is nothing more to read: the end of a listing, an answer already taken. Not a failure,
+    /// and the one negative answer a caller is expected to get on a happy path.
+    pub const END: i32 = -6;
 }
 
 /// How a request that has a start and a poll is going.

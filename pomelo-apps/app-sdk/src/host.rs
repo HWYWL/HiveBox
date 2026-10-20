@@ -353,6 +353,52 @@ pub fn cloud_cancel() -> bool {
     imp::cloud_cancel() == code::OK
 }
 
+// ---------------------------------------------------------------------------------------------
+// What is on the two volumes (permission `FILES`).
+// ---------------------------------------------------------------------------------------------
+
+/// Opens `path` for reading. One directory at a time: opening another closes the first, and the
+/// entries are read once — the listing is a snapshot, not a cursor into a disk that is still turning.
+///
+/// A path outside the two mount points, or one with a `..` in it, is refused.
+pub fn dir_open(path: &str) -> bool {
+    imp::dir_open(path.as_ptr() as u32, path.len() as u32) == code::OK
+}
+
+/// The next entry, as `kind\tname\tsize` — see [`app_abi::dir_entry`]. `None` at the end.
+pub fn dir_next(out: &mut [u8]) -> Option<usize> {
+    let written = imp::dir_next(out.as_mut_ptr() as u32, out.len() as u32);
+
+    (written >= 0).then_some(written as usize)
+}
+
+/// Closes the open directory, which the host would otherwise keep until the next one is opened.
+pub fn dir_close() {
+    imp::dir_close();
+}
+
+/// Deletes a file, or a directory with everything under it.
+pub fn path_remove(path: &str) -> bool {
+    imp::path_remove(path.as_ptr() as u32, path.len() as u32) == code::OK
+}
+
+// ---------------------------------------------------------------------------------------------
+// The board's own web server (permission `WEB`).
+// ---------------------------------------------------------------------------------------------
+
+/// `running\turl`, where `running` is `1` or `0` and the address is empty while there is none to
+/// open. Read this rather than believing [`web_set`]: the board is the authority on its own socket.
+pub fn web_status(out: &mut [u8]) -> Option<usize> {
+    let written = imp::web_status(out.as_mut_ptr() as u32, out.len() as u32);
+
+    (written >= 0).then_some(written as usize)
+}
+
+/// Starts the server on its default port, or stops it.
+pub fn web_set(on: bool) -> bool {
+    imp::web_set(u32::from(on)) == code::OK
+}
+
 #[cfg(target_arch = "wasm32")]
 mod imp {
     // The imported names are the ABI's (`hb_*`); the names on this side are what the wrappers above
@@ -463,6 +509,19 @@ mod imp {
         fn raw_cloud_take(out_ptr: u32, out_len: u32) -> i32;
         #[link_name = "hb_cloud_cancel"]
         fn raw_cloud_cancel() -> i32;
+
+        #[link_name = "hb_dir_open"]
+        fn raw_dir_open(path_ptr: u32, path_len: u32) -> i32;
+        #[link_name = "hb_dir_next"]
+        fn raw_dir_next(out_ptr: u32, out_len: u32) -> i32;
+        #[link_name = "hb_dir_close"]
+        fn raw_dir_close() -> i32;
+        #[link_name = "hb_path_remove"]
+        fn raw_path_remove(path_ptr: u32, path_len: u32) -> i32;
+        #[link_name = "hb_web_status"]
+        fn raw_web_status(out_ptr: u32, out_len: u32) -> i32;
+        #[link_name = "hb_web_set"]
+        fn raw_web_set(on: u32) -> i32;
     }
 
     pub fn log(ptr: u32, len: u32) {
@@ -645,6 +704,30 @@ mod imp {
     pub fn cloud_cancel() -> i32 {
         unsafe { raw_cloud_cancel() }
     }
+
+    pub fn dir_open(path_ptr: u32, path_len: u32) -> i32 {
+        unsafe { raw_dir_open(path_ptr, path_len) }
+    }
+
+    pub fn dir_next(out_ptr: u32, out_len: u32) -> i32 {
+        unsafe { raw_dir_next(out_ptr, out_len) }
+    }
+
+    pub fn dir_close() -> i32 {
+        unsafe { raw_dir_close() }
+    }
+
+    pub fn path_remove(path_ptr: u32, path_len: u32) -> i32 {
+        unsafe { raw_path_remove(path_ptr, path_len) }
+    }
+
+    pub fn web_status(out_ptr: u32, out_len: u32) -> i32 {
+        unsafe { raw_web_status(out_ptr, out_len) }
+    }
+
+    pub fn web_set(on: u32) -> i32 {
+        unsafe { raw_web_set(on) }
+    }
 }
 
 /// The same names on a PC, answered as "this host does not have that".
@@ -779,6 +862,25 @@ mod imp {
         app_abi::code::UNSUPPORTED
     }
     pub fn cloud_cancel() -> i32 {
+        app_abi::code::UNSUPPORTED
+    }
+
+    pub fn dir_open(_path_ptr: u32, _path_len: u32) -> i32 {
+        app_abi::code::UNSUPPORTED
+    }
+    pub fn dir_next(_out_ptr: u32, _out_len: u32) -> i32 {
+        app_abi::code::END
+    }
+    pub fn dir_close() -> i32 {
+        app_abi::code::OK
+    }
+    pub fn path_remove(_path_ptr: u32, _path_len: u32) -> i32 {
+        app_abi::code::UNSUPPORTED
+    }
+    pub fn web_status(_out_ptr: u32, _out_len: u32) -> i32 {
+        app_abi::code::UNSUPPORTED
+    }
+    pub fn web_set(_on: u32) -> i32 {
         app_abi::code::UNSUPPORTED
     }
 }

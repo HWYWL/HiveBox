@@ -1192,6 +1192,100 @@ fn bind(linker: &mut Linker<HostState>) -> Result<(), VmError> {
         },
     ))?;
 
+    // -------------------------------------------------------------------------------------------
+    // v1.4: what is on the two volumes, and the board's own web server.
+    // -------------------------------------------------------------------------------------------
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::DIR_OPEN,
+        |mut caller: Caller<'_, HostState>, path_ptr: u32, path_len: u32| -> i32 {
+            if !granted(&caller, perm::FILES) {
+                return code::DENIED;
+            }
+
+            let memory = memory_of(&caller);
+            let Some(path) = read_string(&caller, memory, path_ptr, path_len.min(1024)) else {
+                return code::INVALID;
+            };
+
+            caller.data_mut().services.dir_open(&path)
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::DIR_NEXT,
+        |mut caller: Caller<'_, HostState>, out_ptr: u32, out_len: u32| -> i32 {
+            if !granted(&caller, perm::FILES) {
+                return code::DENIED;
+            }
+
+            let mut line = [0u8; 512];
+
+            match caller.data_mut().services.dir_next(&mut line) {
+                Some(len) => write_bytes(&mut caller, out_ptr, out_len, &line[..len]),
+                None => code::END,
+            }
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::DIR_CLOSE,
+        |mut caller: Caller<'_, HostState>| -> i32 {
+            caller.data_mut().services.dir_close();
+            code::OK
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::PATH_REMOVE,
+        |mut caller: Caller<'_, HostState>, path_ptr: u32, path_len: u32| -> i32 {
+            if !granted(&caller, perm::FILES) {
+                return code::DENIED;
+            }
+
+            let memory = memory_of(&caller);
+            let Some(path) = read_string(&caller, memory, path_ptr, path_len.min(1024)) else {
+                return code::INVALID;
+            };
+
+            caller.data_mut().services.path_remove(&path)
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::WEB_STATUS,
+        |mut caller: Caller<'_, HostState>, out_ptr: u32, out_len: u32| -> i32 {
+            if !granted(&caller, perm::WEB) {
+                return code::DENIED;
+            }
+
+            let Some((running, url)) = caller.data_mut().services.web_status() else {
+                return code::UNSUPPORTED;
+            };
+
+            let line = format!("{}\t{}", u32::from(running), url);
+
+            write_bytes(&mut caller, out_ptr, out_len, line.as_bytes())
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::WEB_SET,
+        |mut caller: Caller<'_, HostState>, on: u32| -> i32 {
+            if !granted(&caller, perm::WEB) {
+                return code::DENIED;
+            }
+
+            caller.data_mut().services.web_set(on != 0)
+        },
+    ))?;
+
     link(linker.func_wrap(
         host::MODULE,
         host::INVALIDATE,

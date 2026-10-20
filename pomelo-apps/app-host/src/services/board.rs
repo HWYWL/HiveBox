@@ -25,13 +25,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use app_abi::{
-    audio as audio_op, cloud as cloud_wire, code, fault, nas, nas_shell, scan, state, AudioState,
-    HttpProgressWord, NasSnapshot, SystemReadings, WifiSnapshot, TARGET_MACHINE,
+    audio as audio_op, cloud as cloud_wire, code, dir_entry, fault, nas, nas_shell, scan, state,
+    AudioState, HttpProgressWord, NasSnapshot, SystemReadings, WifiSnapshot, TARGET_MACHINE,
 };
 use pomelo_hal::{
     AudioMeta, Board, CloudAction, CloudAnswer, CloudFault, CloudInstanceState, CloudProvider,
     CloudState, CloudTarget, CloudVendor, HalError, HttpFault, HttpProgress, HttpState, NasFault,
-    NasShellStatus, NasStatus, ScanState, WifiState,
+    NasShellStatus, NasStatus, ScanState, WebStatus, WifiState,
 };
 
 use super::{safe_component, CloudKey, NasDisk, Services, WifiAp};
@@ -56,9 +56,22 @@ pub struct BoardServices {
     http_failed: bool,
     /// How long the current track is, read when it was opened.
     duration_ms: u32,
+    /// The directory the application has open, read once and held rather than re-read per entry: a
+    /// listing is a snapshot, and a page that asked the card again for every row would be a page
+    /// that waits on the card. One directory at a time, which is what `hb_dir_next` means by "the
+    /// next".
+    listing: Vec<DirEntry>,
+    listing_at: usize,
     /// Set by the application and read by the launcher.
     pub invalidated: bool,
     pub exited: bool,
+}
+
+/// One line of a listing, held between [`Services::dir_open`] and [`Services::dir_next`].
+struct DirEntry {
+    kind: u32,
+    name: String,
+    size: u64,
 }
 
 impl BoardServices {
@@ -74,6 +87,8 @@ impl BoardServices {
             queued_url: None,
             http_failed: false,
             duration_ms: 0,
+            listing: Vec::new(),
+            listing_at: 0,
             invalidated: false,
             exited: false,
         }
@@ -96,6 +111,34 @@ impl BoardServices {
 
     fn pref_path(&self, key: &str) -> Option<PathBuf> {
         safe_component(key).map(|key| self.dir.join("prefs").join(key))
+    }
+
+    /// Whether `path` is somewhere an application may look: under one of the mounts the storage
+    /// backend reports, and with no `..` anywhere in it.
+    ///
+    /// Refused rather than cleaned up. A path with a `..` in it is not a path somebody mistyped, and
+    /// an answer of `INVALID` is one the application can draw; silently walking it back inside the
+    /// mount would be a listing of somewhere the person did not ask for, drawn as if it were.
+    fn volume_path(&self, path: &str) -> Option<String> {
+        if path.is_empty() || path.split('/').any(|part| part == "..") {
+            return None;
+        }
+
+        let mounts: Vec<String> = self
+            .board
+            .storage()
+            .volumes()
+            .ok()?
+            .into_iter()
+            .map(|volume| volume.mount_point.trim_end_matches('/').to_string())
+            .collect();
+
+        let path = path.trim_end_matches('/').to_string();
+
+        mounts
+            .iter()
+            .any(|mount| path == *mount || path.starts_with(&format!("{mount}/")))
+            .then_some(path)
     }
 
     /// Writes through the backend, which is the only writer that makes a file on the panel.
@@ -625,6 +668,117 @@ impl Services for BoardServices {
 
     fn cloud_cancel(&mut self) -> i32 {
         match self.board.cloud().cancel() {
+            Ok(()) => code::OK,
+            Err(error) => hal_code(error),
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // What is on the two volumes.
+    // -----------------------------------------------------------------------------------------
+
+    fn dir_open(&mut self, path: &str) -> i32 {
+        let Some(path) = self.volume_path(path) else {
+            return code::INVALID;
+        };
+
+        let Ok(entries) = std::fs::read_dir(&path) else {
+            return code::IO;
+        };
+
+        let mut listing: Vec<DirEntry> = entries
+            .flatten()
+            .map(|entry| {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+                let kind = match entry.file_type() {
+                    Ok(kind) if kind.is_dir() => dir_entry::DIR,
+                    _ => dir_entry::FILE,
+                };
+
+                DirEntry { kind, name, size }
+            })
+            .collect();
+
+        // Directories first, then files, each by name: the order a person looking for something
+        // expects, and one the application would otherwise have to sort forty lines to get.
+        listing.sort_by(|left, right| {
+            right
+                .kind
+                .cmp(&left.kind)
+                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+        });
+
+        self.listing = listing;
+        self.listing_at = 0;
+
+        code::OK
+    }
+
+    fn dir_next(&mut self, out: &mut [u8]) -> Option<usize> {
+        let entry = self.listing.get(self.listing_at)?;
+        self.listing_at += 1;
+
+        let mut line = String::new();
+        let _ = write!(line, "{}\t{}\t{}", entry.kind, entry.name, entry.size);
+        let bytes = line.as_bytes();
+
+        let len = bytes.len().min(out.len());
+        out[..len].copy_from_slice(&bytes[..len]);
+
+        Some(len)
+    }
+
+    fn dir_close(&mut self) {
+        self.listing.clear();
+        self.listing_at = 0;
+    }
+
+    fn path_remove(&mut self, path: &str) -> i32 {
+        let Some(path) = self.volume_path(path) else {
+            return code::INVALID;
+        };
+
+        let target = Path::new(&path);
+        let result = if target.is_dir() {
+            // The backend removes files and not trees, so a directory goes through `std::fs`, which
+            // is the same call the file manager in the image makes for the same button.
+            std::fs::remove_dir_all(&path)
+        } else {
+            self.board.storage().remove_file(&path).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::Other, "the backend refused")
+            })
+        };
+
+        match result {
+            Ok(()) => code::OK,
+            Err(_) => code::IO,
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The board's own web server.
+    // -----------------------------------------------------------------------------------------
+
+    fn web_status(&mut self) -> Option<(bool, String)> {
+        let status = self.board.web().status();
+        let url = status.url(&self.board.wifi().status());
+
+        // Empty rather than absent while it is up but unreachable: "running with no address" is a
+        // thing a page has to be able to say, and it is not the same as "this host has no server".
+        Some((status.running, url.unwrap_or_default()))
+    }
+
+    fn web_set(&mut self, on: bool) -> i32 {
+        let mut web = self.board.web();
+
+        let result = if on {
+            web.start(WebStatus::DEFAULT_PORT)
+        } else {
+            web.stop()
+        };
+
+        match result {
             Ok(()) => code::OK,
             Err(error) => hal_code(error),
         }
