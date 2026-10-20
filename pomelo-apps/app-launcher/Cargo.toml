@@ -29,8 +29,10 @@ iced = { version = "0.14", default-features = false, features = ["thread-pool", 
 pomelo-hal = { git = "https://github.com/pomelos-on-sale/pomelo-hal.git", rev = "20eaa910f0a05cd68684d6aa868fd78457c51be9" }
 
 # The runtime the store installs packages *for*: the catalog a boot scans, the installer's cleanup,
-# and — through `ui` — the canvas an installed application's display list is drawn with.
-app-host = { path = "../app-host", features = ["ui"] }
+# and — through `ui` — the canvas an installed application's display list is drawn with. `board`
+# turns on the services the launcher already has a `Board` for: the network, the radio, the speaker,
+# the NAS, an account's machines, and the box's own readings.
+app-host = { path = "../app-host", features = ["ui", "board"] }
 
 # The shapes of a touch and the layout of a display list, shared with the runtime and the SDK.
 app-abi = { path = "../app-abi" }

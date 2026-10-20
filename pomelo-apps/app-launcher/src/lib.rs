@@ -1064,8 +1064,12 @@ impl Launcher {
         };
 
         let data = hosted.installed.dir.join(app_host::catalog::DATA_DIR);
-        let services =
-            app_host::services::DesktopServices::new(&data, hosted.installed.meta.id.clone());
+        // The board's services and not the desktop's even on a PC: the simulator implements the
+        // same traits, so an application asks the same questions against the same types wherever it
+        // runs. What it gains on the panel is a real radio, speaker and network; what it gains on a
+        // PC is that its preferences go through the same storage call the panel needs.
+        let services = app_host::services::BoardServices::new(Arc::clone(&self.board), data)
+            .for_app(hosted.installed.meta.id.clone());
         let size = (SCREEN as f32, SCREEN as f32);
         let dir = hosted.installed.dir.clone();
 

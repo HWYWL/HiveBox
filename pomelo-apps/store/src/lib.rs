@@ -722,14 +722,19 @@ impl Store {
     }
 
     fn write_cache(&self, document: &str) {
-        if let Some(dir) = self.cache.parent() {
-            std::fs::create_dir_all(dir).ok();
-        }
+        // Through the backend, not `std::fs`, and that is the whole of what was wrong with the first
+        // version of this: on this board `std::fs` can open a file for reading and cannot create
+        // one — every flag combination comes back `ENOENT` — so the cache was logged as a failure
+        // on every check and never written at all. `StorageBackend::write_file` is the `fopen` the
+        // rest of the firmware writes with, and it makes the directories above the path on the way,
+        // which is why there is no `create_dir_all` here.
+        //
+        // A cache that cannot be written is still not a failure of the check: the page has the
+        // manifest in memory and nothing a person pressed depends on the file.
+        let path = self.cache.to_string_lossy();
 
-        if let Err(error) = std::fs::write(&self.cache, document) {
-            // A cache that cannot be written is not a failure of the check: the page has the
-            // manifest in memory and nothing a person pressed depends on the file.
-            eprintln!("[store] could not cache the manifest: {error}");
+        if let Err(error) = self.board.storage().write_file(&path, document.as_bytes()) {
+            eprintln!("[store] could not cache the manifest to {path}: {error}");
         }
     }
 
@@ -948,6 +953,29 @@ impl Words {
         }
     }
 
+    /// What a package may ask the host for, as words: `网络 · 音频`, or `""` when it asks for
+    /// nothing.
+    pub fn permissions(&self, bits: u32) -> String {
+        let chinese = self.language == Language::Chinese;
+        let mut words = Vec::new();
+
+        for (bit, zh, en) in [
+            (app_abi::perm::NETWORK, "网络", "Network"),
+            (app_abi::perm::SYSTEM, "系统", "System"),
+            (app_abi::perm::AUDIO, "音频", "Audio"),
+            (app_abi::perm::NAS, "SSH", "SSH"),
+            (app_abi::perm::WIFI, "Wi-Fi", "Wi-Fi"),
+            (app_abi::perm::CLOUD, "云服务", "Cloud"),
+            (app_abi::perm::FILES, "文件", "Files"),
+        ] {
+            if bits & bit != 0 {
+                words.push(if chinese { zh } else { en });
+            }
+        }
+
+        words.join(" · ")
+    }
+
     /// Why a request did not come back.
     pub fn fault(&self, fault: HttpFault) -> &'static str {
         let chinese = self.language == Language::Chinese;
@@ -987,6 +1015,17 @@ pub(crate) fn installed_line(app: &Installed, words: &Words) -> String {
         line.push_str(words.disabled);
     }
 
+    let permissions = words.permissions(app.meta.permissions);
+
+    if !permissions.is_empty() {
+        let label = match words.language {
+            Language::Chinese => "权限",
+            Language::English => "Access",
+        };
+
+        line.push_str(&format!(" · {label}: {permissions}"));
+    }
+
     line
 }
 
@@ -1012,6 +1051,20 @@ pub(crate) fn release_line(release: &AppRelease, words: &Words) -> String {
     if release.abi > app_abi_major() {
         line.push_str(" · ");
         line.push_str(words.needs_update);
+    }
+
+    // What the package may ask the host for, before it is installed rather than after. A package
+    // that asks for nothing says nothing: an empty "Access:" would be a line about a permission
+    // list that is not there.
+    let permissions = words.permissions(release.permissions);
+
+    if !permissions.is_empty() {
+        let label = match words.language {
+            Language::Chinese => "权限",
+            Language::English => "Access",
+        };
+
+        line.push_str(&format!(" · {label}: {permissions}"));
     }
 
     line

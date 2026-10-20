@@ -34,6 +34,10 @@ iced = { version = "0.14", default-features = false, features = [
     "tiny-skia",
 ] }
 
+# The permission tests write a module of four lines of text rather than assembling its binary,
+# because what they are about is which import the host refuses, not how a wasm section is encoded.
+wat = "1"
+
 [features]
 default = []
 # The iced side of the runtime: the widget that replays a display list, and the launcher-facing

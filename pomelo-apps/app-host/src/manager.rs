@@ -269,12 +269,28 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// The file-sized half of [`sha256_hex`], for the install path: a package is verified *after* it has
 /// landed on the filesystem, and reading it back into a `Vec` to hash it would defeat the reason
 /// [`install_file`] exists.
+///
+/// # The read buffer is on the heap, and it is 8 KB
+///
+/// It was `[0u8; 64 * 1024]` on the stack, and that array alone was the store's crash. The UI task
+/// this board's whole panel runs on has a 64 KB stack (`CONFIG_ESP_MAIN_TASK_STACK_SIZE`), and
+/// `sha256_file` is reached from the store's `update()`, so the compiler reserved the 64 KB at the
+/// top of *that* frame whether or not the hash was ever taken: opening the store cost 66,512 bytes
+/// of stack on entry, the frame ran off the end of the stack into the Wi-Fi driver's own `.bss`
+/// (`s_fragment`, `if_ctrl` sit just below it), and the box rebooted — sometimes in the panel's own
+/// `fclose`, sometimes in `ppRxFragmentProc` a few milliseconds later, which is two faces of one
+/// overflow and why it looked like a radio bug.
+///
+/// A `Vec` is where a buffer that large belongs: PSRAM has megabytes to spare and a stack this size
+/// does not. `#[inline(never)]` is the other half of the same guard — a frame inlined into the
+/// store's `update()` would put the allocation back where it cannot fit.
+#[inline(never)]
 pub fn sha256_file(path: &Path) -> Result<String, InstallError> {
     use std::io::Read;
 
     let mut file = std::fs::File::open(path).map_err(|error| InstallError::Io(error.to_string()))?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
+    let mut buffer = vec![0u8; 8 * 1024];
 
     loop {
         let read = file

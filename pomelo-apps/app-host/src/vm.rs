@@ -34,13 +34,16 @@
 use std::fmt;
 use std::time::SystemTime;
 
+use std::fmt::Write as _;
+
 use app_abi::{
-    export, host, key, Event, ABI_MAJOR, MAX_COMMANDS, MAX_LOG_BYTES, MAX_MEMORY_KB, MAX_PACKAGE_BYTES,
+    code, export, fault, host, key, nas_shell, perm, scan, state, Event, ABI_MAJOR, MAX_COMMANDS,
+    MAX_LOG_BYTES, MAX_MEMORY_KB, MAX_PACKAGE_BYTES,
 };
 use wasmi::{Caller, Config, Engine, Instance, Linker, Memory, Module, Store, TypedFunc};
 
 use crate::display::DisplayList;
-use crate::services::Services;
+use crate::services::{Services, WifiAp};
 
 /// What one instance may spend.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,6 +84,9 @@ impl Limits {
 /// The state shared with the host functions.
 pub struct HostState {
     pub services: Box<dyn Services>,
+    /// What the package's metadata said it may use. A host function whose bit is absent answers
+    /// [`code::DENIED`] without asking the service anything.
+    pub permissions: u32,
     /// Resolved once, after instantiation: every host function needs to read or write application
     /// memory, and looking the export up per call would be a string comparison per string.
     memory: Option<Memory>,
@@ -88,6 +94,23 @@ pub struct HostState {
     pub invalidated: bool,
     /// Set by `hb_exit`, read by the launcher.
     pub exit_requested: bool,
+    /// An HTTP answer that did not fit the buffer it was handed, kept for the next attempt. A body
+    /// taken out of the service and dropped would be a request the application paid for and never
+    /// saw.
+    pending_http: Option<(u16, Vec<u8>)>,
+    /// A cloud answer that did not fit, for the same reason.
+    pending_cloud: Option<String>,
+    /// Shell output that did not fit the buffer it was handed.
+    pending_shell: Vec<u8>,
+    /// Where the NAS session stands, as the last take saw it. `hb_nas_shell_status` is a question
+    /// about the last look rather than a second look, because a second look would consume the bytes
+    /// the first one was asked for.
+    shell_status: u32,
+    /// Why a lost session was lost, cached beside the status.
+    shell_fault: u32,
+    /// The last scan's access points, read once and answered as lines.
+    scan: Vec<WifiAp>,
+    scan_fresh: bool,
 }
 
 /// A running application.
@@ -116,10 +139,16 @@ struct Exports {
 
 impl Vm {
     /// Compiles and instantiates a module.
+    ///
+    /// `permissions` is the package's own [`app_abi::perm`] bitset. It is an argument rather than
+    /// something the services decide because the refusal has to happen *before* the service is
+    /// asked: a denied call must not open a socket, start a scan or write a preference that the
+    /// implementation would then have to undo.
     pub fn new(
         wasm: &[u8],
         services: Box<dyn Services>,
         limits: Limits,
+        permissions: u32,
     ) -> Result<Self, VmError> {
         if wasm.len() > MAX_PACKAGE_BYTES {
             return Err(VmError::TooLarge(wasm.len()));
@@ -138,9 +167,17 @@ impl Vm {
             &engine,
             HostState {
                 services,
+                permissions,
                 memory: None,
                 invalidated: false,
                 exit_requested: false,
+                pending_http: None,
+                pending_cloud: None,
+                pending_shell: Vec::new(),
+                shell_status: nas_shell::CLOSED,
+                shell_fault: fault::NONE,
+                scan: Vec::new(),
+                scan_fresh: false,
             },
         );
 
@@ -172,7 +209,11 @@ impl Vm {
             .call(&mut store, ())
             .map_err(|error| VmError::Trap(error.to_string()))?;
 
-        if app_abi::major_of(abi) != ABI_MAJOR {
+        // A newer minor is a package that imports a function this host was not built with, and
+        // refusing it here says "needs a newer system" instead of letting the linker say "unknown
+        // import" in a sentence about wasm. An older minor is fine: every addition is an import it
+        // never calls.
+        if app_abi::major_of(abi) != ABI_MAJOR || app_abi::minor_of(abi) > app_abi::ABI_MINOR {
             return Err(VmError::Abi(abi));
         }
 
@@ -567,6 +608,590 @@ fn bind(linker: &mut Linker<HostState>) -> Result<(), VmError> {
         },
     ))?;
 
+    // -------------------------------------------------------------------------------------------
+    // v1.1: the network, the box's own readings, and the speaker.
+    // -------------------------------------------------------------------------------------------
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::HTTP_START,
+        |mut caller: Caller<'_, HostState>, url_ptr: u32, url_len: u32| -> i32 {
+            if !granted(&caller, perm::NETWORK) {
+                return code::DENIED;
+            }
+
+            let memory = memory_of(&caller);
+            let Some(url) = read_string(&caller, memory, url_ptr, url_len.min(2048)) else {
+                return code::INVALID;
+            };
+
+            if url.trim().is_empty() {
+                return code::INVALID;
+            }
+
+            caller.data_mut().services.http_start(&url)
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::HTTP_STATE,
+        |mut caller: Caller<'_, HostState>| -> u32 {
+            if !granted(&caller, perm::NETWORK) {
+                return state::DENIED;
+            }
+
+            caller.data_mut().services.http_state()
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::HTTP_FAULT,
+        |mut caller: Caller<'_, HostState>| -> u32 {
+            if !granted(&caller, perm::NETWORK) {
+                return fault::DENIED;
+            }
+
+            caller.data_mut().services.http_fault()
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::HTTP_PROGRESS,
+        |mut caller: Caller<'_, HostState>, out_ptr: u32, out_len: u32| -> i32 {
+            if !granted(&caller, perm::NETWORK) {
+                return code::DENIED;
+            }
+
+            let progress = caller.data_mut().services.http_progress();
+
+            match progress {
+                Some(progress) => write_fixed(&mut caller, out_ptr, out_len, &progress.to_bytes()),
+                None => code::INVALID,
+            }
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::HTTP_TAKE,
+        |mut caller: Caller<'_, HostState>,
+         status_ptr: u32,
+         body_ptr: u32,
+         body_len: u32|
+         -> i32 {
+            if !granted(&caller, perm::NETWORK) {
+                return code::DENIED;
+            }
+
+            if caller.data().pending_http.is_none() {
+                let answer = caller.data_mut().services.http_take();
+                caller.data_mut().pending_http = answer;
+            }
+
+            let Some((status, body)) = caller.data().pending_http.clone() else {
+                return code::INVALID;
+            };
+
+            // Not a loss: an answer that does not fit is kept, and the caller is told how much
+            // room it needs. The length of a package's metadata or a forecast is known long before
+            // the buffer is.
+            if (body_len as usize) < body.len() {
+                return body.len() as i32;
+            }
+
+            let header = (status as u32).to_le_bytes();
+            let written = write_fixed(&mut caller, status_ptr, 4, &header);
+
+            if written < 0 {
+                return written;
+            }
+
+            let written = write_bytes(&mut caller, body_ptr, body_len, &body);
+            caller.data_mut().pending_http = None;
+            written
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::HTTP_CANCEL,
+        |mut caller: Caller<'_, HostState>| -> i32 {
+            if !granted(&caller, perm::NETWORK) {
+                return code::DENIED;
+            }
+
+            caller.data_mut().pending_http = None;
+            caller.data_mut().services.http_cancel()
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::SYSTEM,
+        |mut caller: Caller<'_, HostState>, out_ptr: u32, out_len: u32| -> i32 {
+            if !granted(&caller, perm::SYSTEM) {
+                return code::DENIED;
+            }
+
+            let readings = caller.data_mut().services.system();
+
+            match readings {
+                Some(readings) => write_fixed(&mut caller, out_ptr, out_len, &readings.to_bytes()),
+                None => code::UNSUPPORTED,
+            }
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::FIRMWARE_VERSION,
+        |mut caller: Caller<'_, HostState>, out_ptr: u32, out_len: u32| -> i32 {
+            if !granted(&caller, perm::SYSTEM) {
+                return code::DENIED;
+            }
+
+            let version = caller.data_mut().services.firmware_version();
+
+            match version {
+                Some(version) => write_bytes(&mut caller, out_ptr, out_len, version.as_bytes()),
+                None => code::UNSUPPORTED,
+            }
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::AUDIO_PLAY,
+        |mut caller: Caller<'_, HostState>, path_ptr: u32, path_len: u32| -> i32 {
+            if !granted(&caller, perm::AUDIO) {
+                return code::DENIED;
+            }
+
+            let memory = memory_of(&caller);
+            let Some(path) = read_string(&caller, memory, path_ptr, path_len.min(1024)) else {
+                return code::INVALID;
+            };
+
+            caller.data_mut().services.audio_play(&path)
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::AUDIO_CONTROL,
+        |mut caller: Caller<'_, HostState>, op: u32, value: i32| -> i32 {
+            if !granted(&caller, perm::AUDIO) {
+                return code::DENIED;
+            }
+
+            caller.data_mut().services.audio_control(op, value)
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::AUDIO_STATE,
+        |mut caller: Caller<'_, HostState>, out_ptr: u32, out_len: u32| -> i32 {
+            if !granted(&caller, perm::AUDIO) {
+                return code::DENIED;
+            }
+
+            let state = caller.data_mut().services.audio_state();
+
+            match state {
+                Some(state) => write_fixed(&mut caller, out_ptr, out_len, &state.to_bytes()),
+                None => code::UNSUPPORTED,
+            }
+        },
+    ))?;
+
+    // -------------------------------------------------------------------------------------------
+    // v1.2: the radio.
+    // -------------------------------------------------------------------------------------------
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::WIFI_STATUS,
+        |mut caller: Caller<'_, HostState>, out_ptr: u32, out_len: u32| -> i32 {
+            if !granted(&caller, perm::WIFI) {
+                return code::DENIED;
+            }
+
+            let status = caller.data_mut().services.wifi_status();
+
+            match status {
+                Some(status) => write_fixed(&mut caller, out_ptr, out_len, &status.to_bytes()),
+                None => code::UNSUPPORTED,
+            }
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::WIFI_SCAN_START,
+        |mut caller: Caller<'_, HostState>| -> i32 {
+            if !granted(&caller, perm::WIFI) {
+                return code::DENIED;
+            }
+
+            caller.data_mut().scan_fresh = false;
+            caller.data_mut().scan.clear();
+            caller.data_mut().services.wifi_scan_start()
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::WIFI_SCAN_STATE,
+        |mut caller: Caller<'_, HostState>| -> u32 {
+            if !granted(&caller, perm::WIFI) {
+                return scan::DENIED;
+            }
+
+            caller.data_mut().services.wifi_scan_state()
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::WIFI_SCAN_COUNT,
+        |mut caller: Caller<'_, HostState>| -> u32 {
+            if !granted(&caller, perm::WIFI) {
+                return 0;
+            }
+
+            refresh_scan(&mut caller);
+
+            caller.data().scan.len() as u32
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::WIFI_SCAN_AP,
+        |mut caller: Caller<'_, HostState>, index: u32, out_ptr: u32, out_len: u32| -> i32 {
+            if !granted(&caller, perm::WIFI) {
+                return code::DENIED;
+            }
+
+            refresh_scan(&mut caller);
+
+            let ap = caller.data().scan.get(index as usize).cloned();
+
+            match ap {
+                Some(ap) => {
+                    let line = format!(
+                        "{}\t{}\t{}\t{}",
+                        one_line(&ap.ssid),
+                        ap.rssi,
+                        u8::from(ap.secure),
+                        ap.channel
+                    );
+
+                    write_bytes(&mut caller, out_ptr, out_len, line.as_bytes())
+                }
+                None => code::INVALID,
+            }
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::WIFI_CONNECT,
+        |mut caller: Caller<'_, HostState>,
+         ssid_ptr: u32,
+         ssid_len: u32,
+         password_ptr: u32,
+         password_len: u32|
+         -> i32 {
+            if !granted(&caller, perm::WIFI) {
+                return code::DENIED;
+            }
+
+            let memory = memory_of(&caller);
+            let Some(ssid) = read_string(&caller, memory, ssid_ptr, ssid_len.min(64)) else {
+                return code::INVALID;
+            };
+            let Some(password) =
+                read_string(&caller, memory, password_ptr, password_len.min(128))
+            else {
+                return code::INVALID;
+            };
+
+            caller.data_mut().services.wifi_connect(&ssid, &password)
+        },
+    ))?;
+
+    // -------------------------------------------------------------------------------------------
+    // v1.3: the machines beside the box, and the ones in an account.
+    // -------------------------------------------------------------------------------------------
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::NAS_SNAPSHOT,
+        |mut caller: Caller<'_, HostState>, out_ptr: u32, out_len: u32| -> i32 {
+            if !granted(&caller, perm::NAS) {
+                return code::DENIED;
+            }
+
+            let snapshot = caller.data_mut().services.nas_snapshot();
+            write_fixed(&mut caller, out_ptr, out_len, &snapshot.to_bytes())
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::NAS_DISKS,
+        |mut caller: Caller<'_, HostState>, out_ptr: u32, out_len: u32| -> i32 {
+            if !granted(&caller, perm::NAS) {
+                return code::DENIED;
+            }
+
+            let disks = caller.data_mut().services.nas_disks();
+            let text = nas_disk_lines(&disks);
+
+            write_bytes(&mut caller, out_ptr, out_len, text.as_bytes())
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::NAS_REFRESH,
+        |mut caller: Caller<'_, HostState>| -> i32 {
+            if !granted(&caller, perm::NAS) {
+                return code::DENIED;
+            }
+
+            caller.data_mut().services.nas_refresh()
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::NAS_SHELL_OPEN,
+        |mut caller: Caller<'_, HostState>,
+         host_ptr: u32,
+         host_len: u32,
+         columns: u32,
+         rows: u32|
+         -> i32 {
+            if !granted(&caller, perm::NAS) {
+                return code::DENIED;
+            }
+
+            let memory = memory_of(&caller);
+            let Some(host) = read_string(&caller, memory, host_ptr, host_len.min(128)) else {
+                return code::INVALID;
+            };
+
+            let answer = caller.data_mut().services.nas_shell_open(
+                &host,
+                columns.min(u16::MAX as u32) as u16,
+                rows.min(u16::MAX as u32) as u16,
+            );
+
+            if answer == code::OK {
+                caller.data_mut().shell_status = nas_shell::OPENING;
+                caller.data_mut().pending_shell.clear();
+            }
+
+            answer
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::NAS_SHELL_WRITE,
+        |mut caller: Caller<'_, HostState>, bytes_ptr: u32, bytes_len: u32| -> i32 {
+            if !granted(&caller, perm::NAS) {
+                return code::DENIED;
+            }
+
+            let memory = memory_of(&caller);
+            let Some(bytes) = read_bytes(&caller, memory, bytes_ptr, bytes_len.min(4096)) else {
+                return code::INVALID;
+            };
+
+            caller.data_mut().services.nas_shell_write(&bytes)
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::NAS_SHELL_STATUS,
+        |caller: Caller<'_, HostState>| -> u32 {
+            if !granted(&caller, perm::NAS) {
+                return nas_shell::DENIED;
+            }
+
+            caller.data().shell_status
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::NAS_SHELL_FAULT,
+        |caller: Caller<'_, HostState>| -> u32 {
+            if !granted(&caller, perm::NAS) {
+                return fault::DENIED;
+            }
+
+            caller.data().shell_fault
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::NAS_SHELL_TAKE,
+        |mut caller: Caller<'_, HostState>, out_ptr: u32, out_len: u32| -> i32 {
+            if !granted(&caller, perm::NAS) {
+                return code::DENIED;
+            }
+
+            if caller.data().pending_shell.is_empty() {
+                let (status, why, output) = caller.data_mut().services.nas_shell_take();
+                caller.data_mut().shell_status = status;
+                caller.data_mut().shell_fault = why;
+                caller.data_mut().pending_shell = output;
+            }
+
+            let want = (out_len as usize).min(caller.data().pending_shell.len());
+            let chunk: Vec<u8> = caller.data_mut().pending_shell.drain(..want).collect();
+            let written = write_bytes(&mut caller, out_ptr, out_len, &chunk);
+
+            if written < 0 {
+                // Put back what could not be written, in front of what is still queued: a terminal
+                // that lost a frame of output would lose the middle of somebody's command.
+                let mut rest = chunk;
+                rest.extend(caller.data_mut().pending_shell.drain(..));
+                caller.data_mut().pending_shell = rest;
+            }
+
+            written
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::NAS_SHELL_CLOSE,
+        |mut caller: Caller<'_, HostState>| -> i32 {
+            if !granted(&caller, perm::NAS) {
+                return code::DENIED;
+            }
+
+            caller.data_mut().pending_shell.clear();
+            caller.data_mut().shell_status = nas_shell::CLOSED;
+            caller.data_mut().services.nas_shell_close()
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::CLOUD_KEY,
+        |mut caller: Caller<'_, HostState>, vendor: u32, out_ptr: u32, out_len: u32| -> i32 {
+            if !granted(&caller, perm::CLOUD) {
+                return code::DENIED;
+            }
+
+            let key = caller.data_mut().services.cloud_key(vendor);
+
+            match key {
+                Some(key) => {
+                    let text = format!("{}\t{}", one_line(&key.masked), one_line(&key.region));
+                    write_bytes(&mut caller, out_ptr, out_len, text.as_bytes())
+                }
+                None => code::UNSUPPORTED,
+            }
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::CLOUD_START,
+        |mut caller: Caller<'_, HostState>,
+         target: u32,
+         action: u32,
+         instance_ptr: u32,
+         instance_len: u32,
+         region_ptr: u32,
+         region_len: u32|
+         -> i32 {
+            if !granted(&caller, perm::CLOUD) {
+                return code::DENIED;
+            }
+
+            let memory = memory_of(&caller);
+            let Some(instance) =
+                read_string(&caller, memory, instance_ptr, instance_len.min(128))
+            else {
+                return code::INVALID;
+            };
+            let Some(region) = read_string(&caller, memory, region_ptr, region_len.min(64)) else {
+                return code::INVALID;
+            };
+
+            caller
+                .data_mut()
+                .services
+                .cloud_start(target, action, &instance, &region)
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::CLOUD_STATE,
+        |mut caller: Caller<'_, HostState>| -> u32 {
+            if !granted(&caller, perm::CLOUD) {
+                return state::DENIED;
+            }
+
+            caller.data_mut().services.cloud_state()
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::CLOUD_TAKE,
+        |mut caller: Caller<'_, HostState>, out_ptr: u32, out_len: u32| -> i32 {
+            if !granted(&caller, perm::CLOUD) {
+                return code::DENIED;
+            }
+
+            if caller.data().pending_cloud.is_none() {
+                let answer = caller.data_mut().services.cloud_take();
+                caller.data_mut().pending_cloud = answer;
+            }
+
+            let Some(text) = caller.data().pending_cloud.clone() else {
+                return code::INVALID;
+            };
+
+            if (out_len as usize) < text.len() {
+                return text.len() as i32;
+            }
+
+            let written = write_bytes(&mut caller, out_ptr, out_len, text.as_bytes());
+            caller.data_mut().pending_cloud = None;
+            written
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::CLOUD_CANCEL,
+        |mut caller: Caller<'_, HostState>| -> i32 {
+            if !granted(&caller, perm::CLOUD) {
+                return code::DENIED;
+            }
+
+            caller.data_mut().pending_cloud = None;
+            caller.data_mut().services.cloud_cancel()
+        },
+    ))?;
+
     link(linker.func_wrap(
         host::MODULE,
         host::INVALIDATE,
@@ -586,6 +1211,84 @@ fn bind(linker: &mut Linker<HostState>) -> Result<(), VmError> {
     ))?;
 
     Ok(())
+}
+
+/// Whether the package asked for the permission a host function needs.
+fn granted(caller: &Caller<'_, HostState>, permission: u32) -> bool {
+    caller.data().permissions & permission != 0
+}
+
+/// Copies `bytes` into application memory, cut to `out_len`.
+///
+/// Returns how many bytes the answer *is*, which is how a caller learns that a buffer was too
+/// small: a return larger than the buffer it handed over is a length it now knows.
+fn write_bytes(caller: &mut Caller<'_, HostState>, ptr: u32, out_len: u32, bytes: &[u8]) -> i32 {
+    let len = bytes.len().min(out_len as usize);
+    let Some(memory) = memory_of(caller) else {
+        return code::UNSUPPORTED;
+    };
+
+    if len > 0 && memory.write(caller, ptr as usize, &bytes[..len]).is_err() {
+        return code::INVALID;
+    }
+
+    bytes.len() as i32
+}
+
+/// Writes a value that has a fixed size and refuses a buffer smaller than it: half of a snapshot is
+/// not a snapshot with the rest missing, it is a wrong number.
+fn write_fixed(caller: &mut Caller<'_, HostState>, ptr: u32, out_len: u32, bytes: &[u8]) -> i32 {
+    if (out_len as usize) < bytes.len() {
+        return code::INVALID;
+    }
+
+    write_bytes(caller, ptr, out_len, bytes)
+}
+
+/// Reads the last scan once per scan, and not once per access point.
+fn refresh_scan(caller: &mut Caller<'_, HostState>) {
+    if caller.data().scan_fresh {
+        return;
+    }
+
+    let scan = caller.data_mut().services.wifi_scan_results();
+    caller.data_mut().scan = scan;
+    caller.data_mut().scan_fresh = true;
+}
+
+/// A field of a text answer without the characters that would end it early.
+fn one_line(text: &str) -> String {
+    text.chars()
+        .map(|c| if c == '\t' || c == '\n' || c == '\r' { ' ' } else { c })
+        .collect()
+}
+
+/// The NAS's disks as the ABI's one-line-per-disk text.
+fn nas_disk_lines(disks: &[crate::services::NasDisk]) -> String {
+    let mut text = String::new();
+
+    for disk in disks {
+        let temperature = disk
+            .temperature_c
+            .map(|c| (c * 100.0).round() as i64)
+            .unwrap_or(i32::MIN as i64);
+        let busy = (disk.busy_percent * 100.0).round().clamp(0.0, 10_000.0) as u32;
+
+        let _ = writeln!(
+            text,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            one_line(&disk.device),
+            one_line(&disk.model),
+            disk.size_bytes,
+            temperature,
+            busy,
+            disk.read_per_sec,
+            disk.write_per_sec,
+            one_line(&disk.purpose)
+        );
+    }
+
+    text
 }
 
 fn memory_of(caller: &Caller<'_, HostState>) -> Option<Memory> {
@@ -691,7 +1394,12 @@ mod tests {
 
     #[test]
     fn a_module_without_the_abi_is_refused_before_it_runs() {
-        let error = Vm::new(NOT_OURS, Box::new(MemoryServices::default()), Limits::default());
+        let error = Vm::new(
+            NOT_OURS,
+            Box::new(MemoryServices::default()),
+            Limits::default(),
+            app_abi::perm::ALL,
+        );
 
         assert!(
             matches!(error, Err(VmError::MissingExport(name)) if name == export::ABI_VERSION),
@@ -699,9 +1407,107 @@ mod tests {
         );
     }
 
+    /// A module whose `hb_init` is nothing but the import under test. What it returns is therefore
+    /// the host's own answer, which is what makes the gate visible from outside the sandbox.
+    fn probe_module(import: &str, params: &str, arguments: &str) -> Vec<u8> {
+        let source = format!(
+            r#"
+            (module
+              (import "host" "{import}" (func $probe {params} (result i32)))
+              (memory (export "memory") 1)
+              (func (export "hb_abi_version") (result i32) i32.const 0x00010003)
+              (func (export "hb_init") (param i32 i32 i32 i64) (result i32)
+                {arguments}
+                call $probe)
+              (func (export "hb_scratch_ptr") (result i32) i32.const 0)
+              (func (export "hb_scratch_len") (result i32) i32.const 64)
+              (func (export "hb_event") (param i32) (result i32) i32.const 0)
+              (func (export "hb_frame") (param i64) (result i32) i32.const 0)
+              (func (export "hb_display_ptr") (result i32) i32.const 0)
+              (func (export "hb_display_capacity") (result i32) i32.const 0)
+            )
+            "#
+        );
+
+        wat::parse_str(source).expect("a module this test wrote")
+    }
+
+    fn init_result(wasm: &[u8], permissions: u32) -> Result<(), VmError> {
+        let mut vm = Vm::new(
+            wasm,
+            Box::new(MemoryServices::default()),
+            Limits::default(),
+            permissions,
+        )?;
+
+        vm.init(480, 480, 1.0, 0)
+    }
+
+    /// A package that did not ask for a permission is refused before the host is asked anything —
+    /// importantly, before a socket, a scan or a preference write happens. Asking for the bit is
+    /// what lets the same module through to the service behind it.
+    #[test]
+    fn a_service_without_its_permission_is_refused_before_the_host_is_asked() {
+        let cases = [
+            (host::HTTP_STATE, perm::NETWORK, "", "", state::DENIED),
+            (host::WIFI_STATUS, perm::WIFI, "(param i32 i32)", "i32.const 0 i32.const 0", code::DENIED as u32),
+            (host::SYSTEM, perm::SYSTEM, "(param i32 i32)", "i32.const 0 i32.const 0", code::DENIED as u32),
+            (host::AUDIO_STATE, perm::AUDIO, "(param i32 i32)", "i32.const 0 i32.const 0", code::DENIED as u32),
+            (host::NAS_SHELL_STATUS, perm::NAS, "", "", nas_shell::DENIED),
+            (host::CLOUD_STATE, perm::CLOUD, "", "", state::DENIED),
+        ];
+
+        for (import, permission, params, arguments, refused) in cases {
+            let wasm = probe_module(import, params, arguments);
+
+            assert_eq!(
+                init_result(&wasm, 0),
+                Err(VmError::Refused(refused)),
+                "{import} without its permission"
+            );
+
+            assert_ne!(
+                init_result(&wasm, permission),
+                Err(VmError::Refused(refused)),
+                "{import} with its permission must reach the service"
+            );
+        }
+    }
+
+    /// A package built against a newer minor imports functions this host does not have. It is
+    /// refused with the word it reported rather than by a linker error naming an import.
+    #[test]
+    fn a_package_from_a_newer_minor_is_refused_before_it_is_instantiated() {
+        let wasm = wat::parse_str(
+            r#"
+            (module
+              (memory (export "memory") 1)
+              (func (export "hb_abi_version") (result i32) i32.const 0x00010004)
+            )
+            "#,
+        )
+        .expect("a module this test wrote");
+
+        assert_eq!(
+            Vm::new(
+                &wasm,
+                Box::new(MemoryServices::default()),
+                Limits::default(),
+                app_abi::perm::ALL,
+            )
+            .err(),
+            Some(VmError::Abi(app_abi::version_word(1, 4)))
+        );
+    }
+
     #[test]
     fn garbage_is_a_compile_error_not_a_panic() {
-        let error = Vm::new(b"not wasm at all", Box::new(MemoryServices::default()), Limits::default());
+        let error = Vm::new(
+            b"not wasm at all",
+            Box::new(MemoryServices::default()),
+            Limits::default(),
+            app_abi::perm::ALL,
+        );
         assert!(matches!(error, Err(VmError::Compile(_))));
     }
 

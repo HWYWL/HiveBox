@@ -2518,32 +2518,21 @@ static void render_all_instances_awake(int32_t vendor)
 }
 
 /**
- * Gathers a list with the radio kept awake.
+ * Gathers a list, and leaves the radio's own sleep mode alone.
  *
- * The scan above is the work; this is the wrapper that takes Wi-Fi power save off for the few
- * seconds it lasts. With the modem sleeping between beacons a round trip that would be fifty
- * milliseconds becomes three hundred, and over thirty-odd regions that is the difference between a
- * second and ten -- the difference between a page that waits and a page that has arrived. The mode
- * is read before it is changed and put back exactly as it was, so a board that was saving power
- * goes on saving it.
+ * This used to be the wrapper that took Wi-Fi power save off for the few seconds the scan lasts, on
+ * the reading that a modem sleeping between beacons turns a fifty-millisecond round trip into three
+ * hundred, and that thirty-odd of those is the difference between a page that waits and one that
+ * has arrived. The latency is real and the cure is not available: `WIFI_PS_NONE` leaves the bundled
+ * driver's `pm` module with timers it never arms, and the next transmit-completion walks into
+ * `pm_enable_keep_alive_timer` -> `ets_timer_arm_us`, which asserts on a timer that has no function
+ * and reboots the box. Measured on this board, in this file's own traffic — see
+ * `board_wifi.c`'s `log_power_save`, which is where the mode is read back and where the reasoning
+ * lives. A slower list is the price of a station that stays up.
  */
 static void render_all_instances(int32_t vendor)
 {
-    wifi_ps_type_t saved = WIFI_PS_MIN_MODEM;
-    bool restore = false;
-
-    /* No Wi-Fi yet is not a failure: the scan's first call answers with the network fault it
-     * deserves, and there is no mode to put back. */
-    if (esp_wifi_get_ps(&saved) == ESP_OK && saved != WIFI_PS_NONE &&
-        esp_wifi_set_ps(WIFI_PS_NONE) == ESP_OK) {
-        restore = true;
-    }
-
     render_all_instances_awake(vendor);
-
-    if (restore) {
-        esp_wifi_set_ps(saved);
-    }
 }
 
 /**

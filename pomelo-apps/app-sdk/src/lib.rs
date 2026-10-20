@@ -40,9 +40,14 @@
 //! # What the host owns
 //!
 //! Time, text metrics, preferences, files, and the clock the frames are asked on all come from the
-//! host. [`host`] is that surface. An application that wants the network, the battery or the audio
-//! stream asks the host through the services of a later ABI — and the package's metadata must list
-//! the permission, or the host refuses the call.
+//! host. [`host`] is that surface, and it is also where the network, the box's readings, the
+//! speaker, the radio, the machines beside the box and an account's machines live. An application
+//! that uses any of them must list the matching [`app_abi::perm`] bit in its metadata, or the host
+//! refuses the call before it does anything — see the permission story in [`host`].
+//!
+//! Nothing there blocks. A request is started, then polled once a frame; an answer is taken once.
+//! The one service an application has to be careful with is the NAS shell, whose output is a stream
+//! rather than a document — [`host::nas_shell_take`] consumes what arrived since the last call.
 //!
 //! # The exports
 //!

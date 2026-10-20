@@ -145,6 +145,27 @@ static const char *wifi_reason_name(uint8_t reason)
     }
 }
 
+/* What the driver settled on for modem sleep, read back rather than assumed.
+ *
+ * This board used to force `WIFI_PS_NONE` here, on the reading that the station's power-save timer
+ * was what broke a transmit after a long idle. It is the other way round, and the two are easy to
+ * tell apart once the box is asked: forced to `WIFI_PS_NONE`, the driver's `pm` module starts
+ * without ever arming its own timers, the first transmit-completion walks into
+ * `pm_tx_data_done_process` -> `pm_enable_keep_alive_timer` -> `ets_timer_arm_us`, and that asserts
+ * (`timer_initialized(ptimer)`) on a timer that was never given a function — a reboot, every time.
+ * Left at the driver's default (`1`, modem sleep) the same timers are armed at `pm start` and the
+ * same transmit is ordinary. The number in the log is how that was settled, and it is worth keeping:
+ * a `0` here means something has put the station back into the mode that cannot transmit. */
+static void log_power_save(const char *when)
+{
+    wifi_ps_type_t ps = (wifi_ps_type_t)-1;
+
+    if (esp_wifi_get_ps(&ps) == ESP_OK) {
+        ESP_LOGI(TAG, "power save at %s: ps=%d (0 is none, and none cannot transmit)", when,
+                 (int)ps);
+    }
+}
+
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
@@ -184,6 +205,7 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
             lock();
             s_conn_state = HAL_WIFI_STATE_CONNECTING;
             unlock();
+            log_power_save("assoc");
             break;
 
         case WIFI_EVENT_STA_DISCONNECTED:
@@ -239,6 +261,7 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         s_conn_state = HAL_WIFI_STATE_CONNECTED;
         unlock();
         ESP_LOGI(TAG, "Wi-Fi connected: ip=%s rssi=%d", ip, (int)rssi);
+        log_power_save("got-ip");
 
         /* An address is what the time server needs, so this is the first moment the board can be
          * told what time it is — and until it is, every HTTPS request is refused for a certificate
@@ -295,6 +318,33 @@ esp_err_t hal_wifi_init(void)
     }
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+
+    /* Block-ack aggregation off, in both directions.
+     *
+     * Two reboots on this board's bundled Wi-Fi blob land in the aggregation machinery and nowhere
+     * else. The first is `ppRxFragmentProc`, with `EXCVADDR` all but null — an RX fragment slot that
+     * was not there when a fragment arrived. The second is a block-ack timeout on the way out:
+     * `lmacProcessAckTimeout` -> `ppReSendBar` -> `rcGetRate`, which walks a rate-control record for
+     * the peer that had already gone. Both happened within a second of a TLS response being read,
+     * which is the only traffic this box ever takes or sends in a burst; the store's manifest is
+     * enough to do it.
+     *
+     * Neither is a fault in the request, so the request cannot be the fix. What the two paths share
+     * is the aggregation: an AMPDU is what fragments on the way in, what is retried as a BlockAck
+     * request on the way out, and what keeps a rate record per peer. Turning both directions off
+     * costs throughput on a page that downloads five megabytes once in a while and buys a station
+     * that stays up. The fields are set here rather than later because `esp_wifi_init` reads them
+     * once and the `WIFI_INIT_CONFIG_DEFAULT()` values are the Kconfig ones.
+     *
+     * One of the two has since been explained differently and the setting kept anyway: the
+     * `ppRxFragmentProc` fault's `s_fragment.first` held `1128` — the length of the document being
+     * cached at that moment — because a 64 KB stack array in the store's own `update()` frame had run
+     * off the end of the UI task's stack and into the driver's `.bss`, which sits just below it. That
+     * is a stack overflow wearing the driver's clothes. Aggregation stays off until the block-ack
+     * path has been measured on its own, which it has not been. */
+    cfg.ampdu_rx_enable = 0;
+    cfg.ampdu_tx_enable = 0;
+
     ret = esp_wifi_init(&cfg);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_init: %s", esp_err_to_name(ret));
@@ -337,6 +387,15 @@ esp_err_t hal_wifi_set_enabled(bool on)
             return ESP_FAIL;
         }
         s_enabled = true;
+
+        /* Modem sleep is left at the driver's default, deliberately — see `log_power_save` above for
+         * the whole of it. The short version: this file used to force `WIFI_PS_NONE` here, believing
+         * the power-save timer was what broke the first transmit after a long idle. Forcing it is what
+         * breaks the transmit: `pm_start` then leaves the `pm` module's own timers unset, and the
+         * first transmit-completion arms one of them and asserts inside `ets_timer_arm_us`. The sleep
+         * mode is the driver's to choose, and the number it chose is in the log at `assoc` and
+         * `got-ip`. */
+
         ESP_LOGI(TAG, "Wi-Fi enabled");
     } else {
         if (!s_enabled) {

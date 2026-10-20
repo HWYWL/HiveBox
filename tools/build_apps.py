@@ -35,9 +35,198 @@ TARGET = "wasm32-unknown-unknown"
 MAGIC = b"HBAP"
 FORMAT = 1
 ABI_MAJOR = 1
-ABI_MINOR = 0
+# The highest service ABI the SDK in this tree speaks. Kept in step with `app-abi`'s `ABI_MINOR`:
+# the header says what the package was built against, and the runtime refuses a package whose minor
+# is newer than its own.
+ABI_MINOR = 3
 HEADER_LEN = 32
 MAX_PACKAGE = 2 * 1024 * 1024
+
+# The permission bits, by the name the ABI uses. Spelled out here rather than imported, because this
+# script runs before a build and the table is what turns "the module imports this" into "the package
+# must declare that".
+PERMISSIONS = {
+    "NETWORK": 1,
+    "SYSTEM": 2,
+    "AUDIO": 4,
+    "NAS": 8,
+    "WIFI": 16,
+    "CLOUD": 32,
+    "FILES": 64,
+}
+
+# Which import needs which bit. Deliberately exhaustive over the `host` module: an import that is
+# not listed is one the host does not gate (time, text metrics, preferences, the private files, the
+# log, and the frame loop), while an import that is listed but missing from this table is a hole a
+# test would not see. `hb_file_*` is not here: those already live inside the package's directory, and
+# `FILES` is for reading beyond it.
+IMPORT_PERMISSIONS = {
+    "hb_http_start": "NETWORK",
+    "hb_http_state": "NETWORK",
+    "hb_http_fault": "NETWORK",
+    "hb_http_progress": "NETWORK",
+    "hb_http_take": "NETWORK",
+    "hb_http_cancel": "NETWORK",
+    "hb_system": "SYSTEM",
+    "hb_firmware_version": "SYSTEM",
+    "hb_audio_play": "AUDIO",
+    "hb_audio_control": "AUDIO",
+    "hb_audio_state": "AUDIO",
+    "hb_wifi_status": "WIFI",
+    "hb_wifi_scan_start": "WIFI",
+    "hb_wifi_scan_state": "WIFI",
+    "hb_wifi_scan_count": "WIFI",
+    "hb_wifi_scan_ap": "WIFI",
+    "hb_wifi_connect": "WIFI",
+    "hb_nas_snapshot": "NAS",
+    "hb_nas_disks": "NAS",
+    "hb_nas_refresh": "NAS",
+    "hb_nas_shell_open": "NAS",
+    "hb_nas_shell_write": "NAS",
+    "hb_nas_shell_status": "NAS",
+    "hb_nas_shell_fault": "NAS",
+    "hb_nas_shell_take": "NAS",
+    "hb_nas_shell_close": "NAS",
+    "hb_cloud_key": "CLOUD",
+    "hb_cloud_start": "CLOUD",
+    "hb_cloud_state": "CLOUD",
+    "hb_cloud_take": "CLOUD",
+    "hb_cloud_cancel": "CLOUD",
+}
+
+PERMISSION_NAMES = {
+    "NETWORK": "网络",
+    "SYSTEM": "系统",
+    "AUDIO": "音频",
+    "NAS": "SSH",
+    "WIFI": "Wi-Fi",
+    "CLOUD": "云服务",
+    "FILES": "文件",
+}
+
+
+def _uleb(data: bytes, at: int) -> tuple[int, int]:
+    """Reads one unsigned LEB128 and returns it with the position after it."""
+    result = 0
+    shift = 0
+
+    while True:
+        if at >= len(data):
+            raise SystemExit("wasm 在 LEB128 中途结束")
+
+        byte = data[at]
+        at += 1
+        result |= (byte & 0x7F) << shift
+
+        if not byte & 0x80:
+            return result, at
+
+        shift += 7
+
+
+def _name(data: bytes, at: int) -> tuple[str, int]:
+    """Reads a wasm name: a length and that many bytes of UTF-8."""
+    length, at = _uleb(data, at)
+    end = at + length
+
+    if end > len(data):
+        raise SystemExit("wasm 名称段越界")
+
+    return data[at:end].decode("utf-8", "replace"), end
+
+
+def wasm_imports(wasm: bytes) -> list[tuple[str, str]]:
+    """Every `(module, name)` the module imports, in order.
+
+    Only the import section is decoded, and only far enough to read the two names: the descriptors
+    are skipped by their own grammar, because a package built for the wrong ABI is a mistake this
+    script should report rather than a wasm parser it should carry.
+    """
+    if wasm[:4] != b"\0asm":
+        raise SystemExit("模块不是 wasm（缺少 \\0asm）")
+
+    at = 8
+    imports: list[tuple[str, str]] = []
+
+    while at < len(wasm):
+        section = wasm[at]
+        at += 1
+        size, at = _uleb(wasm, at)
+        end = at + size
+
+        if end > len(wasm):
+            raise SystemExit("wasm 段长度越界")
+
+        if section == 2:
+            count, at = _uleb(wasm, at)
+
+            for _ in range(count):
+                module, at = _name(wasm, at)
+                name, at = _name(wasm, at)
+                kind = wasm[at]
+                at += 1
+                imports.append((module, name))
+
+                if kind == 0:  # function
+                    _, at = _uleb(wasm, at)
+                elif kind == 1:  # table
+                    at += 1  # reference type
+                    flags = wasm[at]
+                    at += 1
+                    _, at = _uleb(wasm, at)
+                    if flags & 1:
+                        _, at = _uleb(wasm, at)
+                elif kind == 2:  # memory
+                    flags = wasm[at]
+                    at += 1
+                    _, at = _uleb(wasm, at)
+                    if flags & 1:
+                        _, at = _uleb(wasm, at)
+                elif kind == 3:  # global
+                    at += 2
+                elif kind == 4:  # tag
+                    at += 1
+                    _, at = _uleb(wasm, at)
+                else:
+                    raise SystemExit(f"未知的 wasm import 种类 {kind}")
+
+                if at > end:
+                    raise SystemExit("wasm import 段越界")
+
+        at = end
+
+    return imports
+
+
+def check_permissions(app: "App", wasm: bytes) -> None:
+    """Fails the build when the module asks for a service the metadata did not declare.
+
+    This is the one permission mistake that cannot be fixed at run time: the host grants the
+    package's bits at instantiation, so a missing bit is a call that always returns `DENIED`. Better
+    to learn it here than from an application's "not available" screen.
+    """
+    imports = wasm_imports(wasm)
+
+    foreign = sorted({module for module, _ in imports if module != "host"})
+    if foreign:
+        raise SystemExit(f"{app.id}: 模块从 {', '.join(foreign)} 导入，宿主只提供 host 模块")
+
+    missing: dict[str, list[str]] = {}
+    for _, name in imports:
+        permission = IMPORT_PERMISSIONS.get(name)
+
+        if permission and not app.permissions & PERMISSIONS[permission]:
+            missing.setdefault(permission, []).append(name)
+
+    if missing:
+        wanted = "、".join(
+            f"{PERMISSION_NAMES[permission]}（{permission}）" for permission in missing
+        )
+        detail = "; ".join(f"{permission}: {', '.join(names)}" for permission, names in missing.items())
+        raise SystemExit(
+            f"{app.id}: 模块导入了需要 {wanted} 的服务，但清单的 permissions 是 "
+            f"{app.permissions}（{detail}）"
+        )
 
 
 @dataclass
@@ -203,6 +392,7 @@ def main() -> int:
 
         wasm_path = cargo_build(app, release=not args.debug)
         wasm = wasm_path.read_bytes()
+        check_permissions(app, wasm)
         icon = encode_icon(app.icon)
         package = pack(app, wasm, icon)
 

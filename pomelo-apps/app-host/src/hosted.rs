@@ -81,7 +81,7 @@ impl HostedApp {
             last: DisplayList::default(),
         };
 
-        match Vm::new(&package.wasm, services, limits) {
+        match Vm::new(&package.wasm, services, limits, package.meta.permissions) {
             Ok(mut vm) => match vm.init(size.0 as i32, size.1 as i32, scale, now_ms) {
                 Ok(()) => {
                     app.vm = Some(vm);

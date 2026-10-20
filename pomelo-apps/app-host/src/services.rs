@@ -14,6 +14,53 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use app_abi::{
+    code, fault, nas, nas_shell, scan, state, AudioState, HttpProgressWord, NasSnapshot,
+    SystemReadings, WifiSnapshot,
+};
+
+/// The board's implementation, on the panel and on the desktop simulator alike.
+#[cfg(feature = "board")]
+pub mod board;
+
+#[cfg(feature = "board")]
+pub use board::BoardServices;
+
+/// One access point, as the radio reported it.
+///
+/// A `String` and not bytes: an SSID is a name somebody typed, and the one place this project reads
+/// one is a page that has to draw it. A name that is not UTF-8 is read lossily, which is the same
+/// answer a terminal gives it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WifiAp {
+    pub ssid: String,
+    /// dBm.
+    pub rssi: i32,
+    pub secure: bool,
+    pub channel: u32,
+}
+
+/// One disk of the machine beside the box.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NasDisk {
+    pub device: String,
+    pub model: String,
+    pub size_bytes: u64,
+    pub temperature_c: Option<f32>,
+    pub busy_percent: f32,
+    pub read_per_sec: u64,
+    pub write_per_sec: u64,
+    pub purpose: String,
+}
+
+/// What a cloud account's saved key looks like from this side: the masked id and its region, and
+/// never the secret.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloudKey {
+    pub masked: String,
+    pub region: String,
+}
+
 /// The questions an application may ask the host.
 ///
 /// Default implementations are the "this host does not have that" answers, so an implementation for
@@ -48,6 +95,162 @@ pub trait Services {
     /// Writes a file in the application's private directory.
     fn file_write(&mut self, _name: &str, _data: &[u8]) -> bool {
         false
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // The network (permission `NETWORK`).
+    // -------------------------------------------------------------------------------------------
+
+    /// Asks for a document. Returns at once; [`Services::http_state`] is what came of it.
+    fn http_start(&mut self, _url: &str) -> i32 {
+        code::UNSUPPORTED
+    }
+
+    /// One of [`app_abi::state`].
+    fn http_state(&mut self) -> u32 {
+        state::IDLE
+    }
+
+    /// One of [`app_abi::fault`]: why the last request failed.
+    fn http_fault(&mut self) -> u32 {
+        fault::NONE
+    }
+
+    /// How much of the answer has arrived, when the backend keeps a counter.
+    fn http_progress(&mut self) -> Option<HttpProgressWord> {
+        None
+    }
+
+    /// Takes the answer of a request that finished: its status and its body. Called once.
+    fn http_take(&mut self) -> Option<(u16, Vec<u8>)> {
+        None
+    }
+
+    fn http_cancel(&mut self) -> i32 {
+        code::UNSUPPORTED
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // The box's own readings (permission `SYSTEM`).
+    // -------------------------------------------------------------------------------------------
+
+    /// The box as it is right now. `None` on a host that cannot measure it.
+    fn system(&mut self) -> Option<SystemReadings> {
+        None
+    }
+
+    /// The version string built into the image.
+    fn firmware_version(&mut self) -> Option<String> {
+        None
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // The speaker (permission `AUDIO`).
+    // -------------------------------------------------------------------------------------------
+
+    /// Starts playing `path`. The path is the backend's to interpret; [`safe_component`] is for the
+    /// application's own files and is not applied here, because a track may live anywhere on a
+    /// mounted volume.
+    fn audio_play(&mut self, _path: &str) -> i32 {
+        code::UNSUPPORTED
+    }
+
+    /// One of [`app_abi::audio`].
+    fn audio_control(&mut self, _op: u32, _value: i32) -> i32 {
+        code::UNSUPPORTED
+    }
+
+    fn audio_state(&mut self) -> Option<AudioState> {
+        None
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // The radio (permission `WIFI`).
+    // -------------------------------------------------------------------------------------------
+
+    fn wifi_status(&mut self) -> Option<WifiSnapshot> {
+        None
+    }
+
+    fn wifi_scan_start(&mut self) -> i32 {
+        code::UNSUPPORTED
+    }
+
+    /// One of [`app_abi::scan`].
+    fn wifi_scan_state(&mut self) -> u32 {
+        scan::IDLE
+    }
+
+    /// Every access point the last completed scan found, in the order the radio reported them.
+    fn wifi_scan_results(&mut self) -> Vec<WifiAp> {
+        Vec::new()
+    }
+
+    fn wifi_connect(&mut self, _ssid: &str, _password: &str) -> i32 {
+        code::UNSUPPORTED
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // The machines beside the box (permission `NAS`).
+    // -------------------------------------------------------------------------------------------
+
+    fn nas_snapshot(&mut self) -> NasSnapshot {
+        NasSnapshot {
+            status: nas::UNCONFIGURED,
+            ..NasSnapshot::default()
+        }
+    }
+
+    fn nas_disks(&mut self) -> Vec<NasDisk> {
+        Vec::new()
+    }
+
+    fn nas_refresh(&mut self) -> i32 {
+        code::UNSUPPORTED
+    }
+
+    fn nas_shell_open(&mut self, _host: &str, _columns: u16, _rows: u16) -> i32 {
+        code::UNSUPPORTED
+    }
+
+    fn nas_shell_write(&mut self, _bytes: &[u8]) -> i32 {
+        code::UNSUPPORTED
+    }
+
+    /// What the session said since the last call: where it stands, why it was lost, and the bytes.
+    /// Takes.
+    fn nas_shell_take(&mut self) -> (u32, u32, Vec<u8>) {
+        (nas_shell::CLOSED, fault::NONE, Vec::new())
+    }
+
+    fn nas_shell_close(&mut self) -> i32 {
+        code::UNSUPPORTED
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // An account's machines (permission `CLOUD`).
+    // -------------------------------------------------------------------------------------------
+
+    fn cloud_key(&mut self, _vendor: u32) -> Option<CloudKey> {
+        None
+    }
+
+    /// A vendor code for a list, `16 + provider` for a machine: the ABI's numbering.
+    fn cloud_start(&mut self, _target: u32, _action: u32, _instance: &str, _region: &str) -> i32 {
+        code::UNSUPPORTED
+    }
+
+    fn cloud_state(&mut self) -> u32 {
+        state::IDLE
+    }
+
+    /// Takes the answer, encoded as [`app_abi::cloud`] describes.
+    fn cloud_take(&mut self) -> Option<String> {
+        None
+    }
+
+    fn cloud_cancel(&mut self) -> i32 {
+        code::UNSUPPORTED
     }
 
     /// One line on the serial log.
@@ -203,6 +406,20 @@ impl Services for DesktopServices {
     fn exit(&mut self) {
         self.exited = true;
     }
+
+    /// A desktop has no battery, no radio and no panel heap. What it does have is a clock, and the
+    /// uptime is the one reading that is true rather than invented.
+    fn system(&mut self) -> Option<SystemReadings> {
+        Some(SystemReadings {
+            uptime_secs: self.started.elapsed().as_secs().min(u32::MAX as u64) as u32,
+            wifi_state: app_abi::wifi::DISCONNECTED,
+            ..SystemReadings::default()
+        })
+    }
+
+    fn firmware_version(&mut self) -> Option<String> {
+        Some(format!("{}-desktop", env!("CARGO_PKG_VERSION")))
+    }
 }
 
 /// A path component that cannot escape the directory it is joined to.
@@ -309,6 +526,29 @@ mod tests {
         for name in ["notes.txt", "notes/2026.md", "a-b_c.json"] {
             assert!(safe_component(name).is_some(), "{name:?} must be allowed");
         }
+    }
+
+    /// A host with no radio, no speaker and no account says so with the ABI's own code rather than
+    /// with a zero that would read as success.
+    #[test]
+    fn a_host_without_a_service_refuses_it_by_name() {
+        let mut services = MemoryServices::default();
+
+        assert_eq!(services.http_start("https://example.com/"), code::UNSUPPORTED);
+        assert_eq!(services.http_state(), state::IDLE);
+        assert_eq!(services.http_take(), None);
+
+        assert_eq!(services.audio_play("/sdcard/a.wav"), code::UNSUPPORTED);
+        assert_eq!(services.wifi_scan_start(), code::UNSUPPORTED);
+        assert!(services.wifi_scan_results().is_empty());
+        assert_eq!(services.nas_refresh(), code::UNSUPPORTED);
+        assert_eq!(services.nas_shell_take().0, nas_shell::CLOSED);
+        assert_eq!(services.nas_shell_take().1, fault::NONE);
+        assert_eq!(services.cloud_start(0, 0, "", ""), code::UNSUPPORTED);
+        assert_eq!(services.cloud_take(), None);
+
+        // The first look is "nothing has been configured", which is a screen and not a failure.
+        assert_eq!(services.nas_snapshot().status, nas::UNCONFIGURED);
     }
 
     #[test]

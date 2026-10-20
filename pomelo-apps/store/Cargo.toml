@@ -15,6 +15,10 @@ app-host = { path = "../app-host" }
 # one parser and cannot disagree about a version.
 updater = { path = "../updater", default-features = false }
 
+# The permission bits a row shows before installation. The store already reads them out of the
+# package container in its tests; naming them in the page makes the ABI a runtime dependency too.
+app-abi = { path = "../app-abi" }
+
 # The facade. No renderer of its own: `desktop` below decides that, exactly as for every other app.
 iced = { version = "0.14", default-features = false, features = ["thread-pool", "x11", "wayland"] }
 
@@ -26,10 +30,6 @@ pomelo-widgets = { git = "https://github.com/pomelos-on-sale/pomelo-widgets.git"
 
 # The store's own glyph, the refresh, and the three the prompt wears.
 pomelo-material-symbols = { git = "https://github.com/pomelos-on-sale/pomelo-material-symbols.git", rev = "7dc390fb1924dc69b375e5ae77806857f798cc58" }
-
-[dev-dependencies]
-# Only the tests build a package by hand: the container's header, and the magic it starts with.
-app-abi = { path = "../app-abi" }
 
 [features]
 # On by default, because a project of its own is a desktop program. The board is the other way

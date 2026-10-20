@@ -422,3 +422,22 @@ fn the_words_are_written_in_both_languages() {
     assert_eq!(chinese.fault(HttpFault::NoNetwork), "没有网络");
     assert_eq!(english.fault(HttpFault::NoNetwork), "No network");
 }
+
+/// A package's permissions are shown as the words a person reads, and a package that asks for
+/// nothing has no line about not asking.
+#[test]
+fn permissions_are_named_in_the_page_s_language() {
+    let chinese = Words::of(Language::Chinese);
+    let english = Words::of(Language::English);
+
+    let bits = app_abi::perm::NETWORK | app_abi::perm::AUDIO;
+
+    assert_eq!(chinese.permissions(bits), "网络 · 音频");
+    assert_eq!(english.permissions(bits), "Network · Audio");
+
+    assert_eq!(chinese.permissions(0), "");
+    assert_eq!(
+        english.permissions(app_abi::perm::ALL),
+        "Network · System · Audio · SSH · Wi-Fi · Cloud · Files"
+    );
+}
