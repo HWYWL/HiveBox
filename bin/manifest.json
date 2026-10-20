@@ -1,10 +1,21 @@
 {
-  "generated": "2026-10-19T07:23:23Z",
+  "generated": "2026-10-20T04:14:50Z",
   "firmware": {
-    "version": "v0.10.5-20261019",
-    "file": "hivebox-ota-v0.10.5-20261019.bin",
-    "size": 6185840,
-    "sha256": "1fd0fbe26f5c11ab53586696c88fbccf6ac2fe870d3d81425220aed0894dc6bc"
+    "version": "v0.11.0-20261020",
+    "file": "hivebox-ota-v0.11.0-20261020.bin",
+    "size": 5781504,
+    "sha256": "406c2874698b8ef1e1d790a6e793d3f71f58ecfb24cf426b36035ebc851453d6"
+  },
+  "font": {
+    "version": "v3",
+    "file": "hivebox-font-24px-v3.bin",
+    "size": 2268084,
+    "sha256": "1cfb6b3e3b688b8480148fe466540421707ed819bad1786dda6a3ffd18ae0e54",
+    "face": {
+      "file": "hivebox-face-v3.otf",
+      "size": 1910512,
+      "sha256": "0f486329cba8b65eda2dd5652992ddf7d372e2c2adea8ec34c3439ce3e0ce900"
+    }
   },
   "apps": [
     {
