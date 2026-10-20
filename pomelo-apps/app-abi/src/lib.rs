@@ -46,11 +46,13 @@ pub const ABI_MAJOR: u16 = 1;
 /// * `5` added the list of machines this board has been told about.
 /// * `6` added remembering and forgetting one of them, and handing the whole screen to the terminal
 ///   app: a page with a list had no way to change it, and the shell it could open was its own.
+/// * `7` added the shell's own keyboard: a package that has a field to fill asks for it instead of
+///   drawing a smaller one of its own — the keys the terminal and the settings type on.
 ///
 /// An application built against `1.0` still runs on this host: every addition is an import it never
 /// calls. An application built against `1.3` on a `1.0` host fails at instantiation, which is the
 /// answer the store draws as "needs a newer system".
-pub const ABI_MINOR: u16 = 6;
+pub const ABI_MINOR: u16 = 7;
 
 /// Packs a major and a minor into the word [`export::ABI_VERSION`] returns.
 pub const fn version_word(major: u16, minor: u16) -> u32 {
@@ -229,6 +231,22 @@ pub mod host {
     /// 这一条与 [`NAS_SHELL_OPEN`] 不是一件事：那个是应用自己的一页 shell，这个是整块屏幕交给
     /// 终端应用 —— 键盘、回滚、`^C` 都在那边，而应用退到它后面去。要求 `host` 在清单里。
     pub const NAS_TERMINAL: &str = "hb_nas_terminal";
+    /// `(secret: u32, hint_ptr, hint_len, text_ptr, text_len) -> i32`: 请外壳把**它自己那块键盘**
+    /// 抬起来，落在这幅画的下面。
+    ///
+    /// 为什么要有这一条：ABI 里本来只有矩形与文字，于是每个要填一格的应用都得自己画一块键盘 ——
+    /// 480 宽的屏上排五行，键只有 45 像素宽，比终端与设置里那块小得多。这一条把外壳那块整块
+    /// 借过来：字由外壳收、由外壳画，应用每一帧来问「现在是什么字」。
+    ///
+    /// `secret` 非零时外壳把字画成点。`hint` 是键盘上方那句话，`text` 是这一格原来的字（可以
+    /// 为空）。键盘占掉屏幕下面 [`super::KEYBOARD_HEIGHT`] 那条，应用该把自己的格子摆在上面。
+    pub const KEYBOARD_OPEN: &str = "hb_keyboard_open";
+    /// `(out_ptr, out_len) -> i32`: 把键盘里此刻的字抄出来，返回长度；没开就是 0。
+    pub const KEYBOARD_TEXT: &str = "hb_keyboard_text";
+    /// `() -> u32`: 一个 [`super::keyboard`]。
+    pub const KEYBOARD_STATE: &str = "hb_keyboard_state";
+    /// `() -> i32`: 收起键盘，字也不要了。按过「完成」之后由应用调用。
+    pub const KEYBOARD_CLOSE: &str = "hb_keyboard_close";
     /// `(vendor: u32, out_ptr, out_len) -> i32`: writes `masked\tregion` for one vendor
     /// ([`super::vendor`]). Requires [`super::perm::CLOUD`].
     pub const CLOUD_KEY: &str = "hb_cloud_key";
@@ -670,6 +688,21 @@ pub mod scan {
 }
 
 /// How the last look at the NAS went, as [`NasSnapshot::status`] carries it.
+/// [`host::KEYBOARD_OPEN`] 抬起的那块键盘有多高：屏幕的 48%，最少 180、最多 240。
+///
+/// 480 高的屏上就是 230.4 —— 应用把要填的格子摆在 250 以上，键盘才不会盖住它们。
+pub const KEYBOARD_HEIGHT: f32 = 230.4;
+
+/// 外壳那块键盘此刻在做什么，由 [`host::KEYBOARD_STATE`] 报告。
+pub mod keyboard {
+    /// 没有键盘，也没有人按过它。
+    pub const CLOSED: u32 = 0;
+    /// 键盘开着，正在往那一格里写。
+    pub const OPEN: u32 = 1;
+    /// 人按了「完成」：字还在，等应用取走再 [`host::KEYBOARD_CLOSE`]。
+    pub const DONE: u32 = 2;
+}
+
 pub mod nas {
     pub const UNCONFIGURED: u32 = 0;
     pub const CONNECTING: u32 = 1;

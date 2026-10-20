@@ -414,6 +414,11 @@ impl Vm {
         &mut *self.store.data_mut().services
     }
 
+    /// 同一份服务，借用着看：外壳每画一帧都要看键盘里现在是什么字。
+    pub fn services(&self) -> &dyn Services {
+        &*self.store.data().services
+    }
+
     /// Linear memory in bytes.
     pub fn memory_bytes(&self) -> u64 {
         self.memory
@@ -1058,6 +1063,63 @@ fn bind(linker: &mut Linker<HostState>) -> Result<(), VmError> {
             };
 
             caller.data_mut().services.nas_terminal(&host)
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::KEYBOARD_OPEN,
+        |mut caller: Caller<'_, HostState>,
+         secret: u32,
+         hint_ptr: u32,
+         hint_len: u32,
+         text_ptr: u32,
+         text_len: u32|
+         -> i32 {
+            let memory = memory_of(&caller);
+            let Some(hint) = read_string(&caller, memory, hint_ptr, hint_len.min(64)) else {
+                return code::INVALID;
+            };
+            let Some(text) = read_string(&caller, memory, text_ptr, text_len.min(256)) else {
+                return code::INVALID;
+            };
+
+            caller
+                .data_mut()
+                .services
+                .keyboard_open(secret != 0, &hint, &text)
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::KEYBOARD_TEXT,
+        |mut caller: Caller<'_, HostState>, out_ptr: u32, out_len: u32| -> i32 {
+            let text = match caller.data().services.keyboard() {
+                Some(keyboard) => keyboard.text().to_string(),
+                None => String::new(),
+            };
+
+            write_bytes(&mut caller, out_ptr, out_len, text.as_bytes())
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::KEYBOARD_STATE,
+        |caller: Caller<'_, HostState>| -> u32 {
+            match caller.data().services.keyboard() {
+                Some(keyboard) => keyboard.state(),
+                None => app_abi::keyboard::CLOSED,
+            }
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::KEYBOARD_CLOSE,
+        |mut caller: Caller<'_, HostState>| -> i32 {
+            caller.data_mut().services.keyboard_close()
         },
     ))?;
 

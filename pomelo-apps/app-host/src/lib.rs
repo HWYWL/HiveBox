@@ -54,7 +54,7 @@ pub use hosted::HostedApp;
 pub use manager::{install, uninstall, Expected, InstallError};
 pub use meta::Meta;
 pub use package::{Icon, Package, PackageError};
-pub use services::Services;
+pub use services::{Keyboard, Services};
 pub use version::Version;
 pub use vm::{Limits, Vm, VmError};
 

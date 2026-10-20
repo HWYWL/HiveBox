@@ -318,6 +318,45 @@ pub fn nas_terminal(host: &str) -> bool {
     imp::nas_terminal(host.as_ptr() as u32, host.len() as u32) == code::OK
 }
 
+// ---------------------------------------------------------------------------------------------
+// 外壳那块键盘。
+// ---------------------------------------------------------------------------------------------
+
+/// 请外壳把它自己那块键盘抬起来，替这一格收字 —— 终端与设置里用的是同一块。
+///
+/// 键盘占掉屏幕下面 [`app_abi::KEYBOARD_HEIGHT`] 那条，所以要填的格子得摆在那以上。`secret`
+/// 为真时外壳把字画成点。`text` 是这一格原来的字，可以为空。
+pub fn keyboard_open(secret: bool, hint: &str, text: &str) -> bool {
+    imp::keyboard_open(
+        u32::from(secret),
+        hint.as_ptr() as u32,
+        hint.len() as u32,
+        text.as_ptr() as u32,
+        text.len() as u32,
+    ) == code::OK
+}
+
+/// 键盘里此刻的字，抄进 `out`，返回长度；键盘没开就是 0。每一帧来问一次就好。
+pub fn keyboard_text(out: &mut [u8]) -> usize {
+    let written = imp::keyboard_text(out.as_mut_ptr() as u32, out.len() as u32);
+
+    if written < 0 {
+        0
+    } else {
+        written as usize
+    }
+}
+
+/// 一个 [`app_abi::keyboard`]：`OPEN` 是还在写，`DONE` 是人按了完成，字等你取。
+pub fn keyboard_state() -> u32 {
+    imp::keyboard_state()
+}
+
+/// 收起键盘。按过完成、把字存进自己那一格之后调用。
+pub fn keyboard_close() -> bool {
+    imp::keyboard_close() == code::OK
+}
+
 pub fn nas_shell_open(host: &str, columns: u16, rows: u16) -> bool {
     imp::nas_shell_open(
         host.as_ptr() as u32,
@@ -527,6 +566,20 @@ mod imp {
         fn raw_nas_forget(host_ptr: u32, host_len: u32) -> i32;
         #[link_name = "hb_nas_terminal"]
         fn raw_nas_terminal(host_ptr: u32, host_len: u32) -> i32;
+        #[link_name = "hb_keyboard_open"]
+        fn raw_keyboard_open(
+            secret: u32,
+            hint_ptr: u32,
+            hint_len: u32,
+            text_ptr: u32,
+            text_len: u32,
+        ) -> i32;
+        #[link_name = "hb_keyboard_text"]
+        fn raw_keyboard_text(out_ptr: u32, out_len: u32) -> i32;
+        #[link_name = "hb_keyboard_state"]
+        fn raw_keyboard_state() -> u32;
+        #[link_name = "hb_keyboard_close"]
+        fn raw_keyboard_close() -> i32;
         #[link_name = "hb_nas_shell_open"]
         fn raw_nas_shell_open(
             host_ptr: u32,
@@ -792,6 +845,28 @@ mod imp {
         unsafe { raw_cloud_cancel() }
     }
 
+    pub fn keyboard_open(
+        secret: u32,
+        hint_ptr: u32,
+        hint_len: u32,
+        text_ptr: u32,
+        text_len: u32,
+    ) -> i32 {
+        unsafe { raw_keyboard_open(secret, hint_ptr, hint_len, text_ptr, text_len) }
+    }
+
+    pub fn keyboard_text(out_ptr: u32, out_len: u32) -> i32 {
+        unsafe { raw_keyboard_text(out_ptr, out_len) }
+    }
+
+    pub fn keyboard_state() -> u32 {
+        unsafe { raw_keyboard_state() }
+    }
+
+    pub fn keyboard_close() -> i32 {
+        unsafe { raw_keyboard_close() }
+    }
+
     pub fn dir_open(path_ptr: u32, path_len: u32) -> i32 {
         unsafe { raw_dir_open(path_ptr, path_len) }
     }
@@ -970,6 +1045,25 @@ mod imp {
         app_abi::code::UNSUPPORTED
     }
     pub fn cloud_cancel() -> i32 {
+        app_abi::code::UNSUPPORTED
+    }
+
+    pub fn keyboard_open(
+        _secret: u32,
+        _hint_ptr: u32,
+        _hint_len: u32,
+        _text_ptr: u32,
+        _text_len: u32,
+    ) -> i32 {
+        app_abi::code::UNSUPPORTED
+    }
+    pub fn keyboard_text(_out_ptr: u32, _out_len: u32) -> i32 {
+        0
+    }
+    pub fn keyboard_state() -> u32 {
+        app_abi::keyboard::CLOSED
+    }
+    pub fn keyboard_close() -> i32 {
         app_abi::code::UNSUPPORTED
     }
 

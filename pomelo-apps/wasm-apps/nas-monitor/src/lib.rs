@@ -54,20 +54,22 @@ const USER_MAX: usize = 32;
 const SECRET_MAX: usize = 64;
 const PORT_MAX: usize = 5;
 
-/// 表格与键盘的尺寸。四格从 66 起，每格 46；键盘从 250 起，五排。
-///
-/// 「取消」不在顶上那一排：那里落不到手指（见 [`ADD`]），所以它和「保存」一起排在键盘最后一排。
+/// 键盘里那一格字能有多长：外壳那边限到 96 个字符，这里的取字缓冲跟它一样大。
+const KEYBOARD_MAX: usize = 96;
+
+/// 表格的四格。地址与密码各占一行，端口与账号并排 —— 键盘抬起来以后下面那条是它的，
+/// 要填的东西都得让到 `app_abi::KEYBOARD_HEIGHT`（480 高的屏上是 230.4，从 249.6 起）以上。
 const FIELD_X: f32 = 104.0;
 const FIELD_W: f32 = 352.0;
-const FIELD_H: f32 = 40.0;
-const FIELD_TOP: f32 = 66.0;
-const FIELD_STEP: f32 = 46.0;
+const FIELD_H: f32 = 42.0;
+const FIELD_TOP: f32 = 54.0;
+const FIELD_STEP: f32 = 48.0;
+/// 端口那格窄一些，账号接在它右边。
+const PORT_W: f32 = 116.0;
 
-const KEY_X: f32 = 8.0;
-const KEY_TOP: f32 = 250.0;
-const KEY_W: f32 = 43.0;
-const KEY_H: f32 = 38.0;
-const KEY_GAP: f32 = 3.0;
+/// 「保存」与「取消」。也在键盘那一条以上，但不在顶边那 48 像素里（见 [`ADD`]）。
+const SAVE: Rect = Rect::new(300.0, 198.0, 156.0, 42.0);
+const CANCEL: Rect = Rect::new(164.0, 198.0, 128.0, 42.0);
 
 #[derive(Clone, Copy, PartialEq)]
 enum Screen {
@@ -88,82 +90,6 @@ impl Field {
     const ALL: [Field; 4] = [Field::Host, Field::Port, Field::User, Field::Secret];
 }
 
-/// 键盘上的一个键。字母与符号是 [`Key::Char`]，其余各有各的名字。
-#[derive(Clone, Copy, PartialEq)]
-enum Key {
-    Char(char),
-    Shift,
-    Backspace,
-    Mode,
-    Space,
-    Save,
-    /// 收起表格。它排在键盘最后一排，因为顶边那一带的手指落不到（见 [`ADD`]）。
-    Cancel,
-}
-
-const ROW_DIGITS: [Key; 10] = [
-    Key::Char('1'),
-    Key::Char('2'),
-    Key::Char('3'),
-    Key::Char('4'),
-    Key::Char('5'),
-    Key::Char('6'),
-    Key::Char('7'),
-    Key::Char('8'),
-    Key::Char('9'),
-    Key::Char('0'),
-];
-
-/// 数字那一排换成符号：密码里那几个不常见的字都在这里。
-const ROW_SYMBOLS: [Key; 10] = [
-    Key::Char('!'),
-    Key::Char('@'),
-    Key::Char('#'),
-    Key::Char('$'),
-    Key::Char('%'),
-    Key::Char('&'),
-    Key::Char('*'),
-    Key::Char('('),
-    Key::Char(')'),
-    Key::Char('~'),
-];
-
-const ROW_TOP: [Key; 10] = [
-    Key::Char('q'),
-    Key::Char('w'),
-    Key::Char('e'),
-    Key::Char('r'),
-    Key::Char('t'),
-    Key::Char('y'),
-    Key::Char('u'),
-    Key::Char('i'),
-    Key::Char('o'),
-    Key::Char('p'),
-];
-
-const ROW_HOME: [Key; 10] = [
-    Key::Char('a'),
-    Key::Char('s'),
-    Key::Char('d'),
-    Key::Char('f'),
-    Key::Char('g'),
-    Key::Char('h'),
-    Key::Char('j'),
-    Key::Char('k'),
-    Key::Char('l'),
-    Key::Char('-'),
-];
-
-const ROW_LETTERS: [Key; 7] = [
-    Key::Char('z'),
-    Key::Char('x'),
-    Key::Char('c'),
-    Key::Char('v'),
-    Key::Char('b'),
-    Key::Char('n'),
-    Key::Char('m'),
-];
-
 /// 表格：一条正在填的机器，或者没有表格。
 struct Form {
     /// 改的是清单里的第几台；新的一条是 `None`。
@@ -177,10 +103,6 @@ struct Form {
     secret: [u8; SECRET_MAX],
     secret_len: usize,
     focus: Field,
-    /// 字母是大写，还是小写。
-    shift: bool,
-    /// 数字那一排换成了符号。
-    symbols: bool,
     error: Option<&'static str>,
     pressed: Option<Rect>,
 }
@@ -191,10 +113,6 @@ enum Action {
     None,
     Cancel,
     Focus(Field),
-    Insert(char),
-    Erase,
-    Shift,
-    Mode,
     Save,
 }
 
@@ -212,8 +130,6 @@ impl Form {
             secret: [0; SECRET_MAX],
             secret_len: 0,
             focus: Field::Host,
-            shift: false,
-            symbols: false,
             error: None,
             pressed: None,
         };
@@ -277,52 +193,18 @@ impl Form {
         *len = count;
     }
 
-    /// 在光标后面接一个字。端口那格只收数字 —— 一串字母进去只会在保存时变成一个 0。
-    fn insert(&mut self, character: char) {
-        if self.focus == Field::Port && !character.is_ascii_digit() {
-            return;
-        }
+    /// 端口那格只留数字 —— 键盘是外壳的，什么都能敲进来，而一串字母存回去只会变成一个 0。
+    fn only_digits(&mut self) {
+        let mut kept = 0;
 
-        let character = if self.shift && character.is_ascii_lowercase() {
-            character.to_ascii_uppercase()
-        } else {
-            character
-        };
-
-        let field = self.focus;
-        let (buffer, len) = self.buffer_mut(field);
-        let mut bytes = [0u8; 4];
-        let text = character.encode_utf8(&mut bytes);
-
-        for byte in text.as_bytes() {
-            if *len == buffer.len() {
-                break;
+        for index in 0..self.port_len {
+            if self.port[index].is_ascii_digit() {
+                self.port[kept] = self.port[index];
+                kept += 1;
             }
-
-            buffer[*len] = *byte;
-            *len += 1;
         }
 
-        // 大写是一下一下的：按一次只给一个字，跟手机一样。
-        self.shift = false;
-    }
-
-    /// 退掉最后一格。退到空格子上就换到上一格 —— 一行四个格子，手指不用回去点。
-    fn erase(&mut self) {
-        let field = self.focus;
-
-        if self.len(field) > 0 {
-            let (_, len) = self.buffer_mut(field);
-            *len -= 1;
-            return;
-        }
-
-        self.focus = match field {
-            Field::Host => Field::Host,
-            Field::Port => Field::Host,
-            Field::User => Field::Port,
-            Field::Secret => Field::User,
-        };
+        self.port_len = kept;
     }
 
     /// 端口：空的是 0，等于「22 或原来那个」，由板子决定。
@@ -552,6 +434,7 @@ impl Monitor {
         }
 
         self.form = None;
+        host::keyboard_close();
         self.screen = Screen::List;
         self.notice = None;
 
@@ -580,7 +463,12 @@ impl Monitor {
     ///
     /// 分开是因为两个都要 `self`：看清楚按的是哪一格要读表格，改表格要写它。中间隔一个动作值，
     /// 借用在按完就结束了。
+    ///
+    /// 键盘不在这里按：它是外壳的，那一排键压根不在这一页上，字是每一帧从这个应用的
+    /// [`pull_keyboard`](Monitor::pull_keyboard) 里取回来的。
     fn form_update(&mut self, context: &mut Context) {
+        self.pull_keyboard();
+
         let mut action = Action::None;
         let mut down = None;
 
@@ -596,32 +484,18 @@ impl Monitor {
             }
         }
 
-        let symbols = self.form.as_ref().is_some_and(|form| form.symbols);
-
-        for row in 0..5 {
-            for slot in 0..10 {
-                let Some((key, units)) = key_at(row, slot, symbols) else {
-                    continue;
-                };
-
-                let rect = key_rect(row, slot, units);
-
-                if context.input.pressing(rect) {
-                    down = Some(rect);
-                }
-
-                if context.tapped(rect) {
-                    action = match key {
-                        Key::Char(character) => Action::Insert(character),
-                        Key::Space => Action::Insert(' '),
-                        Key::Shift => Action::Shift,
-                        Key::Mode => Action::Mode,
-                        Key::Backspace => Action::Erase,
-                        Key::Save => Action::Save,
-                        Key::Cancel => Action::Cancel,
-                    };
-                }
+        for rect in [SAVE, CANCEL] {
+            if context.input.pressing(rect) {
+                down = Some(rect);
             }
+        }
+
+        if context.tapped(SAVE) {
+            action = Action::Save;
+        }
+
+        if context.tapped(CANCEL) {
+            action = Action::Cancel;
         }
 
         if let Some(form) = self.form.as_mut() {
@@ -634,36 +508,75 @@ impl Monitor {
     fn apply(&mut self, action: Action) {
         match action {
             Action::None => {}
-            Action::Cancel => self.form = None,
+            Action::Cancel => {
+                self.form = None;
+                host::keyboard_close();
+            }
             Action::Save => self.save(),
-            Action::Shift => {
-                if let Some(form) = self.form.as_mut() {
-                    form.shift = !form.shift;
-                }
-            }
-            Action::Mode => {
-                if let Some(form) = self.form.as_mut() {
-                    form.symbols = !form.symbols;
-                }
-            }
             Action::Focus(field) => {
                 if let Some(form) = self.form.as_mut() {
                     form.focus = field;
                     form.error = None;
                 }
+
+                self.open_keyboard();
             }
-            Action::Erase => {
-                if let Some(form) = self.form.as_mut() {
-                    form.erase();
-                    form.error = None;
-                }
+        }
+    }
+
+    /// 请外壳把它自己那块键盘抬起来，替眼前这一格收字。
+    ///
+    /// 键盘是终端与设置里那同一块，键比应用自己画的大一倍 —— 480 宽的屏上自己排五行，
+    /// 一个键只有 43 像素宽，手指按不准。
+    fn open_keyboard(&self) {
+        let Some(form) = self.form.as_ref() else {
+            return;
+        };
+
+        let field = form.focus;
+
+        let hint = match field {
+            Field::Host => "服务器地址",
+            Field::Port => "端口",
+            Field::User => "账号",
+            Field::Secret => "密码",
+        };
+
+        host::keyboard_open(field == Field::Secret, hint, form.text(field));
+    }
+
+    /// 把外壳那块键盘里此刻的字落进正在填的那一格。
+    ///
+    /// 每一帧来取一次：键盘上的字只有外壳知道，应用这边只认「这一刻是什么」。「完成」之后
+    /// 状态变成 `DONE`，取完这一遍就把键盘收起来 —— 那一格的修改这时才算落定。
+    fn pull_keyboard(&mut self) {
+        let state = host::keyboard_state();
+
+        if state == app_abi::keyboard::CLOSED {
+            return;
+        }
+
+        let mut bytes = [0u8; KEYBOARD_MAX];
+        let len = host::keyboard_text(&mut bytes).min(bytes.len());
+        let text = core::str::from_utf8(&bytes[..len]).unwrap_or("");
+
+        let Some(form) = self.form.as_mut() else {
+            host::keyboard_close();
+            return;
+        };
+
+        let field = form.focus;
+
+        if form.text(field) != text {
+            form.put(field, text);
+
+            if field == Field::Port {
+                form.only_digits();
             }
-            Action::Insert(character) => {
-                if let Some(form) = self.form.as_mut() {
-                    form.insert(character);
-                    form.error = None;
-                }
-            }
+        }
+
+        if state == app_abi::keyboard::DONE {
+            host::keyboard_close();
         }
     }
 
@@ -696,6 +609,7 @@ impl Monitor {
         let user = core::str::from_utf8(&user[..user_len]).unwrap_or("");
 
         self.form = Some(Form::edit(index, host, user));
+        self.open_keyboard();
     }
 }
 
@@ -736,6 +650,11 @@ impl App for Monitor {
             return;
         }
 
+        // 表格不在，键盘也不该在：它是替表格那一格收字的。
+        if host::keyboard_state() != app_abi::keyboard::CLOSED {
+            host::keyboard_close();
+        }
+
         self.notice = None;
 
         match self.screen {
@@ -746,6 +665,7 @@ impl App for Monitor {
 
                 if context.tapped(ADD) {
                     self.form = Some(Form::blank());
+                    self.open_keyboard();
                     return;
                 }
 
@@ -1099,10 +1019,10 @@ impl Monitor {
     }
 }
 
-/// 一张盖住整页的表格：上面四格，下面一块键盘。
+/// 一张盖住整页的表格：四格，两颗按钮。
 ///
-/// 它是整页，不是浮在中间的一小块：这一块屏幕 480 见方，一半给格子一半给键盘，中间没有地方再
-/// 留一圈背景。画满一页也就不需要「底色压暗」那种半透明 —— 这一套绘制命令里没有 alpha。
+/// 键盘不画在这里 —— 它是外壳的那一块，画在这幅画的下面。所以这一页只占上面那一条：屏幕
+/// 480 高，键盘从 249.6 起，四格与按钮都排在 240 以上。
 fn sheet(ui: &mut Ui, form: &Form) {
     let title = if form.editing.is_some() {
         "编辑服务器"
@@ -1110,17 +1030,22 @@ fn sheet(ui: &mut Ui, form: &Form) {
         "添加服务器"
     };
 
-    ui.text(24.0, 16.0, title, 24.0, theme::TEXT);
+    ui.text(24.0, 8.0, title, 22.0, theme::TEXT);
 
-    let hint = form.error.unwrap_or("地址、账号与密码都由板子记着");
+    let hint = form.error.unwrap_or(if form.editing.is_some() {
+        "密码留空就是不改它"
+    } else {
+        "地址、账号与密码都由板子记着"
+    });
+
     let hint_color = if form.error.is_some() {
         theme::DANGER
     } else {
         theme::MUTED
     };
 
-    ui.clip(Rect::new(24.0, 44.0, 432.0, 20.0));
-    ui.text(24.0, 44.0, hint, 13.0, hint_color);
+    ui.clip(Rect::new(24.0, 34.0, 432.0, 18.0));
+    ui.text(24.0, 34.0, hint, 12.0, hint_color);
     ui.clip_end();
 
     for (index, field) in Field::ALL.iter().enumerate() {
@@ -1135,7 +1060,7 @@ fn sheet(ui: &mut Ui, form: &Form) {
             Field::Secret => "密码",
         };
 
-        ui.text(24.0, rect.y + 11.0, label, 15.0, theme::MUTED);
+        ui.text(24.0, rect.y + (rect.height - 17.0) / 2.0, label, 14.0, theme::MUTED);
 
         widgets::card_outlined(
             ui,
@@ -1157,6 +1082,8 @@ fn sheet(ui: &mut Ui, form: &Form) {
         let placeholder = !masked && form.len(field) == 0;
         let color = if placeholder { theme::MUTED } else { theme::TEXT };
 
+        ui.clip(Rect::new(rect.x + 2.0, rect.y, rect.width - 4.0, rect.height));
+
         ui.text(
             rect.x + 12.0,
             rect.y + (rect.height - 17.0) / 2.0,
@@ -1167,146 +1094,42 @@ fn sheet(ui: &mut Ui, form: &Form) {
 
         if focused && !placeholder {
             let caret = rect.x + 14.0 + ui.measure(text, 17.0);
-            ui.rect(Rect::new(caret, rect.y + 9.0, 2.0, rect.height - 18.0), ACCENT);
-        }
-    }
-
-    for row in 0..5 {
-        for slot in 0..10 {
-            let Some((key, units)) = key_at(row, slot, form.symbols) else {
-                continue;
-            };
-
-            let rect = key_rect(row, slot, units);
-            let pressed = form.pressed == Some(rect);
-
-            if key == Key::Save {
-                ui.rounded_rect(rect, 8.0, ACCENT);
-
-                if pressed {
-                    ui.rounded_stroke(rect, 8.0, 2.0, theme::TEXT);
-                }
-
-                ui.text_centered(rect, "保存", 16.0, theme::TEXT);
-                continue;
-            }
-
-            if key == Key::Cancel {
-                ui.rounded_rect(rect, 8.0, theme::SURFACE_HIGH);
-
-                if pressed {
-                    ui.rounded_stroke(rect, 8.0, 2.0, theme::DANGER);
-                }
-
-                ui.text_centered(rect, "取消", 16.0, theme::DANGER);
-                continue;
-            }
-
-            ui.rounded_rect(
-                rect,
-                8.0,
-                if pressed {
-                    theme::SURFACE_HIGH
-                } else {
-                    theme::SURFACE
-                },
+            ui.rect(
+                Rect::new(caret, rect.y + 10.0, 2.0, rect.height - 20.0),
+                ACCENT,
             );
-
-            match key {
-                Key::Backspace => ui.icon(
-                    rect.x + (rect.width - 20.0) / 2.0,
-                    rect.y + (rect.height - 20.0) / 2.0,
-                    20.0,
-                    theme::TEXT,
-                    icons::ARROW_BACK,
-                ),
-                Key::Shift => ui.text_centered(
-                    rect,
-                    if form.shift { "ABC" } else { "abc" },
-                    14.0,
-                    if form.shift { ACCENT } else { theme::TEXT },
-                ),
-                Key::Mode => ui.text_centered(
-                    rect,
-                    if form.symbols { "123" } else { "#+=" },
-                    14.0,
-                    theme::TEXT,
-                ),
-                Key::Space => ui.text_centered(rect, "空格", 14.0, theme::TEXT),
-                Key::Char(character) => {
-                    let character = if form.shift {
-                        character.to_ascii_uppercase()
-                    } else {
-                        character
-                    };
-
-                    let mut bytes = [0u8; 4];
-                    let text = character.encode_utf8(&mut bytes);
-
-                    ui.text_centered(rect, text, 17.0, theme::TEXT);
-                }
-                Key::Save | Key::Cancel => {}
-            }
         }
+
+        ui.clip_end();
     }
 
-    widgets::note(
-        ui,
-        Rect::new(24.0, 458.0, 432.0, 20.0),
-        icons::EDIT,
-        "改一台机器时，密码留空就是不改它",
-        theme::MUTED,
-    );
+    // 保存
+    ui.rounded_rect(SAVE, 10.0, ACCENT);
+
+    if form.pressed == Some(SAVE) {
+        ui.rounded_stroke(SAVE, 10.0, 2.0, theme::TEXT);
+    }
+
+    ui.text_centered(SAVE, "保存", 16.0, theme::TEXT);
+
+    // 取消
+    ui.rounded_rect(CANCEL, 10.0, theme::SURFACE_HIGH);
+
+    if form.pressed == Some(CANCEL) {
+        ui.rounded_stroke(CANCEL, 10.0, 2.0, theme::DANGER);
+    }
+
+    ui.text_centered(CANCEL, "取消", 16.0, theme::DANGER);
 }
 
-/// 四格的位置，从上到下。
+/// 四格的位置：地址一行；端口与账号并排；密码一行。
 fn field_rect(index: usize) -> Rect {
-    Rect::new(
-        FIELD_X,
-        FIELD_TOP + index as f32 * FIELD_STEP,
-        FIELD_W,
-        FIELD_H,
-    )
-}
-
-/// 键盘上第 `row` 排第 `slot` 格上的键，以及它占几格。宽键（空格、保存）之后的那几格是空的。
-fn key_at(row: usize, slot: usize, symbols: bool) -> Option<(Key, u8)> {
-    let digits = if symbols { ROW_SYMBOLS } else { ROW_DIGITS };
-
-    match row {
-        0 => digits.get(slot).map(|&key| (key, 1)),
-        1 => ROW_TOP.get(slot).map(|&key| (key, 1)),
-        2 => ROW_HOME.get(slot).map(|&key| (key, 1)),
-        3 => match slot {
-            0 => Some((Key::Shift, 1)),
-            1..=7 => ROW_LETTERS.get(slot - 1).map(|&key| (key, 1)),
-            8 => Some((Key::Char('.'), 1)),
-            9 => Some((Key::Backspace, 1)),
-            _ => None,
-        },
-        4 => match slot {
-            0 => Some((Key::Mode, 1)),
-            1 => Some((Key::Char('_'), 1)),
-            2 => Some((Key::Char('@'), 1)),
-            3 => Some((Key::Char('/'), 1)),
-            4 => Some((Key::Space, 2)),
-            6 => Some((Key::Cancel, 2)),
-            8 => Some((Key::Save, 2)),
-            _ => None,
-        },
-        _ => None,
+    match index {
+        0 => Rect::new(FIELD_X, FIELD_TOP, FIELD_W, FIELD_H),
+        1 => Rect::new(FIELD_X, FIELD_TOP + FIELD_STEP, PORT_W, FIELD_H),
+        2 => Rect::new(FIELD_X + PORT_W + 12.0, FIELD_TOP + FIELD_STEP, FIELD_W - PORT_W - 12.0, FIELD_H),
+        _ => Rect::new(FIELD_X, FIELD_TOP + FIELD_STEP * 2.0, FIELD_W, FIELD_H),
     }
-}
-
-fn key_rect(row: usize, slot: usize, units: u8) -> Rect {
-    let units = units.max(1) as f32;
-
-    Rect::new(
-        KEY_X + slot as f32 * (KEY_W + KEY_GAP),
-        KEY_TOP + row as f32 * (KEY_H + KEY_GAP),
-        units * KEY_W + (units - 1.0) * KEY_GAP,
-        KEY_H,
-    )
 }
 
 fn row_rect(index: usize) -> Rect {

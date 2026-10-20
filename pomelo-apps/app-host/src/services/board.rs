@@ -34,7 +34,7 @@ use pomelo_hal::{
     NasCredentials, NasFault, NasShellStatus, NasStatus, ScanState, WebStatus, WifiState,
 };
 
-use super::{safe_component, CloudKey, NasDisk, Services, WifiAp};
+use super::{safe_component, CloudKey, Keyboard, NasDisk, Services, WifiAp};
 
 /// The board's services for one application.
 pub struct BoardServices {
@@ -69,6 +69,8 @@ pub struct BoardServices {
     /// 的，是看得见屏幕的那一层（`app-launcher`），而这一层只在 [`Services::take_terminal`]
     /// 里把它交出去一次。
     terminal: Option<String>,
+    /// 外壳那块键盘，连同它此刻装着的字。字在这里而不在应用里：收键的是外壳的画布。
+    keyboard: Keyboard,
 }
 
 /// One line of a listing, held between [`Services::dir_open`] and [`Services::dir_next`].
@@ -96,6 +98,7 @@ impl BoardServices {
             invalidated: false,
             exited: false,
             terminal: None,
+            keyboard: Keyboard::default(),
         }
     }
 
@@ -659,6 +662,24 @@ impl Services for BoardServices {
 
     fn take_terminal(&mut self) -> Option<String> {
         self.terminal.take()
+    }
+
+    fn keyboard_open(&mut self, secret: bool, hint: &str, text: &str) -> i32 {
+        self.keyboard.open(secret, hint, text);
+        code::OK
+    }
+
+    fn keyboard(&self) -> Option<&Keyboard> {
+        Some(&self.keyboard)
+    }
+
+    fn keyboard_mut(&mut self) -> Option<&mut Keyboard> {
+        Some(&mut self.keyboard)
+    }
+
+    fn keyboard_close(&mut self) -> i32 {
+        self.keyboard.close();
+        code::OK
     }
 
     fn nas_shell_open(&mut self, host: &str, columns: u16, rows: u16) -> i32 {

@@ -148,8 +148,9 @@ use terminal::Terminal;
 pub use apps::{Entry, CATALOGUE};
 pub use pomelo_material_symbols::Icon;
 pub use pomelo_widgets::{
-    icon_or, AppIcon, BitmapIcon, Language, SystemPreferences, ThemeMode, FONT_BASE,
+    icon_or, touch_keyboard, AppIcon, BitmapIcon, Language, SystemPreferences, ThemeMode, FONT_BASE,
 };
+use pomelo_widgets::touch_keyboard::{KeyAction, KeyboardMode};
 pub use style::{
     DOT_REST, DOT_UP, LABEL, PER_PAGE, SCREEN, STATUS_BG, STATUS_BG_DARK, STATUS_BG_LIGHT,
     STATUS_HEIGHT, STATUS_INSET, WALLPAPER_DARK, WALLPAPER_LIGHT,
@@ -205,6 +206,8 @@ pub enum Message {
     ///
     HostedInput(usize, app_abi::Event),
     HostedFrame,
+    /// 键盘上的一下：字写给正在填的那一格，翻页留给外壳自己。
+    KeyboardKey(KeyAction),
     PageChanged(usize),
     Back,
     ///
@@ -318,6 +321,11 @@ pub struct Launcher {
     /// Apps currently running in memory (foreground or background).
     running_apps: Vec<usize>,
     board: Arc<Board>,
+    /// 应用要填一格时抬起来的那块键盘现在翻到哪一页。
+    ///
+    /// 只有一页：屏幕上一个时候只填一格字，模式也就只有一份。字不在这里 —— 字在应用那一侧的
+    /// 服务里（`app_host::Keyboard`），这里只记键盘自己的翻页。
+    keyboard_mode: KeyboardMode,
     /// The screen's size, as the platform last reported it. The grid's pages and the pager's
     /// thresholds are laid out for it, and it is what the apps whose layout depends on the size are
     /// told — see [`Launcher::hand_over_size`]. Everything else here fills whatever it is given.
@@ -374,6 +382,7 @@ impl Launcher {
             // board — so this is what at most one frame is drawn from, and never what a layout is
             // decided by. A launcher is *told* how big the screen is; it may not assume it.
             size: Size::new(SCREEN as f32, SCREEN as f32),
+            keyboard_mode: KeyboardMode::Lower,
             page: 0,
             recents: false,
             transition: None,
@@ -715,6 +724,38 @@ impl Launcher {
         }
     }
 
+    /// 键盘上的一下。
+    ///
+    /// 字写进应用那一格（服务里的那段缓冲），翻页记在外壳自己这里；写完让应用跑一帧，那一格才
+    /// 会重画。按「完成」只是把状态挪到 `DONE`，取走字、收起键盘都是应用自己的事 —— 它才知道
+    /// 这一格填给谁。
+    fn keyboard_key(&mut self, action: KeyAction) {
+        self.keyboard_mode.update(action);
+
+        let Screen::App(index) = self.screen else {
+            return;
+        };
+        let Some(at) = self.hosted_at(index) else {
+            return;
+        };
+        let Some(app) = self.hosted.get_mut(at).and_then(|hosted| hosted.app.as_mut()) else {
+            return;
+        };
+        let Some(keyboard) = app.keyboard_mut() else {
+            return;
+        };
+
+        match action {
+            KeyAction::Char(character) => keyboard.type_char(character),
+            KeyAction::Space => keyboard.type_char(' '),
+            KeyAction::Backspace => keyboard.backspace(),
+            KeyAction::Enter => keyboard.finish(),
+            KeyAction::SwitchMode(_) => {}
+        }
+
+        self.hosted_frame();
+    }
+
     /// 把整块屏幕交给终端应用，并在 `host` 上开一个会话。
     ///
     /// 这是「服务器应用里点终端」的另一半：应用只递出一句「开在哪台机器上」，切页、给终端它的
@@ -826,7 +867,34 @@ impl Launcher {
 
         if let Some(app) = &hosted.app {
             if app.is_running() {
-                return app.view(fonts, move |event| Message::HostedInput(index, event));
+                let canvas = app.view(fonts, move |event| Message::HostedInput(index, event));
+
+                // 键盘抬起来的时候压在画布下面，占掉的高度是键盘自己算的那一条 —— 与终端、
+                // 设置里那块同一个数，所以同一个屏上手感一样。
+                let open = app.keyboard().map(|keyboard| keyboard.is_open()).unwrap_or(false);
+
+                if open {
+                    let band = iced::widget::container(touch_keyboard::band_with_theme(
+                        self.keyboard_mode,
+                        Message::KeyboardKey,
+                        self.preferences.theme,
+                    ))
+                    .width(Length::Fill)
+                    .height(Length::Fixed(touch_keyboard::band_height(self.size.height)));
+
+                    return stack![
+                        canvas,
+                        iced::widget::column![
+                            Space::new().height(Length::Fill),
+                            band,
+                        ]
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                    ]
+                    .into();
+                }
+
+                return canvas;
             }
         }
 
@@ -1399,6 +1467,9 @@ impl Launcher {
 
         match message {
             Message::HostedFrame => self.hosted_frame(),
+            Message::KeyboardKey(action) => {
+                self.keyboard_key(action);
+            }
             Message::HostedInput(index, event) => self.hosted_event(index, event),
             Message::Open(index) => {
                 // Whether this app is opening *over the desktop*, which is the only way one arrives:

@@ -189,6 +189,19 @@ impl HostedApp {
             .and_then(|vm| vm.services_mut().take_terminal())
     }
 
+    /// 外壳那块键盘此刻的样子：外壳照着它把键盘画在应用下面，应用照着它知道自己那一格被敲了
+    /// 什么。`None` 是这块宿主没有键盘（桌面模拟器）。
+    pub fn keyboard(&self) -> Option<&crate::Keyboard> {
+        self.vm.as_ref().and_then(|vm| vm.services().keyboard())
+    }
+
+    /// 键盘上的一个动作，由外壳的画布送进来。
+    pub fn keyboard_mut(&mut self) -> Option<&mut crate::Keyboard> {
+        self.vm
+            .as_mut()
+            .and_then(|vm| vm.services_mut().keyboard_mut())
+    }
+
     /// How much linear memory the application is holding, for the store's and the settings' readings.
     pub fn memory_bytes(&self) -> u64 {
         self.vm.as_ref().map(|vm| vm.memory_bytes()).unwrap_or(0)

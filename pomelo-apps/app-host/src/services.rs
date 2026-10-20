@@ -61,6 +61,87 @@ pub struct CloudKey {
     pub region: String,
 }
 
+/// 外壳那块键盘，以及它此刻装着的字。
+///
+/// 字在宿主这边：按键由外壳的画布收（`pomelo-widgets` 的那块键盘），应用每一帧来问一次。这样
+/// 一块屏上只有一处知道「光标在哪、按了几个字」，应用不必自己画键、也不必自己处理退格。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Keyboard {
+    state: u32,
+    secret: bool,
+    hint: String,
+    text: String,
+}
+
+/// 一格字最多这么多个字符：一行地址、一个账号，够了。
+const KEYBOARD_TEXT_MAX: usize = 96;
+
+impl Keyboard {
+    /// 键盘此刻在屏幕上。
+    pub fn is_open(&self) -> bool {
+        self.state != app_abi::keyboard::CLOSED
+    }
+
+    /// 一个 [`app_abi::keyboard`]。
+    pub fn state(&self) -> u32 {
+        self.state
+    }
+
+    /// 这一格是不是密码：外壳把字画成点。
+    pub fn secret(&self) -> bool {
+        self.secret
+    }
+
+    /// 键盘上方那句话。
+    pub fn hint(&self) -> &str {
+        &self.hint
+    }
+
+    /// 此刻装着的字。
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// 抬起来，装进这一格原来的字。
+    pub fn open(&mut self, secret: bool, hint: &str, text: &str) {
+        self.state = app_abi::keyboard::OPEN;
+        self.secret = secret;
+        self.hint.clear();
+        self.hint.push_str(hint);
+        self.text.clear();
+        self.text.push_str(text);
+    }
+
+    /// 敲进一个字。已经满了就不再加。
+    pub fn type_char(&mut self, c: char) {
+        if self.state == app_abi::keyboard::OPEN && self.text.chars().count() < KEYBOARD_TEXT_MAX {
+            self.text.push(c);
+        }
+    }
+
+    /// 退掉最后一个字（一个字符，不是一个字节）。
+    pub fn backspace(&mut self) {
+        if self.state == app_abi::keyboard::OPEN {
+            self.text.pop();
+        }
+    }
+
+    /// 人按了「完成」：字留着，等应用来取。
+    pub fn finish(&mut self) {
+        if self.state == app_abi::keyboard::OPEN {
+            self.state = app_abi::keyboard::DONE;
+        }
+    }
+
+    /// 收起键盘，字也不留。
+    pub fn close(&mut self) {
+        self.state = app_abi::keyboard::CLOSED;
+        self.secret = false;
+        self.hint.clear();
+        self.text.clear();
+    }
+}
+
 /// The questions an application may ask the host.
 ///
 /// Default implementations are the "this host does not have that" answers, so an implementation for
@@ -252,6 +333,30 @@ pub trait Services {
     }
 
     fn nas_shell_close(&mut self) -> i32 {
+        code::UNSUPPORTED
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // 外壳那块键盘（不要权限：它只画字，什么也不读）。
+    // -------------------------------------------------------------------------------------------
+
+    /// 把外壳的键盘抬起来，替这一格收字。见 [`app_abi::host::KEYBOARD_OPEN`]。
+    fn keyboard_open(&mut self, _secret: bool, _hint: &str, _text: &str) -> i32 {
+        code::UNSUPPORTED
+    }
+
+    /// 键盘此刻的样子，给外壳画、也给应用问。`None` 是「这块宿主没有键盘」。
+    fn keyboard(&self) -> Option<&Keyboard> {
+        None
+    }
+
+    /// 按键归外壳的画布收，收完写回这里。
+    fn keyboard_mut(&mut self) -> Option<&mut Keyboard> {
+        None
+    }
+
+    /// 收起键盘。见 [`app_abi::host::KEYBOARD_CLOSE`]。
+    fn keyboard_close(&mut self) -> i32 {
         code::UNSUPPORTED
     }
 
