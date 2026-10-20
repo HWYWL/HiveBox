@@ -742,6 +742,10 @@ impl App for Monitor {
         ui.clear(theme::BLACK);
         self.poll();
 
+        // 画之前再取一遍键盘里的字：键盘上的键是外壳收的，应用这里没有事件，`update` 那一遍
+        // 不一定跑得到 —— 只在 `update` 里取，字就要等下一次点屏幕才出现。
+        self.pull_keyboard();
+
         // 表格在的时候**只画表格**：不清屏是没用的，宿主把文字画在所有图形之上，那一层盖不住
         // 下面那一页的字 —— 两张页面的字会叠在一起。
         if let Some(form) = self.form.as_ref() {
