@@ -823,13 +823,16 @@ impl App for Monitor {
         ui.clear(theme::BLACK);
         self.poll();
 
+        // 表格在的时候**只画表格**：不清屏是没用的，宿主把文字画在所有图形之上，那一层盖不住
+        // 下面那一页的字 —— 两张页面的字会叠在一起。
+        if let Some(form) = self.form.as_ref() {
+            sheet(ui, form);
+            return;
+        }
+
         match self.screen {
             Screen::List => self.list(ui),
             Screen::Detail => self.detail(ui),
-        }
-
-        if let Some(form) = self.form.as_ref() {
-            sheet(ui, form);
         }
     }
 }
@@ -1102,8 +1105,6 @@ impl Monitor {
 /// 它是整页，不是浮在中间的一小块：这一块屏幕 480 见方，一半给格子一半给键盘，中间没有地方再
 /// 留一圈背景。画满一页也就不需要「底色压暗」那种半透明 —— 这一套绘制命令里没有 alpha。
 fn sheet(ui: &mut Ui, form: &Form) {
-    ui.clear(theme::BLACK);
-
     let title = if form.editing.is_some() {
         "编辑服务器"
     } else {
