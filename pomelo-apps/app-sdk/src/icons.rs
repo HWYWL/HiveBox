@@ -1,0 +1,107 @@
+//! The glyphs a package draws, as the code points the panel's symbol font puts them at.
+//!
+//! A package cannot depend on `pomelo-material-symbols` — it is a wasm module with no filesystem and
+//! no room for a table — so what crosses the boundary is the one number the host needs to look a
+//! glyph up: the code point. These are that font's own numbers, read out of
+//! `ui-framework/pomelo-material-symbols/src/table.rs`.
+//!
+//! Only the ones a page on this box actually draws are here. The set is small on purpose: every
+//! constant is a byte of wasm, and a package is measured in kilobytes.
+
+pub const LOCATION_ON: char = '\u{f1db}';
+pub const REFRESH: char = '\u{e5d5}';
+pub const DEVICE_THERMOSTAT: char = '\u{e1ff}';
+pub const WATER_DROP: char = '\u{e798}';
+pub const AIR: char = '\u{efd8}';
+pub const WB_SUNNY: char = '\u{e430}';
+pub const SUNNY: char = '\u{e81a}';
+pub const RAINY: char = '\u{f176}';
+pub const THUNDERSTORM: char = '\u{ebdb}';
+pub const SNOWING: char = '\u{e80f}';
+pub const FOGGY: char = '\u{e818}';
+pub const AC_UNIT: char = '\u{eb3b}';
+pub const GRAIN: char = '\u{e3ea}';
+pub const WIND_POWER: char = '\u{ec0c}';
+pub const CALENDAR_MONTH: char = '\u{ebcc}';
+pub const CLOUD: char = '\u{f15c}';
+pub const PARTLY_CLOUDY_DAY: char = '\u{f172}';
+pub const WIFI_FIND: char = '\u{eb31}';
+pub const ROUTER: char = '\u{e328}';
+pub const BAR_CHART: char = '\u{e26b}';
+pub const SIGNAL_CELLULAR_ALT: char = '\u{e202}';
+pub const LOCK: char = '\u{e899}';
+pub const MUSIC_NOTE: char = '\u{e405}';
+pub const PLAY_ARROW: char = '\u{e037}';
+pub const PAUSE: char = '\u{e034}';
+pub const STOP: char = '\u{e047}';
+pub const VOLUME_UP: char = '\u{e050}';
+pub const VOLUME_DOWN: char = '\u{e04d}';
+pub const FOLDER: char = '\u{e2c7}';
+pub const FOLDER_OPEN: char = '\u{e2c8}';
+pub const DESCRIPTION: char = '\u{e873}';
+pub const CREATE_NEW_FOLDER: char = '\u{e2cc}';
+pub const EDIT: char = '\u{f097}';
+pub const CONTENT_COPY: char = '\u{e14d}';
+pub const CONTENT_PASTE: char = '\u{e14f}';
+pub const DELETE: char = '\u{e92e}';
+pub const ARROW_UPWARD: char = '\u{e5d8}';
+pub const BATTERY_STD: char = '\u{e1a5}';
+pub const BATTERY_CHARGING_FULL: char = '\u{e1a3}';
+pub const BOLT: char = '\u{ea0b}';
+pub const INSIGHTS: char = '\u{f092}';
+pub const SAVE: char = '\u{e161}';
+pub const PUBLIC: char = '\u{e80b}';
+pub const CHECK_CIRCLE: char = '\u{f0be}';
+pub const INFO: char = '\u{e88e}';
+pub const SPORTS_ESPORTS: char = '\u{ea28}';
+pub const GRID_VIEW: char = '\u{e9b0}';
+pub const CHEVRON_RIGHT: char = '\u{e5cc}';
+pub const CHEVRON_LEFT: char = '\u{e5cb}';
+pub const DNS: char = '\u{e875}';
+pub const STORAGE: char = '\u{e1db}';
+pub const THERMOSTAT: char = '\u{f076}';
+pub const ADD: char = '\u{e145}';
+pub const CLOUD_SYNC: char = '\u{eb5a}';
+pub const POWER_SETTINGS_NEW: char = '\u{f8c7}';
+pub const CLOUD_OFF: char = '\u{e2c1}';
+pub const SD_STORAGE: char = '\u{e623}';
+pub const MEMORY: char = '\u{e322}';
+pub const SCHEDULE: char = '\u{efd6}';
+pub const MONITOR_HEART: char = '\u{eaa2}';
+pub const WARNING: char = '\u{f083}';
+pub const ERROR: char = '\u{f8b6}';
+pub const CHECK: char = '\u{e668}';
+pub const ARROW_BACK: char = '\u{e5c4}';
+pub const WIFI: char = '\u{e63e}';
+pub const SPEAKER: char = '\u{e32d}';
+pub const AUDIO_FILE: char = '\u{eb82}';
+pub const INSERT_DRIVE_FILE: char = '\u{e66d}';
+pub const TERMINAL: char = '\u{eb8e}';
+pub const SETTINGS: char = '\u{e8b8}';
+pub const STORE: char = '\u{e8d1}';
+pub const SYSTEM_UPDATE: char = '\u{f2cd}';
+pub const SHOW_CHART: char = '\u{e6e1}';
+pub const TIMELINE: char = '\u{e922}';
+pub const HISTORY: char = '\u{e8b3}';
+pub const RESTART_ALT: char = '\u{f053}';
+pub const POWER_OFF: char = '\u{e646}';
+pub const SECURITY: char = '\u{e32a}';
+pub const SYNC: char = '\u{e627}';
+pub const CLOUD_DONE: char = '\u{e2bf}';
+pub const FILE_DOWNLOAD: char = '\u{f090}';
+pub const ARCHIVE: char = '\u{e149}';
+pub const STAR: char = '\u{f09a}';
+pub const SWIPE: char = '\u{e9ec}';
+pub const TOUCH_APP: char = '\u{e913}';
+pub const MORE_VERT: char = '\u{e5d4}';
+pub const SEARCH: char = '\u{ef7a}';
+pub const SORT: char = '\u{e164}';
+pub const LIST: char = '\u{e896}';
+pub const DASHBOARD: char = '\u{e871}';
+pub const DEVELOPER_BOARD: char = '\u{e30d}';
+pub const USB: char = '\u{e1e0}';
+pub const BLUETOOTH: char = '\u{e1a7}';
+pub const NFC: char = '\u{e1bb}';
+pub const GAMES: char = '\u{e021}';
+pub const KEYBOARD: char = '\u{e312}';
+pub const MOUSE: char = '\u{e323}';

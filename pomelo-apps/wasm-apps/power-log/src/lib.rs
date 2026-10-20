@@ -15,7 +15,16 @@
 
 #![no_std]
 
-use app_sdk::{app, format_into, host, theme, widgets, App, Context, Event, Rect, Ui};
+use app_sdk::{
+    app, format_into, host, icons, theme, widgets, App, Context, Event, Rect, Ui,
+};
+
+/// 这个包自己的颜色，与 `tools/build_apps.py` 里 power-log 那条目的 `#AA60D6` 是同一个。
+const ACCENT: app_sdk::ui::Color = 0x00AA_60D6;
+
+/// 页头右上那颗「记一次」，与底下那颗「清空」。
+const RECORD: Rect = Rect::new(318.0, 22.0, 144.0, 44.0);
+const CLEAR: Rect = Rect::new(18.0, 416.0, 444.0, 48.0);
 
 /// 一小时的采样：三十秒一个，一百二十个。
 const SAMPLES: usize = 120;
@@ -42,6 +51,7 @@ struct PowerLog {
     charging_now: u32,
     uptime: u32,
     clear_pressed: bool,
+    record_pressed: bool,
 }
 
 impl PowerLog {
@@ -115,6 +125,40 @@ impl PowerLog {
         }
     }
 
+    /// 照这段曲线的变化率，剩下的电还能撑多少分钟。充电中不作答：插着电的时候「还能撑多久」
+    /// 是没有意义的，而一个正在往上涨的斜率算出来的数是假的。
+    ///
+    /// 用的是整段的头尾，而不是最后两个采样 —— 两个采样之间差 1% 是量不出来的噪声，三十秒里
+    /// 的一次跳动不该让这一行从「八小时」跳到「四十分钟」。
+    fn remaining_minutes(&self) -> Option<u32> {
+        if self.count < 2 || self.charging_now != 0 {
+            return None;
+        }
+
+        let oldest = self.percent[self.slot(0)] as i32;
+        let newest = self.percent[self.slot(self.count - 1)] as i32;
+        let dropped = oldest - newest;
+
+        if dropped <= 0 {
+            return None;
+        }
+
+        let span = (self.count - 1) as i32 * (INTERVAL_MS / 1000) as i32;
+        let per_hour = dropped * 3600 / span.max(1);
+
+        if per_hour <= 0 {
+            return None;
+        }
+
+        let minutes = self.battery as i32 * 60 / per_hour;
+
+        if minutes <= 0 || minutes > 100 * 60 {
+            return None;
+        }
+
+        Some(minutes as u32)
+    }
+
     /// 曲线上第 `index` 个点，落在 `rect` 里的坐标。
     fn point(&self, index: usize, rect: Rect) -> (f32, f32) {
         let span = (self.count.max(2) - 1) as f32;
@@ -139,6 +183,7 @@ impl App for PowerLog {
             charging_now: 0,
             uptime: 0,
             clear_pressed: false,
+            record_pressed: false,
         };
 
         log.load();
@@ -158,13 +203,23 @@ impl App for PowerLog {
     }
 
     fn update(&mut self, _event: Event, context: &mut Context) {
-        let clear = Rect::new(18.0, 396.0, 444.0, 56.0);
+        self.clear_pressed = context.input.pressing(CLEAR);
+        self.record_pressed = context.input.pressing(RECORD);
 
-        self.clear_pressed = context.input.pressing(clear);
-
-        if context.tapped(clear) {
+        if context.tapped(CLEAR) {
             self.clear();
             host::file_write(FILE, &[]);
+            return;
+        }
+
+        // 「记一次」：三十秒一个采样是为了画出曲线，而刚插上充电器的人是想立刻看见那一级台阶的，
+        // 不是等半分钟。
+        if context.tapped(RECORD) {
+            if let Some(readings) = host::system() {
+                self.push(readings.battery_percent.min(100) as u8, readings.charging as u8);
+                self.sampled_ms = host::now_ms();
+                self.save();
+            }
         }
     }
 
@@ -186,7 +241,32 @@ impl App for PowerLog {
             }
         }
 
-        ui.text(24.0, 28.0, "电量日志", 22.0, theme::MUTED);
+        // 页头：图标跟着充电状态换 —— 插着电的时候那张图应该是带闪电的那一个。
+        widgets::page_header(
+            ui,
+            Rect::new(18.0, 18.0, 288.0, 44.0),
+            if self.charging_now != 0 {
+                icons::BATTERY_CHARGING_FULL
+            } else {
+                icons::BATTERY_STD
+            },
+            ACCENT,
+            "电量日志",
+            if self.charging_now != 0 {
+                "充电中"
+            } else {
+                "使用电池"
+            },
+        );
+
+        widgets::pill(
+            ui,
+            RECORD,
+            "记一次",
+            icons::SAVE,
+            ACCENT,
+            self.record_pressed,
+        );
 
         let mut storage = [0u8; 8];
         let mut buffer = app_sdk::text::Buf::new(&mut storage);
@@ -194,19 +274,19 @@ impl App for PowerLog {
 
         widgets::reading(
             ui,
-            Rect::new(24.0, 58.0, 240.0, 90.0),
+            Rect::new(24.0, 74.0, 240.0, 90.0),
             percent,
             if self.charging_now != 0 {
                 "充电中"
             } else {
-                "使用电池"
+                "还剩多少电"
             },
             52.0,
         );
 
         widgets::progress(
             ui,
-            Rect::new(24.0, 136.0, 432.0, 12.0),
+            Rect::new(24.0, 152.0, 432.0, 12.0),
             self.battery as f32 / 100.0,
             if self.battery <= 20 {
                 theme::DANGER
@@ -217,8 +297,17 @@ impl App for PowerLog {
 
         // 曲线：一小时的电量，充电那段用另一种颜色，因为一次充电在曲线上是一级台阶，看得见
         // 它什么时候插上的比知道它插了多久更有用。
-        let curve = Rect::new(18.0, 170.0, 444.0, 150.0);
+        let curve = Rect::new(18.0, 176.0, 444.0, 150.0);
         widgets::card(ui, curve, theme::SURFACE);
+
+        widgets::section(
+            ui,
+            Rect::new(curve.x + 16.0, curve.y + 10.0, curve.width - 32.0, 22.0),
+            icons::SHOW_CHART,
+            ACCENT,
+            "近一小时",
+            "30 秒一个采样",
+        );
 
         for step in [25u32, 50, 75] {
             let y = curve.bottom() - 10.0 - (curve.height - 20.0) * (step as f32 / 100.0);
@@ -242,35 +331,73 @@ impl App for PowerLog {
             }
         }
 
-        let mut storage = [0u8; 24];
-        let mut buffer = app_sdk::text::Buf::new(&mut storage);
+        // 电压与采样数并排，下面是「照这段的变化还能撑多久」—— 内置版有这一句，而它是这一页
+        // 唯一一个往前看而不是往后看的数字。
+        {
+            let mut storage = [0u8; 24];
+            let mut buffer = app_sdk::text::Buf::new(&mut storage);
+            let volts =
+                format_into!(buffer, "{}.{:03} V", self.millivolts / 1000, self.millivolts % 1000);
 
-        let volts = format_into!(buffer, "{}.{:03} V", self.millivolts / 1000, self.millivolts % 1000);
-        widgets::key_value(ui, Rect::new(24.0, 336.0, 432.0, 24.0), "电压", volts, 20.0);
+            widgets::metric(
+                ui,
+                Rect::new(24.0, 334.0, 200.0, 38.0),
+                icons::BOLT,
+                volts,
+                "电压",
+                22.0,
+                ACCENT,
+            );
+        }
 
-        buffer.reset();
-        let samples = format_into!(buffer, "{} / {}", self.count, SAMPLES);
-        widgets::key_value(ui, Rect::new(24.0, 364.0, 432.0, 24.0), "采样", samples, 20.0);
+        {
+            let mut storage = [0u8; 24];
+            let mut buffer = app_sdk::text::Buf::new(&mut storage);
+            let samples = format_into!(buffer, "{} / {}", self.count, SAMPLES);
+
+            widgets::metric(
+                ui,
+                Rect::new(240.0, 334.0, 216.0, 38.0),
+                icons::HISTORY,
+                samples,
+                "采样",
+                22.0,
+                ACCENT,
+            );
+        }
+
+        {
+            let mut storage = [0u8; 32];
+            let mut buffer = app_sdk::text::Buf::new(&mut storage);
+            let estimate = match self.remaining_minutes() {
+                Some(minutes) if minutes >= 60 => {
+                    format_into!(buffer, "{} 小时 {} 分", minutes / 60, minutes % 60)
+                }
+                Some(minutes) => format_into!(buffer, "{minutes} 分钟"),
+                None if self.charging_now != 0 => "正在充电",
+                None => "采样还不够",
+            };
+
+            widgets::metric(
+                ui,
+                Rect::new(24.0, 374.0, 432.0, 38.0),
+                icons::TIMELINE,
+                estimate,
+                "照这段的变化，还能撑",
+                20.0,
+                ACCENT,
+            );
+        }
 
         widgets::button(
             ui,
-            Rect::new(18.0, 396.0, 444.0, 56.0),
+            CLEAR,
             "清空",
-            24.0,
+            22.0,
             theme::SURFACE_HIGH,
             theme::TEXT,
             self.clear_pressed,
         );
-
-        let mut storage = [0u8; 32];
-        let mut buffer = app_sdk::text::Buf::new(&mut storage);
-
-        // 开机时长放在最后，是因为它跟电量无关：它回答的是「这条曲线跨了多久」，而曲线本身
-        // 断过（重启）也看不出来。
-        let uptime = self.uptime;
-        let note = format_into!(buffer, "三十秒一个采样，开机 {uptime} 秒");
-
-        ui.text(24.0, 464.0, note, 14.0, theme::MUTED);
     }
 
     fn on_stop(&mut self) {

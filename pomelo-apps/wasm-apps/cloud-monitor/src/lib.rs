@@ -16,7 +16,12 @@
 
 #![no_std]
 
-use app_sdk::{app, app_abi, format_into, host, theme, widgets, App, Context, Event, Rect, Ui};
+use app_sdk::{
+    app, app_abi, format_into, host, icons, theme, widgets, App, Context, Event, Rect, Ui,
+};
+
+/// 这个包自己的颜色，与 `tools/build_apps.py` 里 cloud-monitor 那条目的 `#5B8FB0` 是同一个。
+const ACCENT: app_sdk::ui::Color = 0x005B_8FB0;
 
 /// 一屏最多列这么多台：再往下是滚动，而这一版没有滚动。
 const MAX_INSTANCES: usize = 8;
@@ -362,7 +367,22 @@ impl App for Cloud {
             }
         }
 
-        ui.text(24.0, 28.0, "云服务", 22.0, theme::MUTED);
+        // 页头：副标题说这一家配好了没有，因为「列表是空的」有两种原因，而它写在抬头上才不会
+        // 被当成故障。
+        let configured = self.key_len > 0;
+
+        widgets::page_header(
+            ui,
+            Rect::new(18.0, 12.0, 288.0, 40.0),
+            icons::CLOUD_SYNC,
+            ACCENT,
+            "云服务",
+            if configured {
+                "密钥已配置"
+            } else {
+                "还没有配密钥"
+            },
+        );
 
         for (index, (name, vendor)) in VENDORS.iter().enumerate() {
             let rect = vendor_rect(index);
@@ -373,7 +393,7 @@ impl App for Cloud {
                 name,
                 20.0,
                 if *vendor == self.vendor {
-                    theme::ACCENT
+                    ACCENT
                 } else {
                     theme::SURFACE_HIGH
                 },
@@ -400,14 +420,19 @@ impl App for Cloud {
         widgets::divider(ui, Rect::new(24.0, 156.0, 432.0, 1.0));
 
         if self.count == 0 {
-            ui.text_centered(
-                Rect::new(18.0, 200.0, 444.0, 120.0),
+            widgets::empty(
+                ui,
+                Rect::new(90.0, 210.0, 340.0, 90.0),
+                if state == app_abi::state::RUNNING {
+                    icons::SYNC
+                } else {
+                    icons::CLOUD_OFF
+                },
                 if state == app_abi::state::RUNNING {
                     "正在问…"
                 } else {
                     "这一家没有机器，或者密钥没配好"
                 },
-                20.0,
                 theme::MUTED,
             );
         } else {
@@ -415,14 +440,7 @@ impl App for Cloud {
                 let instance = self.instances[index];
                 let rect = list_row(index);
                 let chosen = self.selected == Some(index);
-
-                widgets::list_row(
-                    ui,
-                    rect,
-                    instance.name(),
-                    "",
-                    chosen || self.list_pressed == Some(index),
-                );
+                let running = instance.state == 0;
 
                 let mut storage = [0u8; 64];
                 let mut buffer = app_sdk::text::Buf::new(&mut storage);
@@ -433,7 +451,23 @@ impl App for Cloud {
                     ip = instance.ip()
                 );
 
-                ui.text(rect.x + 16.0, rect.y + 20.0, line, 14.0, theme::MUTED);
+                // 一个点，而不是一句「运行中」：八行里八个点，一眼能看出哪几台开着。
+                let color = if running { theme::OK } else { theme::MUTED };
+
+                widgets::row(
+                    ui,
+                    rect,
+                    icons::DNS,
+                    color,
+                    instance.name(),
+                    line,
+                    "",
+                    self.list_pressed == Some(index),
+                    if chosen { theme::SURFACE_HIGH } else { theme::SURFACE },
+                    if chosen { Some(ACCENT) } else { None },
+                );
+
+                widgets::dot(ui, (rect.right() - 16.0, rect.y + rect.height / 2.0), 5.0, color);
             }
         }
 

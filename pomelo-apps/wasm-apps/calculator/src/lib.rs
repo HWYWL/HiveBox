@@ -6,7 +6,10 @@
 
 #![no_std]
 
-use app_sdk::{app, theme, widgets, App, Context, Event, Rect, Ui};
+use app_sdk::{app, icons, theme, widgets, App, Context, Event, Rect, Ui};
+
+/// 这个包自己的颜色，与 `tools/build_apps.py` 里 calculator 那条目的 `#F69E22` 是同一个。
+const ACCENT: app_sdk::ui::Color = 0x00F6_9E22;
 
 /// The four operations, as the one byte the state keeps.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -257,7 +260,15 @@ impl App for Calculator {
 
     fn view(&mut self, ui: &mut Ui) {
         ui.clear(theme::BLACK);
-        ui.text(24.0, 28.0, "计算器", 22.0, theme::MUTED);
+        // 页头：这一页的图标与名字，跟别的应用是同一个开头。
+        widgets::page_header(
+            ui,
+            Rect::new(18.0, 18.0, 420.0, 44.0),
+            icons::GRID_VIEW,
+            ACCENT,
+            "计算器",
+            "四则运算",
+        );
         ui.rounded_rect(Rect::new(18.0, 66.0, 444.0, 124.0), 20.0, theme::SURFACE);
 
         let shown = if self.error {

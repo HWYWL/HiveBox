@@ -16,7 +16,15 @@
 
 #![no_std]
 
-use app_sdk::{app, app_abi, format_into, host, theme, widgets, App, Context, Event, Rect, Ui};
+use app_sdk::{
+    app, app_abi, format_into, host, icons, theme, widgets, App, Context, Event, Rect, Ui,
+};
+
+/// 这个包自己的颜色，与 `tools/build_apps.py` 里 nas-monitor 那条目的 `#705CF0` 是同一个。
+const ACCENT: app_sdk::ui::Color = 0x0070_5CF0;
+
+/// 页头右上那颗「重新读取」。
+const REFRESH: Rect = Rect::new(318.0, 22.0, 144.0, 44.0);
 
 /// 一行的高度，也是这一页排版的单位。
 const ROW: f32 = 34.0;
@@ -135,11 +143,9 @@ impl App for Monitor {
     }
 
     fn update(&mut self, _event: Event, context: &mut Context) {
-        let refresh = Rect::new(18.0, 404.0, 444.0, 56.0);
+        self.refresh_pressed = context.input.pressing(REFRESH);
 
-        self.refresh_pressed = context.input.pressing(refresh);
-
-        if context.tapped(refresh) {
+        if context.tapped(REFRESH) {
             host::nas_refresh();
         }
     }
@@ -168,39 +174,37 @@ impl App for Monitor {
             }
         }
 
-        ui.text(24.0, 28.0, "服务器", 22.0, theme::MUTED);
-        ui.text_in(
-            Rect::new(24.0, 24.0, 432.0, 28.0),
+        // 页头：副标题就是这一台的状态 —— 内置版把它放在抬头右边，而抬头本来就该回答「它在
+        // 线吗」。
+        widgets::page_header(
+            ui,
+            Rect::new(18.0, 18.0, 288.0, 44.0),
+            icons::DNS,
+            ACCENT,
+            "服务器",
             self.state(),
-            20.0,
-            if self.status == app_abi::nas::ONLINE {
-                theme::OK
-            } else {
-                theme::DANGER
-            },
-            app_abi::Align::Right,
+        );
+
+        widgets::pill(
+            ui,
+            REFRESH,
+            "重新读取",
+            icons::REFRESH,
+            ACCENT,
+            self.refresh_pressed,
         );
 
         if self.status != app_abi::nas::ONLINE {
-            ui.text_centered(
-                Rect::new(18.0, 200.0, 444.0, 60.0),
+            widgets::empty(
+                ui,
+                Rect::new(90.0, 200.0, 340.0, 90.0),
+                icons::DNS,
                 if self.status == app_abi::nas::UNCONFIGURED {
                     "在设置里填一台机器"
                 } else {
                     self.fault()
                 },
-                22.0,
                 theme::MUTED,
-            );
-
-            widgets::button(
-                ui,
-                Rect::new(18.0, 404.0, 444.0, 56.0),
-                "重新读取",
-                24.0,
-                theme::SURFACE_HIGH,
-                theme::TEXT,
-                self.refresh_pressed,
             );
 
             return;
@@ -219,7 +223,7 @@ impl App for Monitor {
                 ui,
                 Rect::new(24.0, y + 26.0, 432.0, 10.0),
                 self.cpu as f32 / 10_000.0,
-                theme::ACCENT,
+                ACCENT,
             );
 
             y += 48.0;
@@ -243,14 +247,14 @@ impl App for Monitor {
                 ui,
                 Rect::new(24.0, y + 26.0, 432.0, 10.0),
                 used as f32 / total as f32,
-                theme::ACCENT,
+                ACCENT,
             );
 
             y += 48.0;
         }
 
         // 每行一个自己的缓冲区：格式化借走缓冲区，而上一行的字还在用它。
-        let row = |index: usize| Rect::new(24.0, y + index as f32 * ROW, 432.0, 24.0);
+        let row = |index: usize| Rect::new(18.0, y + index as f32 * ROW, 444.0, 30.0);
 
         // 温度有可能读不到：一台说不上来自己多少度的机器不是一台坏了的机器，所以这一行宁可
         // 写「读不到」也不写 0 度。
@@ -263,21 +267,54 @@ impl App for Monitor {
             format_into!(buffer, "{}°C", temperature / 100)
         };
 
-        widgets::key_value(ui, row(0), "温度", value, 20.0);
+        widgets::row(
+            ui,
+            row(0),
+            icons::THERMOSTAT,
+            ACCENT,
+            "温度",
+            "",
+            value,
+            false,
+            theme::SURFACE,
+            None,
+        );
 
         let mut storage = [0u8; 24];
         let mut buffer = app_sdk::text::Buf::new(&mut storage);
         let received = self.received;
         let value = format_into!(buffer, "{received} B/s");
 
-        widgets::key_value(ui, row(1), "网络下行", value, 20.0);
+        widgets::row(
+            ui,
+            row(1),
+            icons::FILE_DOWNLOAD,
+            ACCENT,
+            "网络下行",
+            "",
+            value,
+            false,
+            theme::SURFACE,
+            None,
+        );
 
         let mut storage = [0u8; 24];
         let mut buffer = app_sdk::text::Buf::new(&mut storage);
         let sent = self.sent;
         let value = format_into!(buffer, "{sent} B/s");
 
-        widgets::key_value(ui, row(2), "网络上行", value, 20.0);
+        widgets::row(
+            ui,
+            row(2),
+            icons::ARROW_UPWARD,
+            ACCENT,
+            "网络上行",
+            "",
+            value,
+            false,
+            theme::SURFACE,
+            None,
+        );
 
         let mut storage = [0u8; 24];
         let mut buffer = app_sdk::text::Buf::new(&mut storage);
@@ -285,7 +322,18 @@ impl App for Monitor {
         let minutes = (self.uptime / 60) % 60;
         let value = format_into!(buffer, "{hours} 小时 {minutes} 分");
 
-        widgets::key_value(ui, row(3), "开机", value, 20.0);
+        widgets::row(
+            ui,
+            row(3),
+            icons::SCHEDULE,
+            ACCENT,
+            "开机",
+            "",
+            value,
+            false,
+            theme::SURFACE,
+            None,
+        );
 
         y += 4.0 * ROW + 8.0;
 
@@ -320,15 +368,6 @@ impl App for Monitor {
 
         ui.text(24.0, 472.0, note, 13.0, theme::MUTED);
 
-        widgets::button(
-            ui,
-            Rect::new(18.0, 404.0, 444.0, 56.0),
-            "重新读取",
-            24.0,
-            theme::SURFACE_HIGH,
-            theme::TEXT,
-            self.refresh_pressed,
-        );
     }
 }
 

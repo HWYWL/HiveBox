@@ -60,6 +60,7 @@
 extern crate std;
 
 pub mod host;
+pub mod icons;
 pub mod input;
 pub mod runtime;
 pub mod text;

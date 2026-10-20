@@ -15,7 +15,21 @@
 
 #![no_std]
 
-use app_sdk::{app, app_abi, format_into, host, theme, widgets, App, Context, Event, Rect, Ui};
+use app_sdk::{
+    app, app_abi, format_into, host, icons, theme, widgets, App, Context, Event, Rect, Ui,
+};
+
+/// 这个包自己的颜色，与 `tools/build_apps.py` 里 wifi-map 那条目的 `#00897B` 是同一个。
+const ACCENT: app_sdk::ui::Color = 0x0000_897B;
+
+/// 右上角那颗「重新扫描」，与页面底部那两个翻页的是同一套矩形。
+const RESCAN: Rect = Rect::new(318.0, 22.0, 144.0, 44.0);
+
+/// 网络列表一屏四行。
+const ROWS: usize = 4;
+
+const PREV: Rect = Rect::new(18.0, 416.0, 140.0, 48.0);
+const NEXT: Rect = Rect::new(322.0, 416.0, 140.0, 48.0);
 
 /// 2.4 GHz 的信道。13 是这一带能用的最后一条（14 只在日本，而且只给旧制式）。
 const CHANNELS: usize = 13;
@@ -52,6 +66,16 @@ struct WifiMap {
     count: usize,
     /// 每条信道上有几个网络，下标 0 是信道 1。
     per_channel: [u8; CHANNELS],
+    /// 每条信道承多少压力：不只是自己这条上有几个，还有隔着一两条的那些 —— 一个 20 MHz 的
+    /// 网络是占着旁边两条的。
+    pressure: [u32; CHANNELS],
+    /// 建议换到哪条上去，0 是没有建议（一个网络也没扫到）。
+    suggested: usize,
+    /// 网络列表翻到第几页：一屏四行，三十二个网络是八屏。
+    page: usize,
+    list_pressed: Option<usize>,
+    /// 手指正按着哪个翻页按钮。
+    page_pressed: Option<Rect>,
     /// 抄过了没有：一个扫描只会抄一次，重扫时清零。
     captured: bool,
     /// 这一帧的扫描状态，以及上一帧的：状态从「在扫」变成「扫完」的那一帧才去抄。
@@ -127,6 +151,60 @@ impl WifiMap {
         }
 
         self.captured = true;
+        self.page = 0;
+        self.measure();
+    }
+
+    /// 每条信道承多少压力，以及建议换到哪一条上去。
+    ///
+    /// 一个 20 MHz 的网络是占着旁边那两条的：隔一条还有一大半在压着，隔四条才真的没有。所以
+    /// 压力是把每个网络按距离摊到旁边的信道上，而不是数自己这条上有几个 —— 数个数只看得见
+    /// 两个网络正好撞在同一条上的那种拥挤。
+    fn measure(&mut self) {
+        self.pressure = [0; CHANNELS];
+
+        for index in 0..self.count {
+            let ap = self.aps[index];
+
+            if ap.channel < 1 || ap.channel > CHANNELS as u32 {
+                continue;
+            }
+
+            let at = ap.channel as usize - 1;
+
+            for other in 0..CHANNELS {
+                let distance = if other > at { other - at } else { at - other };
+
+                self.pressure[other] += overlap(distance);
+            }
+        }
+
+        // 建议只在 1、6、11 里挑：只有这三条彼此不重叠，而一条「不挤但和谁都撞」的信道是要
+        // 不得的。一个网络也没有的时候不给建议。
+        let mut suggested = 0usize;
+        let mut least = u32::MAX;
+
+        for channel in [1usize, 6, 11] {
+            let pressure = self.pressure[channel - 1];
+
+            if pressure < least {
+                least = pressure;
+                suggested = channel;
+            }
+        }
+
+        self.suggested = if self.count == 0 { 0 } else { suggested };
+    }
+}
+
+/// 隔这么远，一个 20 MHz 的网络还压着多少。整数权重：全压是 4，隔四条就是 0。
+fn overlap(distance: usize) -> u32 {
+    match distance {
+        0 => 4,
+        1 => 3,
+        2 => 2,
+        3 => 1,
+        _ => 0,
     }
 }
 
@@ -163,7 +241,12 @@ impl App for WifiMap {
             ssid: [0; 32],
             ssid_len: 0,
             rssi: 0,
+            pressure: [0; CHANNELS],
+            suggested: 0,
+            page: 0,
             rescan_pressed: false,
+            list_pressed: None,
+            page_pressed: None,
         };
 
         host::wifi_scan_start();
@@ -172,13 +255,31 @@ impl App for WifiMap {
     }
 
     fn update(&mut self, _event: Event, context: &mut Context) {
-        let rescan = Rect::new(18.0, 404.0, 444.0, 56.0);
+        self.rescan_pressed = context.input.pressing(RESCAN);
+        self.list_pressed = None;
+        self.page_pressed = None;
 
-        self.rescan_pressed = context.input.pressing(rescan);
-
-        if context.tapped(rescan) {
+        if context.tapped(RESCAN) {
             self.captured = false;
             host::wifi_scan_start();
+            return;
+        }
+
+        // 翻页：一屏四行，三十二个网络是八屏 —— 看不到第二屏的列表是四个网络的列表。
+        if context.input.pressing(PREV) {
+            self.page_pressed = Some(PREV);
+        }
+
+        if context.tapped(PREV) && self.page > 0 {
+            self.page -= 1;
+        }
+
+        if context.input.pressing(NEXT) {
+            self.page_pressed = Some(NEXT);
+        }
+
+        if context.tapped(NEXT) && (self.page + 1) * ROWS < self.count {
+            self.page += 1;
         }
     }
 
@@ -200,44 +301,120 @@ impl App for WifiMap {
             self.ssid_len = len;
         }
 
-        ui.text(24.0, 28.0, "信道地图", 22.0, theme::MUTED);
+        // 页头：图标、名字，底下是这次扫描的进展。
+        let mut header = [0u8; 32];
+        let mut buffer = app_sdk::text::Buf::new(&mut header);
 
-        // 十三根柱子。高度是这条信道上的网络数，最多画到四格：第五个网络和第五十个网络在
-        // 这张图上要说同一句话 —— 这条信道满了。
-        let chart = Rect::new(18.0, 66.0, 444.0, 170.0);
+        let subtitle = match self.scan {
+            app_abi::scan::SCANNING => "正在扫描",
+            app_abi::scan::ERROR => "扫描失败",
+            app_abi::scan::DENIED => "这个包没有 Wi-Fi 权限",
+            _ if !self.captured => "还没有扫描结果",
+            _ => {
+                let count = self.count;
+                format_into!(buffer, "扫到 {count} 个网络")
+            }
+        };
+
+        widgets::page_header(
+            ui,
+            Rect::new(18.0, 18.0, 288.0, 44.0),
+            icons::WIFI_FIND,
+            ACCENT,
+            "信道地图",
+            subtitle,
+        );
+
+        widgets::pill(
+            ui,
+            RESCAN,
+            "重新扫描",
+            icons::REFRESH,
+            if self.scan == app_abi::scan::SCANNING {
+                theme::SURFACE_HIGH
+            } else {
+                ACCENT
+            },
+            self.rescan_pressed,
+        );
+
+        // 建议信道：这一页存在的理由不是画一张图，而是说出「换到哪一条上去」。
+        let advice = Rect::new(18.0, 76.0, 444.0, 60.0);
+        widgets::card(ui, advice, theme::SURFACE);
+
+        if self.suggested > 0 {
+            let mut storage = [0u8; 24];
+            let mut buffer = app_sdk::text::Buf::new(&mut storage);
+            let channel = self.suggested;
+            let suggestion = format_into!(buffer, "建议换到第 {channel} 信道");
+
+            ui.icon(advice.x + 18.0, advice.y + 18.0, 24.0, ACCENT, icons::ROUTER);
+            ui.text(advice.x + 56.0, advice.y + 12.0, suggestion, 24.0, theme::TEXT);
+            ui.text_in(
+                Rect::new(advice.x + 16.0, advice.y + 40.0, advice.width - 32.0, 18.0),
+                "1、6、11 互不重叠，只在这三条里挑",
+                13.0,
+                theme::MUTED,
+                app_abi::Align::Right,
+            );
+        } else {
+            ui.text(
+                advice.x + 18.0,
+                advice.y + 22.0,
+                "扫到网络之后，这里给出建议的信道",
+                18.0,
+                theme::MUTED,
+            );
+        }
+
+        // 十三根柱子。高度是这条信道承的压力，而不是它上面有几个网络：一个 20 MHz 的网络是
+        // 占着旁边两条的，只数自己这条上的，看不见那种拥挤。
+        let chart = Rect::new(18.0, 144.0, 444.0, 152.0);
         widgets::card(ui, chart, theme::SURFACE);
+
+        widgets::section(
+            ui,
+            Rect::new(chart.x + 16.0, chart.y + 12.0, chart.width - 32.0, 22.0),
+            icons::BAR_CHART,
+            ACCENT,
+            "信道压力",
+            "20 MHz 重叠",
+        );
 
         let gap = 6.0;
         let width = (chart.width - 16.0 - gap * (CHANNELS - 1) as f32) / CHANNELS as f32;
-        let busiest = self.per_channel.iter().copied().max().unwrap_or(0).max(4) as usize;
+        let peak = self.pressure.iter().copied().max().unwrap_or(0).max(4) as f32;
+        let floor = chart.bottom() - 22.0;
 
         for channel in 0..CHANNELS {
             let count = self.per_channel[channel] as usize;
-            let height = (chart.height - 40.0) * (count.min(4) as f32 / 4.0);
+            let load = self.pressure[channel] as f32;
+            let height = (floor - (chart.y + 42.0)) * (load / peak);
             let x = chart.x + 8.0 + channel as f32 * (width + gap);
-            let bar = Rect::new(x, chart.bottom() - 24.0 - height, width, height.max(2.0));
+            let bar = Rect::new(x, floor - height, width, height.max(2.0));
 
-            ui.rounded_rect(
-                bar,
-                3.0,
-                if count >= CROWDED {
-                    theme::DANGER
-                } else if count > 0 {
-                    theme::ACCENT
-                } else {
-                    theme::SURFACE_HIGH
-                },
-            );
+            // 建议的那条画成绿的：这一页给的答案，应该在图上看得见。
+            let color = if self.suggested == channel + 1 {
+                theme::OK
+            } else if count >= CROWDED {
+                theme::DANGER
+            } else if count > 0 {
+                ACCENT
+            } else {
+                theme::SURFACE_HIGH
+            };
 
-            if count > busiest / 2 || count >= CROWDED {
+            ui.rounded_rect(bar, 3.0, color);
+
+            if count > 0 {
                 let mut storage = [0u8; 4];
                 let mut buffer = app_sdk::text::Buf::new(&mut storage);
                 let number = format_into!(buffer, "{}", count);
 
                 ui.text_centered(
-                    Rect::new(x, bar.y - 20.0, width, 18.0),
+                    Rect::new(x, bar.y - 17.0, width, 16.0),
                     number,
-                    14.0,
+                    12.0,
                     theme::TEXT,
                 );
             }
@@ -246,93 +423,101 @@ impl App for WifiMap {
             let mut buffer = app_sdk::text::Buf::new(&mut storage);
             let label = format_into!(buffer, "{}", channel + 1);
 
-            ui.text_centered(
-                Rect::new(x, chart.bottom() - 22.0, width, 18.0),
-                label,
-                13.0,
+            ui.text_centered(Rect::new(x, floor, width, 18.0), label, 12.0, theme::MUTED);
+        }
+
+        // 网络列表：一屏四行，翻页在下面。强的排前面 —— 换信道要知道的就是谁最响。
+        let list = Rect::new(18.0, 304.0, 444.0, 104.0);
+        widgets::card(ui, list, theme::SURFACE);
+
+        let start = self.page * ROWS;
+        let shown = (self.count - start).min(ROWS);
+
+        if shown == 0 {
+            widgets::empty(
+                ui,
+                Rect::new(list.x + 100.0, list.y + 28.0, 300.0, 70.0),
+                icons::WIFI,
+                "还没有扫到网络",
                 theme::MUTED,
             );
         }
 
-        // 状态行：扫完了就把最挤的那条信道说出来 —— 这张图的用处就在这一句上。
-        let mut storage = [0u8; 48];
-        let mut buffer = app_sdk::text::Buf::new(&mut storage);
-
-        let status = match self.scan {
-            app_abi::scan::SCANNING => "正在扫描",
-            app_abi::scan::ERROR => "扫描失败",
-            app_abi::scan::DENIED => "这个包没有 Wi-Fi 权限",
-            _ if !self.captured => "还没有扫描结果",
-            _ => {
-                let mut best = 0usize;
-                let mut busiest = 0u8;
-
-                for (channel, count) in self.per_channel.iter().copied().enumerate() {
-                    if count > busiest {
-                        busiest = count;
-                        best = channel + 1;
-                    }
-                }
-
-                if busiest == 0 {
-                    "没扫到网络"
-                } else {
-                    format_into!(buffer, "共 {} 个网络，第 {} 信道最挤", self.count, best)
-                }
-            }
-        };
-
-        ui.text(24.0, 252.0, status, 18.0, theme::MUTED);
-
-        if self.connected && self.ssid_len > 0 {
-            let name = core::str::from_utf8(&self.ssid[..self.ssid_len]).unwrap_or("");
-            let rssi = self.rssi;
-
-            let mut storage = [0u8; 64];
-            let mut buffer = app_sdk::text::Buf::new(&mut storage);
-            let line = format_into!(buffer, "已连接 {name} {rssi} dBm");
-
-            ui.text(24.0, 280.0, line, 18.0, theme::OK);
-        }
-
-        // 最强的几个：点不出来（这一版没有键盘），但「谁最响」就是换信道时要知道的全部。
-        let list = Rect::new(18.0, 306.0, 444.0, 92.0);
-        widgets::card(ui, list, theme::SURFACE);
-
-        let shown = self.count.min(3);
-
         for index in 0..shown {
-            let ap = self.aps[index];
-            let row = Rect::new(list.x + 12.0, list.y + 8.0 + index as f32 * 28.0, list.width - 24.0, 26.0);
-
-            let mut storage = [0u8; 64];
-            let mut buffer = app_sdk::text::Buf::new(&mut storage);
-            let line = format_into!(
-                buffer,
-                "{channel:>2}  {name}  {rssi} dBm{lock}",
-                channel = ap.channel,
-                name = ap.name(),
-                rssi = ap.rssi,
-                // 一个字而不是一把锁的图：面板的字库里有「锁」，没有 emoji。
-                lock = if ap.secure != 0 { " 锁" } else { "" }
+            let ap = self.aps[start + index];
+            let rect = Rect::new(
+                list.x + 10.0,
+                list.y + 8.0 + index as f32 * 24.0,
+                list.width - 20.0,
+                22.0,
             );
 
-            ui.text(row.x, row.y, line, 16.0, theme::TEXT);
-        }
+            let mut storage = [0u8; 40];
+            let mut buffer = app_sdk::text::Buf::new(&mut storage);
+            let rssi = ap.rssi;
+            let channel = ap.channel;
 
-        if shown == 0 {
-            ui.text_centered(list, "还没有结果", 16.0, theme::MUTED);
+            let value = if ap.secure != 0 {
+                format_into!(buffer, "{rssi} dBm · 信道 {channel} · 锁")
+            } else {
+                format_into!(buffer, "{rssi} dBm · 信道 {channel}")
+            };
+
+            // 信号强弱是这一行的图标：一个「锁」是加密，而换信道要看的是谁最响。
+            let color = if ap.rssi >= -55 {
+                theme::OK
+            } else if ap.rssi >= -75 {
+                ACCENT
+            } else {
+                theme::MUTED
+            };
+
+            widgets::row(
+                ui,
+                rect,
+                icons::SIGNAL_CELLULAR_ALT,
+                color,
+                ap.name(),
+                "",
+                value,
+                self.list_pressed == Some(index),
+                theme::SURFACE_HIGH,
+                None,
+            );
         }
 
         widgets::button(
             ui,
-            Rect::new(18.0, 404.0, 444.0, 56.0),
-            "重新扫描",
-            24.0,
-            theme::SURFACE_HIGH,
+            PREV,
+            "上一页",
+            18.0,
+            if self.page > 0 { ACCENT } else { theme::SURFACE_HIGH },
             theme::TEXT,
-            self.rescan_pressed,
+            self.page_pressed == Some(PREV),
         );
+        widgets::button(
+            ui,
+            NEXT,
+            "下一页",
+            18.0,
+            if (self.page + 1) * ROWS < self.count {
+                ACCENT
+            } else {
+                theme::SURFACE_HIGH
+            },
+            theme::TEXT,
+            self.page_pressed == Some(NEXT),
+        );
+
+        if self.count > 0 {
+            let mut storage = [0u8; 24];
+            let mut buffer = app_sdk::text::Buf::new(&mut storage);
+            let page = self.page + 1;
+            let pages = (self.count + ROWS - 1) / ROWS;
+            let note = format_into!(buffer, "{page} / {pages}");
+
+            ui.text_centered(Rect::new(158.0, 416.0, 164.0, 48.0), note, 18.0, theme::MUTED);
+        }
     }
 }
 

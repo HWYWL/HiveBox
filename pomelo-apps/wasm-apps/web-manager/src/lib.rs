@@ -14,7 +14,13 @@
 
 #![no_std]
 
-use app_sdk::{app, host, theme, widgets, App, Context, Event, Rect, Ui};
+use app_sdk::{app, host, icons, theme, widgets, App, Context, Event, Rect, Ui};
+
+/// 这个包自己的颜色，与 `tools/build_apps.py` 里 web-manager 那条目的 `#2384F5` 是同一个。
+const ACCENT: app_sdk::ui::Color = 0x0023_84F5;
+
+/// 那颗开关：页面上一个矩形，按下与抬起的判断都用它。
+const SWITCH: Rect = Rect::new(18.0, 316.0, 444.0, 68.0);
 
 /// 开关按下去之后不要立刻相信它：板子才是权威，所以每帧都读一次状态。
 struct WebManager {
@@ -58,11 +64,9 @@ impl App for WebManager {
     }
 
     fn update(&mut self, _event: Event, context: &mut Context) {
-        let switch = Rect::new(18.0, 300.0, 444.0, 64.0);
+        self.pressed = context.input.pressing(SWITCH);
 
-        self.pressed = context.input.pressing(switch);
-
-        if context.tapped(switch) {
+        if context.tapped(SWITCH) {
             host::web_set(!self.running);
         }
     }
@@ -90,17 +94,33 @@ impl App for WebManager {
             None => self.code = -1,
         }
 
-        ui.text(24.0, 28.0, "网页管理", 22.0, theme::MUTED);
+        // 标题居中、用这个包自己的颜色，下面是它这一页是关于什么的：内置版是这么开的头。
+        ui.text_centered(Rect::new(0.0, 26.0, 480.0, 40.0), "网页管理", 28.0, ACCENT);
+        ui.text_centered(
+            Rect::new(0.0, 70.0, 480.0, 24.0),
+            "局域网文件与网络管理",
+            16.0,
+            theme::MUTED,
+        );
 
-        let card = Rect::new(18.0, 84.0, 444.0, 180.0);
+        let card = Rect::new(18.0, 116.0, 444.0, 176.0);
         widgets::card(ui, card, theme::SURFACE);
 
-        ui.text_centered(
-            Rect::new(card.x, card.y + 32.0, card.width, 48.0),
-            self.state(),
-            40.0,
-            if self.running { theme::OK } else { theme::MUTED },
+        // 状态：一个勾或者一个圈，然后是「运行中」那句话 —— 图标是这一行最先被看到的东西。
+        let state_color = if self.running { theme::OK } else { theme::MUTED };
+
+        ui.icon(
+            card.x + 28.0,
+            card.y + 36.0,
+            34.0,
+            state_color,
+            if self.running {
+                icons::CHECK_CIRCLE
+            } else {
+                icons::PUBLIC
+            },
         );
+        ui.text(card.x + 76.0, card.y + 40.0, self.state(), 30.0, state_color);
 
         // 地址，或者没有地址的理由：开着但没有地址是一件事（还没连上 Wi-Fi），关着没有地址是
         // 另一件（开了才有）。这两句话不一样，页面上也就分开写。
@@ -112,32 +132,40 @@ impl App for WebManager {
             "启动后即可在浏览器中打开"
         };
 
-        ui.text_centered(
-            Rect::new(card.x, card.y + 96.0, card.width, 32.0),
-            detail,
-            20.0,
-            theme::TEXT,
+        ui.text(card.x + 28.0, card.y + 100.0, detail, 18.0, theme::TEXT);
+        ui.text(
+            card.x + 28.0,
+            card.y + 132.0,
+            "在浏览器里打开它，就能管理卡上的文件与网络",
+            14.0,
+            theme::MUTED,
         );
 
         widgets::button(
             ui,
-            Rect::new(18.0, 300.0, 444.0, 64.0),
-            if self.running { "停止" } else { "启动" },
+            SWITCH,
+            if self.running { "停止服务器" } else { "启动服务器" },
             26.0,
-            if self.running { theme::DANGER } else { theme::ACCENT },
+            if self.running { theme::DANGER } else { ACCENT },
             theme::TEXT,
             self.pressed,
         );
 
         // 这句话跟着开关，因为它就是这个开关的意思。
-        ui.text(
-            24.0,
-            392.0,
-            "同一个网络里的任何人都能读写这台盒子的文件、改它的网络",
-            15.0,
+        widgets::note(
+            ui,
+            Rect::new(24.0, 404.0, 432.0, 20.0),
+            icons::INFO,
+            "服务没有密码，请仅在可信网络中开启",
             theme::MUTED,
         );
-        ui.text(24.0, 418.0, "服务没有密码，不用时请关掉", 15.0, theme::MUTED);
+        widgets::note(
+            ui,
+            Rect::new(24.0, 428.0, 432.0, 20.0),
+            icons::WARNING,
+            "同一网络里的任何人都能读写这台盒子的文件",
+            theme::MUTED,
+        );
     }
 }
 

@@ -20,7 +20,20 @@
 
 #![no_std]
 
-use app_sdk::{app, app_abi, format_into, host, theme, widgets, App, Context, Event, Rect, Ui};
+use app_sdk::{
+    app, app_abi, format_into, host, icons, theme, widgets, App, Context, Event, Rect, Ui,
+};
+
+/// 这个包自己的颜色，与 `tools/build_apps.py` 里 weather 那条目的 `#0288D1` 是同一个 —— 天空
+/// 的那种蓝，也是内置版这一页的颜色。
+const ACCENT: app_sdk::ui::Color = 0x0002_88D1;
+
+/// 最高温的那个橙与最低温的那个蓝：两个数字并排，靠颜色分，而不是靠一个「高 / 低」字样。
+const HOT: app_sdk::ui::Color = 0x00FF_8F00;
+const COLD: app_sdk::ui::Color = 0x0040_9DDC;
+
+/// 「重新加载」那颗按钮：页头右上的胶囊，与页面底部那一条，是同一个矩形。
+const RELOAD: Rect = Rect::new(318.0, 22.0, 144.0, 44.0);
 
 /// 预报要几天。五天是一屏能看完的数目，而最后一行在屏幕外的预报是四天的预报。
 const DAYS: usize = 5;
@@ -264,6 +277,35 @@ fn describe(code: i32) -> &'static str {
     }
 }
 
+/// 天气码的那个图标。同一片天说两遍：图标是这一页最先被看到的东西，那句话是它不确定时的
+/// 解释 —— 内置版也是这个顺序。
+fn glyph(code: i32) -> char {
+    match code {
+        0 => icons::WB_SUNNY,
+        1 | 2 => icons::PARTLY_CLOUDY_DAY,
+        3 => icons::CLOUD,
+        45 | 48 => icons::FOGGY,
+        51..=67 | 80..=82 => icons::RAINY,
+        71..=77 | 85 | 86 => icons::AC_UNIT,
+        95 | 96 | 99 => icons::THUNDERSTORM,
+        _ => icons::CLOUD,
+    }
+}
+
+/// 失败之后该怎么办。内置版每一种失败都带一句，而只说原因不说办法的页面，是把人留在原地。
+fn advice(fault: u32) -> &'static str {
+    match fault {
+        app_abi::fault::CLOCK => "到设置里校准时间，再试一次",
+        app_abi::fault::UNREACHABLE | app_abi::fault::TIMEOUT => {
+            "到设置里检查 Wi-Fi，再试一次"
+        }
+        app_abi::fault::TOO_LARGE | app_abi::fault::TLS => "这是服务那一侧的事，过一会儿再试",
+        app_abi::fault::STORAGE => "内部存储满了，先删掉一点东西",
+        app_abi::fault::UNSUPPORTED => "这个固件没有把网络交给应用",
+        _ => "连上网，再试一次",
+    }
+}
+
 /// 失败的那句话：网络、时钟、地址、超时、握手、太大、写不进存储、没有这个客户端。
 fn fault_text(fault: u32) -> &'static str {
     match fault {
@@ -441,11 +483,9 @@ impl App for Weather {
     }
 
     fn update(&mut self, _event: Event, context: &mut Context) {
-        let reload = Rect::new(18.0, 404.0, 444.0, 56.0);
+        self.reload_pressed = context.input.pressing(RELOAD);
 
-        self.reload_pressed = context.input.pressing(reload);
-
-        if context.tapped(reload) {
+        if context.tapped(RELOAD) {
             host::http_cancel();
             self.locate();
         }
@@ -477,103 +517,178 @@ impl App for Weather {
             }
         }
 
-        ui.text(24.0, 28.0, "天气", 22.0, theme::MUTED);
+        // 页头：这一页的图标与名字，下面是它正在看的那座城市。
+        widgets::page_header(
+            ui,
+            Rect::new(18.0, 18.0, 288.0, 44.0),
+            icons::PARTLY_CLOUDY_DAY,
+            ACCENT,
+            "天气",
+            if self.city().is_empty() {
+                "正在定位"
+            } else {
+                self.city()
+            },
+        );
 
-        if !self.city().is_empty() {
-            ui.text_in(
-                Rect::new(24.0, 24.0, 432.0, 28.0),
-                self.city(),
-                20.0,
-                theme::MUTED,
-                app_abi::Align::Right,
-            );
-        }
+        widgets::pill(
+            ui,
+            RELOAD,
+            "刷新",
+            icons::REFRESH,
+            if self.stage == Stage::Locating || self.stage == Stage::Forecast {
+                theme::SURFACE_HIGH
+            } else {
+                ACCENT
+            },
+            self.reload_pressed,
+        );
 
         match self.stage {
             Stage::Locating | Stage::Forecast => {
                 let waiting = host::http_state() == app_abi::state::RUNNING;
 
-                ui.text_centered(
-                    Rect::new(18.0, 180.0, 444.0, 60.0),
+                widgets::empty(
+                    ui,
+                    Rect::new(150.0, 200.0, 240.0, 80.0),
+                    icons::PARTLY_CLOUDY_DAY,
                     if waiting && self.stage == Stage::Forecast {
                         "正在取预报（可能在排队）"
                     } else {
                         "正在定位"
                     },
-                    22.0,
                     theme::MUTED,
                 );
             }
             Stage::Failed => {
-                ui.text_centered(
-                    Rect::new(18.0, 180.0, 444.0, 60.0),
+                widgets::empty(
+                    ui,
+                    Rect::new(120.0, 190.0, 300.0, 90.0),
+                    icons::CLOUD_OFF,
                     fault_text(self.fault),
-                    22.0,
                     theme::DANGER,
+                );
+                ui.text_centered(
+                    Rect::new(18.0, 250.0, 444.0, 30.0),
+                    advice(self.fault),
+                    18.0,
+                    theme::MUTED,
                 );
             }
             Stage::Done => {
+                // 「现在」这张卡：一个图标、一个温度，右边是湿度与风速。
+                let now = Rect::new(18.0, 78.0, 444.0, 152.0);
+                widgets::card(ui, now, theme::SURFACE);
+
+                widgets::section(
+                    ui,
+                    Rect::new(now.x + 16.0, now.y + 14.0, now.width - 32.0, 22.0),
+                    icons::DEVICE_THERMOSTAT,
+                    ACCENT,
+                    "现在",
+                    "Open-Meteo",
+                );
+
+                ui.icon(now.x + 20.0, now.y + 56.0, 68.0, ACCENT, glyph(self.code));
+
                 let mut storage = [0u8; 12];
                 let mut buffer = app_sdk::text::Buf::new(&mut storage);
                 let degrees = format_into!(buffer, "{}°", self.temperature);
 
                 widgets::reading(
                     ui,
-                    Rect::new(24.0, 66.0, 240.0, 110.0),
+                    Rect::new(now.x + 100.0, now.y + 52.0, 200.0, 76.0),
                     degrees,
                     describe(self.code),
-                    64.0,
+                    56.0,
                 );
 
                 let mut storage = [0u8; 24];
                 let mut buffer = app_sdk::text::Buf::new(&mut storage);
                 let humidity = format_into!(buffer, "{}%", self.humidity);
-                widgets::key_value(ui, Rect::new(24.0, 190.0, 432.0, 24.0), "湿度", humidity, 20.0);
+                widgets::metric(
+                    ui,
+                    Rect::new(now.x + 276.0, now.y + 58.0, 152.0, 40.0),
+                    icons::WATER_DROP,
+                    humidity,
+                    "湿度",
+                    22.0,
+                    ACCENT,
+                );
 
                 let mut storage = [0u8; 24];
                 let mut buffer = app_sdk::text::Buf::new(&mut storage);
                 let wind = format_into!(buffer, "{} km/h", self.wind);
-                widgets::key_value(ui, Rect::new(24.0, 220.0, 432.0, 24.0), "风速", wind, 20.0);
+                widgets::metric(
+                    ui,
+                    Rect::new(now.x + 276.0, now.y + 106.0, 152.0, 40.0),
+                    icons::AIR,
+                    wind,
+                    "风速",
+                    22.0,
+                    ACCENT,
+                );
 
-                // 五天：一行一天，最左边是日子，最右边是最高最低。
-                let list = Rect::new(18.0, 258.0, 444.0, 140.0);
-                widgets::card(ui, list, theme::SURFACE);
+                // 「未来几天」：一行一天，图标 + 天气，右边最高温橙、最低温蓝。
+                let days = Rect::new(18.0, 242.0, 444.0, 176.0);
+                widgets::card(ui, days, theme::SURFACE);
+
+                widgets::section(
+                    ui,
+                    Rect::new(days.x + 16.0, days.y + 14.0, days.width - 32.0, 22.0),
+                    icons::CALENDAR_MONTH,
+                    ACCENT,
+                    "未来几天",
+                    "最高 / 最低",
+                );
 
                 for day in 0..DAYS {
                     let row = Rect::new(
-                        list.x + 12.0,
-                        list.y + 8.0 + day as f32 * 26.0,
-                        list.width - 24.0,
+                        days.x + 16.0,
+                        days.y + 44.0 + day as f32 * 25.0,
+                        days.width - 32.0,
                         24.0,
                     );
-
-                    let mut storage = [0u8; 48];
+                    let mut storage = [0u8; 16];
                     let mut buffer = app_sdk::text::Buf::new(&mut storage);
-                    let line = format_into!(
-                        buffer,
-                        "{number}日  {sky}  {high}° / {low}°",
-                        number = self.day_number[day],
-                        sky = describe(self.day_code[day]),
-                        high = self.day_high[day],
-                        low = self.day_low[day]
+
+                    ui.icon(row.x, row.y + 1.0, 20.0, ACCENT, glyph(self.day_code[day]));
+                    ui.text(row.x + 28.0, row.y + 2.0, describe(self.day_code[day]), 18.0, theme::TEXT);
+
+                    buffer.reset();
+                    let number = format_into!(buffer, "{}日", self.day_number[day]);
+                    ui.text(row.x + 108.0, row.y + 2.0, number, 16.0, theme::MUTED);
+
+                    buffer.reset();
+                    let high = format_into!(buffer, "{}°", self.day_high[day]);
+                    ui.text_in(
+                        Rect::new(row.x + 190.0, row.y, 76.0, 22.0),
+                        high,
+                        19.0,
+                        HOT,
+                        app_abi::Align::Right,
                     );
 
-                    ui.text(row.x, row.y, line, 18.0, theme::TEXT);
+                    buffer.reset();
+                    let low = format_into!(buffer, "{}°", self.day_low[day]);
+                    ui.text_in(
+                        Rect::new(row.x + 274.0, row.y, 76.0, 22.0),
+                        low,
+                        19.0,
+                        COLD,
+                        app_abi::Align::Right,
+                    );
                 }
             }
         }
 
-        widgets::button(
+        widgets::note(
             ui,
-            Rect::new(18.0, 404.0, 444.0, 56.0),
-            "重新加载",
-            24.0,
-            theme::SURFACE_HIGH,
-            theme::TEXT,
-            self.reload_pressed,
+            Rect::new(24.0, 436.0, 432.0, 20.0),
+            icons::INFO,
+            "ip-api.com 定位，Open-Meteo 预报",
+            theme::MUTED,
         );
-
-        ui.text(24.0, 472.0, "ip-api.com 定位，Open-Meteo 预报", 13.0, theme::MUTED);
     }
 }
 

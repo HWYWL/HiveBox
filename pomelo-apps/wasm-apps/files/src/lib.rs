@@ -15,7 +15,13 @@
 
 #![no_std]
 
-use app_sdk::{app, app_abi, format_into, host, theme, widgets, App, Context, Event, Rect, Ui};
+use app_sdk::{
+    app, app_abi, format_into, host, icons, theme, widgets, App, Context, Event, Rect, Ui,
+};
+
+/// 这个包自己的颜色，与 `tools/build_apps.py` 里 files 那条目的 `#A66F4A` 是同一个 —— 文件夹
+/// 的那种棕。
+const ACCENT: app_sdk::ui::Color = 0x00A6_6F4A;
 
 /// 两个卷，顺序跟板子上报的一致：内置的在前，卡在后。
 ///
@@ -415,7 +421,15 @@ impl App for Files {
     fn view(&mut self, ui: &mut Ui) {
         ui.clear(theme::BLACK);
 
-        ui.text(24.0, 28.0, "文件管理", 22.0, theme::MUTED);
+        // 页头：副标题就是当前目录 —— 一个人在文件管理器里最先要知道的是「我在哪」。
+        widgets::page_header(
+            ui,
+            Rect::new(18.0, 14.0, 420.0, 40.0),
+            icons::FOLDER,
+            ACCENT,
+            "文件管理",
+            self.cwd(),
+        );
 
         for (index, (name, _)) in VOLUMES.iter().enumerate() {
             let rect = volume_rect(index);
@@ -426,7 +440,7 @@ impl App for Files {
                 name,
                 20.0,
                 if index == self.volume {
-                    theme::ACCENT
+                    ACCENT
                 } else {
                     theme::SURFACE_HIGH
                 },
@@ -435,22 +449,22 @@ impl App for Files {
             );
         }
 
-        // 路径：一个人在文件管理器里最先要知道的是「我在哪」。
-        ui.text(24.0, 126.0, self.cwd(), 16.0, theme::MUTED);
         widgets::divider(ui, Rect::new(18.0, 142.0, 444.0, 1.0));
 
         if !self.listed {
-            ui.text_centered(
-                Rect::new(18.0, 180.0, 444.0, 60.0),
+            widgets::empty(
+                ui,
+                Rect::new(90.0, 180.0, 340.0, 90.0),
+                icons::SD_STORAGE,
                 "这个卷读不到（卡不在槽里？）",
-                20.0,
                 theme::MUTED,
             );
         } else if self.count == 0 {
-            ui.text_centered(
-                Rect::new(18.0, 180.0, 444.0, 60.0),
+            widgets::empty(
+                ui,
+                Rect::new(120.0, 180.0, 280.0, 90.0),
+                icons::FOLDER_OPEN,
                 "这个目录是空的",
-                20.0,
                 theme::MUTED,
             );
         } else {
@@ -462,10 +476,6 @@ impl App for Files {
                 let rect = row_rect(index);
                 let chosen = self.selected == Some(start + index);
 
-                if chosen || self.row_pressed == Some(index) {
-                    ui.rect(rect, theme::SURFACE_HIGH);
-                }
-
                 let mut storage = [0u8; 24];
                 let detail = if entry.is_dir() {
                     "目录"
@@ -473,20 +483,24 @@ impl App for Files {
                     size_text(entry.size, &mut storage)
                 };
 
-                ui.text_in(
-                    Rect::new(rect.x + 8.0, rect.y + 6.0, rect.width - 16.0, 20.0),
-                    entry.name(),
-                    16.0,
-                    if entry.is_dir() { theme::TEXT } else { theme::MUTED },
-                    app_abi::Align::Left,
-                );
+                // 目录是文件夹那个图标，文件是文档那个：一列名字里，图标比后缀先被看见。
+                let (glyph, color) = if entry.is_dir() {
+                    (icons::FOLDER, ACCENT)
+                } else {
+                    (icons::INSERT_DRIVE_FILE, theme::MUTED)
+                };
 
-                ui.text_in(
-                    Rect::new(rect.x + 8.0, rect.y + 6.0, rect.width - 16.0, 20.0),
+                widgets::row(
+                    ui,
+                    rect,
+                    glyph,
+                    color,
+                    entry.name(),
+                    "",
                     detail,
-                    16.0,
-                    theme::MUTED,
-                    app_abi::Align::Right,
+                    self.row_pressed == Some(index),
+                    if chosen { theme::SURFACE_HIGH } else { theme::SURFACE },
+                    if chosen { Some(ACCENT) } else { None },
                 );
             }
 

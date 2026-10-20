@@ -16,7 +16,29 @@
 
 #![no_std]
 
-use app_sdk::{app, format_into, host, theme, widgets, App, Context, Event, Rect, Ui};
+use app_sdk::{
+    app, format_into, host, icons, theme, widgets, App, Context, Event, Rect, Ui,
+};
+
+/// 这个包自己的颜色，与 `tools/build_apps.py` 里 games 那条目的 `#FBC02D` 是同一个。
+const ACCENT: app_sdk::ui::Color = 0x00FB_C02D;
+
+/// 棋盘。滑动是「在棋盘上划一下」，所以这个矩形不只是画的时候用。
+const BOARD: Rect = Rect::new(90.0, 84.0, 300.0, 300.0);
+
+/// 最高分存的地方：一个包只有自己那个小文件，而最高分是要留到下一局的。
+const FILE: &str = "2048.best";
+
+/// 划多远算一次滑动。比这短的位移是手指没拿稳，不是「往上走」。
+const SWIPE: f32 = 24.0;
+
+/// 一个点在不在这个矩形里。
+fn inside(context: &Context, rect: Rect) -> bool {
+    context.input.x >= rect.x
+        && context.input.x <= rect.right()
+        && context.input.y >= rect.y
+        && context.input.y <= rect.bottom()
+}
 
 const SIZE: usize = 4;
 const CELLS: usize = SIZE * SIZE;
@@ -38,6 +60,8 @@ struct Game {
     /// 上一次移动之后有没有格子动过：没有的话不生成新格子，否则连按同一个方向会一直加分。
     moved: bool,
     over: bool,
+    /// 手指落下时在哪：抬起时跟这里比一比，就是一次滑动。
+    drag_from: Option<(f32, f32)>,
     /// 线性同余的状态。
     seed: u32,
     /// 四个方向键里被按着的那个，为了画按下的样子。
@@ -89,6 +113,35 @@ impl Game {
             self.cells[index] = if self.next() % 10 == 0 { 2 } else { 1 };
             return;
         }
+    }
+
+    /// 最高分从包自己的文件里读回来。读不到（第一次玩）就是 0，而一个读坏了的文件也不该让
+    /// 这一局开不起来。
+    fn load_best(&mut self) {
+        let mut buffer = [0u8; 16];
+
+        if let Some(len) = host::file_read(FILE, &mut buffer) {
+            let text = core::str::from_utf8(&buffer[..len.min(buffer.len())]).unwrap_or("");
+            let mut best = 0u32;
+
+            for byte in text.bytes() {
+                match byte {
+                    b'0'..=b'9' => best = best * 10 + (byte - b'0') as u32,
+                    _ => break,
+                }
+            }
+
+            self.best = best;
+        }
+    }
+
+    fn save_best(&self) {
+        let mut buffer = [0u8; 16];
+        let mut out = app_sdk::text::Buf::new(&mut buffer);
+        let best = self.best;
+        let text = format_into!(out, "{best}");
+
+        host::file_write(FILE, text.as_bytes());
     }
 
     fn reset(&mut self) {
@@ -180,6 +233,7 @@ impl Game {
 
         if self.score > self.best {
             self.best = self.score;
+            self.save_best();
         }
 
         if moved {
@@ -240,11 +294,13 @@ impl App for Game {
             best: 0,
             moved: false,
             over: false,
+            drag_from: None,
             seed: (host::now_ms() ^ 0x5F3A) as u32,
             pressed: None,
         };
 
         game.reset();
+        game.load_best();
         let _ = context;
 
         game
@@ -270,6 +326,38 @@ impl App for Game {
             }
         }
 
+        // 在棋盘上划一下也算一步：内置版是这么玩的，四个按钮是手指不那么精确时用的那一种。
+        if context.input.just_down && inside(context, BOARD) {
+            self.drag_from = Some((context.input.x, context.input.y));
+        }
+
+        if context.input.just_up {
+            if let Some((from_x, from_y)) = self.drag_from {
+                let across = context.input.x - from_x;
+                let down = context.input.y - from_y;
+
+                if across.abs() > SWIPE || down.abs() > SWIPE {
+                    let direction = if across.abs() > down.abs() {
+                        if across > 0.0 {
+                            Direction::Right
+                        } else {
+                            Direction::Left
+                        }
+                    } else if down > 0.0 {
+                        Direction::Down
+                    } else {
+                        Direction::Up
+                    };
+
+                    if !self.over {
+                        self.move_to(direction);
+                    }
+                }
+            }
+
+            self.drag_from = None;
+        }
+
         if context.tapped(new_rect()) {
             self.reset();
         }
@@ -278,16 +366,29 @@ impl App for Game {
     fn view(&mut self, ui: &mut Ui) {
         ui.clear(theme::BLACK);
 
-        ui.text(24.0, 28.0, "2048", 22.0, theme::MUTED);
+        // 页头：副标题是最高分 —— 一局玩到一半的人想知道的是「我离最好那次还有多远」。
+        let mut head = [0u8; 24];
+        let mut buffer = app_sdk::text::Buf::new(&mut head);
+        let best = self.best;
+        let subtitle = format_into!(buffer, "最高 {best}");
+
+        widgets::page_header(
+            ui,
+            Rect::new(18.0, 18.0, 200.0, 44.0),
+            icons::SPORTS_ESPORTS,
+            ACCENT,
+            "2048",
+            subtitle,
+        );
 
         let mut storage = [0u8; 16];
         let mut buffer = app_sdk::text::Buf::new(&mut storage);
         let score = format_into!(buffer, "{}", self.score);
 
-        widgets::reading(ui, Rect::new(200.0, 18.0, 160.0, 60.0), score, "分数", 24.0);
+        widgets::reading(ui, Rect::new(250.0, 18.0, 212.0, 60.0), score, "分数", 24.0);
 
         // 棋盘：正方形，居中，下边留一排给方向键。
-        let board = Rect::new(90.0, 84.0, 300.0, 300.0);
+        let board = BOARD;
         widgets::card(ui, board, 0x0022_2228);
 
         let gap = 8.0;

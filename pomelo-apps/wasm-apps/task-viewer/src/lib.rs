@@ -14,7 +14,12 @@
 
 #![no_std]
 
-use app_sdk::{app, app_abi, format_into, host, theme, widgets, App, Context, Event, Rect, Ui};
+use app_sdk::{
+    app, app_abi, format_into, host, icons, theme, widgets, App, Context, Event, Rect, Ui,
+};
+
+/// 这个包自己的颜色，与 `tools/build_apps.py` 里 task-viewer 那条目的 `#00A8BE` 是同一个。
+const ACCENT: app_sdk::ui::Color = 0x0000_A8BE;
 
 /// 一根 meter：它的名字、用了多少、总共多少。
 struct Meter<'a> {
@@ -169,9 +174,18 @@ impl App for TaskViewer {
             }
         }
 
-        ui.text(24.0, 28.0, "任务详情", 22.0, theme::MUTED);
+        // 页头：副标题是固件版本 —— 这一页的下面几行都是「现在这台机器怎么样」，而版本是那句
+        // 话的开头。
+        widgets::page_header(
+            ui,
+            Rect::new(18.0, 18.0, 420.0, 44.0),
+            icons::MONITOR_HEART,
+            ACCENT,
+            "任务详情",
+            self.version(),
+        );
 
-        let mut y = 66.0;
+        let mut y = 84.0;
 
         for meter in self.meters() {
             meter.draw(ui, Rect::new(24.0, y, 432.0, 60.0));
@@ -181,16 +195,37 @@ impl App for TaskViewer {
         widgets::divider(ui, Rect::new(24.0, y - 4.0, 432.0, 1.0));
 
         // 每个数字一个自己的缓冲区：格式化借走缓冲区，而上一行的字还在用它 —— 借不出第二次。
-        let row = |index: usize| Rect::new(24.0, y + 12.0 + index as f32 * 34.0, 432.0, 24.0);
+        let row = |index: usize| Rect::new(18.0, y + 12.0 + index as f32 * 36.0, 444.0, 32.0);
 
-        widgets::key_value(ui, row(0), "固件", self.version(), 20.0);
-        widgets::key_value(ui, row(1), "网络", self.network(), 20.0);
+        widgets::row(
+            ui,
+            row(0),
+            icons::MEMORY,
+            ACCENT,
+            "Wi-Fi",
+            "",
+            self.network(),
+            false,
+            theme::SURFACE,
+            None,
+        );
 
         let mut storage = [0u8; 16];
         let mut buffer = app_sdk::text::Buf::new(&mut storage);
         let battery = format_into!(buffer, "{}%", self.battery);
 
-        widgets::key_value(ui, row(2), "电量", battery, 20.0);
+        widgets::row(
+            ui,
+            row(1),
+            icons::BATTERY_STD,
+            ACCENT,
+            "电量",
+            "",
+            battery,
+            false,
+            theme::SURFACE,
+            None,
+        );
 
         let mut storage = [0u8; 24];
         let mut buffer = app_sdk::text::Buf::new(&mut storage);
@@ -198,15 +233,26 @@ impl App for TaskViewer {
         let minutes = (self.uptime / 60) % 60;
         let uptime = format_into!(buffer, "{hours} 小时 {minutes} 分");
 
-        widgets::key_value(ui, row(3), "开机", uptime, 20.0);
+        widgets::row(
+            ui,
+            row(2),
+            icons::SCHEDULE,
+            ACCENT,
+            "开机",
+            "",
+            uptime,
+            false,
+            theme::SURFACE,
+            None,
+        );
 
         // 最后一行说明这一页能看到什么、看不到什么：ABI 还没把任务表交给应用，与其让人在
         // 这里找一张不存在的表，不如把话说在页面上。
-        ui.text(
-            24.0,
-            468.0,
+        widgets::note(
+            ui,
+            Rect::new(24.0, y + 150.0, 432.0, 20.0),
+            icons::INFO,
             "逐任务的列表还在固件那一侧，未进入 ABI",
-            14.0,
             theme::MUTED,
         );
     }
