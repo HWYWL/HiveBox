@@ -1,4 +1,4 @@
-//! Reading a `.hbapp` file: the container, the metadata inside it, and the icon.
+//! Reading a `.app` file: the container, the metadata inside it, and the icon.
 //!
 //! Two readers live here and they read different amounts on purpose. [`Package::read`] takes the
 //! whole file, because the VM is about to need the module anyway. [`Package::read_meta`] takes the
@@ -306,7 +306,7 @@ mod tests {
     #[test]
     fn metadata_alone_is_read_from_disk_without_the_module() {
         let dir = temp_dir("meta");
-        let path = dir.join("app.hbapp");
+        let path = dir.join("app.app");
         std::fs::write(&path, build(META, &wasm(), b"")).unwrap();
 
         let meta = Package::read_meta(&path).expect("the metadata of a package on disk");
@@ -320,7 +320,7 @@ mod tests {
     #[test]
     fn a_truncated_package_on_disk_is_refused() {
         let dir = temp_dir("truncated");
-        let path = dir.join("app.hbapp");
+        let path = dir.join("app.app");
         let mut bytes = build(META, &wasm(), b"");
         bytes.truncate(bytes.len() - 2);
         std::fs::write(&path, bytes).unwrap();

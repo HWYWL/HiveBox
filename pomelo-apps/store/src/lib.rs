@@ -474,14 +474,22 @@ impl Store {
         let name = self.release_name(&release).to_string();
 
         // The volume is chosen *before* the first byte: the temporary file has to be on the same
-        // filesystem as the install, or the rename that makes an install atomic becomes a copy.
-        let Some(root) = manager::root_for(&self.roots, None, release.size) else {
-            self.prompt = Some(Prompt::report(
-                name,
-                words.no_volume,
-                Tone::Failed,
-                &words,
-            ));
+        // filesystem as the install, or the rename that makes an install atomic becomes a copy. The
+        // volumes are read at the press rather than kept: a card can leave between two of them, and
+        // the room one reports is only true for the moment it was asked.
+        let volumes = self.volumes();
+
+        let Some(root) = manager::root_for(&self.roots, &volumes, None, release.size) else {
+            // Which of the two it is, because what a person does about them has nothing in common:
+            // a board with no filesystem at all cannot install anything, and one whose volumes are
+            // full can install this package as soon as there is room.
+            let detail = if volumes.is_empty() {
+                words.no_volume
+            } else {
+                words.no_space
+            };
+
+            self.prompt = Some(Prompt::report(name, detail, Tone::Failed, &words));
 
             return;
         };
@@ -584,6 +592,7 @@ impl Store {
                 &download.temp,
                 &download.expected,
                 &self.roots,
+                &self.volumes(),
                 Some(download.root.source),
             ),
             // A `404` is a body like any other and lands in the file just as willingly: nothing here
@@ -738,6 +747,25 @@ impl Store {
         }
     }
 
+    /// The mounted filesystems, in the shape the installer asks for them.
+    ///
+    /// Read when it is needed and not kept: a card can leave between two presses, and a free-byte
+    /// count from a minute ago is a number about a volume that no longer has to be the one holding
+    /// the package. No volumes at all is a board that could not say, and the installer then falls
+    /// back to the directories it can see — which is why this is not an error worth showing.
+    fn volumes(&self) -> Vec<manager::Volume> {
+        self.board
+            .storage()
+            .volumes()
+            .unwrap_or_default()
+            .iter()
+            .map(|volume| manager::Volume {
+                mount_point: volume.mount_point.clone(),
+                free_bytes: volume.free_bytes,
+            })
+            .collect()
+    }
+
     /// The page's messages.
     pub fn update(&mut self, message: Message) {
         match message {
@@ -866,6 +894,10 @@ pub struct Words {
     pub empty_updates: &'static str,
     pub unreadable: &'static str,
     pub no_volume: &'static str,
+    /// A volume is mounted but none of them has room for this package. Separate from
+    /// [`Words::no_volume`] because the two have nothing in common to do about them: one is a box
+    /// with no filesystem, the other is a person who has to make room or use the other volume.
+    pub no_space: &'static str,
     pub storage_failed: &'static str,
     pub busy: &'static str,
     pub not_found: &'static str,
@@ -906,6 +938,7 @@ impl Words {
                 empty_updates: "所有应用都是最新的",
                 unreadable: "仓库的清单读不出来",
                 no_volume: "没有可写入的存储",
+                no_space: "存储空间不足",
                 storage_failed: "创建下载目录失败",
                 busy: "网络正忙，稍后再试",
                 not_found: "仓库里没有这个文件",
@@ -941,6 +974,7 @@ impl Words {
                 empty_updates: "Every application is up to date",
                 unreadable: "The repository's manifest could not be read",
                 no_volume: "No writable storage",
+                no_space: "Not enough room on the volume",
                 storage_failed: "Could not create the download directory",
                 busy: "The network is busy, try again",
                 not_found: "The repository does not have that file",

@@ -2,12 +2,12 @@
 """Build the applications that are packages, and put them in `bin/`.
 
 An application is a wasm module plus a metadata document plus an optional icon, and this script is
-the only place that knows how those three become a `.hbapp` file. The container is deliberately
+the only place that knows how those three become a `.app` file. The container is deliberately
 simple — a fixed 32-byte header and four length-prefixed sections — because both sides of it are
 written here: this script packs it and `pomelo-apps/app-abi` reads it.
 
 Usage:
-    python tools/build_apps.py                 # build every package, write bin/
+    python tools/build_apps.py                 # build every package, write bin/apps/
     python tools/build_apps.py --only clock    # one package
     python tools/build_apps.py --dry-run       # say what would be built
     python tools/build_apps.py --out ../dist   # somewhere other than bin/
@@ -266,7 +266,7 @@ class App:
         return meta
 
     def file_name(self) -> str:
-        return f"hivebox-app-{self.id}-{self.version}.hbapp"
+        return f"hivebox-app-{self.id}-{self.version}.app"
 
 
 # The packages this project publishes. A package that is not in this table is not built, which is the
@@ -367,27 +367,31 @@ def pack(app: App, wasm: bytes, icon: bytes) -> bytes:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="构建 .hbapp 应用包")
+    parser = argparse.ArgumentParser(description="构建 .app 应用包")
     parser.add_argument("--only", action="append", default=[], help="只构建指定 id，可重复")
-    parser.add_argument("--out", default=str(ROOT / "bin"), help="输出目录（默认 bin/）")
+    parser.add_argument("--out", default=str(ROOT / "bin"), help="仓库的 bin/ 目录（默认）")
     parser.add_argument("--debug", action="store_true", help="用 debug 配置构建")
     parser.add_argument("--dry-run", action="store_true", help="只打印将要做什么")
     args = parser.parse_args()
 
+    # 包不落在 `bin/` 本身，而落在它的 `apps/` 下：`bin/` 里还躺着合并镜像、OTA 镜像和字库表，
+    # 十几个应用平铺在它们旁边是这个目录读不懂的样子。清单片段留在 `bin/`（`publish_bin.py
+    # --apps` 就在那里找它），下载地址里的那一段目录由 `release::APPS_DIR` 加。
     out = Path(args.out).resolve()
+    packages = out / "apps"
     selected = [app for app in CATALOGUE if not args.only or app.id in args.only]
 
     if not selected:
         raise SystemExit(f"没有匹配的应用：{', '.join(args.only)}")
 
-    out.mkdir(parents=True, exist_ok=True)
+    packages.mkdir(parents=True, exist_ok=True)
     entries = []
 
     for app in selected:
         print(f"[{app.id}] {app.name_zh} {app.version}")
 
         if args.dry_run:
-            print(f"  将会写出 {out / app.file_name()}")
+            print(f"  将会写出 {packages / app.file_name()}")
             continue
 
         wasm_path = cargo_build(app, release=not args.debug)
@@ -396,7 +400,7 @@ def main() -> int:
         icon = encode_icon(app.icon)
         package = pack(app, wasm, icon)
 
-        target = out / app.file_name()
+        target = packages / app.file_name()
         target.write_bytes(package)
 
         digest = hashlib.sha256(package).hexdigest()

@@ -67,8 +67,6 @@ version = "0.1.0"
 dependencies = [
  "app-abi",
  "app-host",
- "calculator",
- "clock",
  "cloud-monitor",
  "files",
  "games",
@@ -223,14 +221,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
-name = "calculator"
-version = "0.1.0"
-dependencies = [
- "iced",
- "pomelo-widgets",
-]
-
-[[package]]
 name = "cc"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -296,16 +286,6 @@ dependencies = [
  "crypto-common 0.2.2",
  "inout 0.2.2",
  "zeroize",
-]
-
-[[package]]
-name = "clock"
-version = "0.1.0"
-dependencies = [
- "iced",
- "pomelo-hal",
- "pomelo-material-symbols",
- "pomelo-widgets",
 ]
 
 [[package]]

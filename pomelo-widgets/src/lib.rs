@@ -35,7 +35,7 @@ pub mod touch_keyboard;
 pub mod transition;
 
 pub use animation::{AnimationController, Curve};
-pub use app::{AppIcon, AppMeta, BitmapIcon};
+pub use app::{icon_named, icon_or, AppIcon, AppMeta, BitmapIcon};
 pub use gesture::{
     gesture_detector, Edge, GestureDetector, PanEndDetails, PanStartDetails, PanUpdateDetails,
     SwipeDirection,

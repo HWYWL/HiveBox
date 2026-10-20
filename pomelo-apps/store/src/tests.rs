@@ -48,7 +48,7 @@ fn package(id: &str, version: &str) -> String {
 fn entry(id: &str, version: &str, body: &str) -> String {
     format!(
         r##"{{"id":"{id}","name":"{id}","name_zh":"{id}","version":"{version}",
-            "file":"hivebox-app-{id}-{version}.hbapp","size":{},"sha256":"{}","abi":1,
+            "file":"hivebox-app-{id}-{version}.app","size":{},"sha256":"{}","abi":1,
             "accent":"#2E9E7B","description":"","glyph":"","permissions":0}}"##,
         body.len(),
         sha256_hex(body.as_bytes())
@@ -70,7 +70,7 @@ fn manifest(apps: &[(&str, &str, &str)]) -> String {
 fn manifest_with_wrong_hash(id: &str, version: &str, body: &str) -> String {
     format!(
         r#"{{"apps":[{{"id":"{id}","name":"{id}","name_zh":"{id}","version":"{version}",
-            "file":"hivebox-app-{id}-{version}.hbapp","size":{},"sha256":"{}"}}]}}"#,
+            "file":"hivebox-app-{id}-{version}.app","size":{},"sha256":"{}"}}]}}"#,
         body.len(),
         "00".repeat(32)
     )

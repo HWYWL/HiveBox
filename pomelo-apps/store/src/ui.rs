@@ -24,6 +24,7 @@ use iced::{Alignment, Border, Color, Element, Length, Shadow, Theme};
 use iced::widget::scrollable::{Direction, Scrollbar};
 
 use pomelo_material_symbols::{self as icons, Icon};
+use pomelo_widgets::app::icon_or;
 use pomelo_widgets::preferences::ThemeMode;
 
 use crate::style::{self, Sizes};
@@ -202,7 +203,7 @@ fn installed_rows<'a>(
         };
 
         children.push(row_card(
-            badge(accent, &name, sizes),
+            badge(icon_or(&installed.meta.glyph), accent, sizes),
             name,
             line,
             action(
@@ -223,7 +224,7 @@ fn installed_rows<'a>(
     // appears is not.
     for broken in app.broken() {
         children.push(row_card(
-            badge(style::bad(), &broken.id, sizes),
+            badge(Icon::ERROR, style::bad(), sizes),
             broken.id.clone(),
             format!("{} · {}", words.broken, broken.reason),
             action(
@@ -294,8 +295,8 @@ fn update_rows<'a>(
 
         children.push(row_card(
             badge(
+                icon_or(&release.glyph),
                 style::accent_of(&release.accent, style::accent()),
-                &name,
                 sizes,
             ),
             name,
@@ -332,7 +333,7 @@ fn release_row<'a>(
     let accent = style::accent_of(&release.accent, style::accent());
 
     row_card(
-        badge(accent, &name, sizes),
+        badge(icon_or(&release.glyph), accent, sizes),
         name,
         release_line(release, words),
         action(
@@ -375,14 +376,21 @@ fn row_card<'a>(
 
 /// The package's own colour with its first character in it.
 ///
-/// An accent square rather than a bitmap: a package that is not installed has no icon to read (the
-/// manifest does not carry one), and drawing the installed package's icon would mean decoding the
-/// icon plane here as well as in the launcher. The square is the same picture the launcher uses for
-/// an application it has no icon for, which is what makes the two screens agree.
-fn badge<'a>(accent: Color, name: &str, sizes: Sizes) -> Element<'a, Message> {
-    let initial = name.chars().next().map(String::from).unwrap_or_default();
-
-    container(text(initial).size(sizes.badge).color(Color::WHITE))
+/// The row's picture: the application's own Material Symbols glyph, on its own accent.
+///
+/// A glyph and not a bitmap, because a package that is not installed yet has no bitmap to read — the
+/// manifest carries a name and not a picture, and a package's icon section is not downloaded until
+/// someone installs it. The name becomes a picture through `icon_or`, which is the same table the
+/// launcher's tiles use, so an application wears the glyph its tile always had and the two screens
+/// agree. The square is the launcher's own: an accent fill with the mark cut out of it in white,
+/// which is what a tile looks like on the grid this page sends applications to.
+fn badge<'a>(icon: Icon, accent: Color, sizes: Sizes) -> Element<'a, Message> {
+    container(
+        text(icon.glyph())
+            .font(icons::font())
+            .size(sizes.badge)
+            .color(Color::WHITE),
+    )
     .width(Length::Fixed(style::BADGE))
     .height(Length::Fixed(style::BADGE))
     .center_x(Length::Fill)

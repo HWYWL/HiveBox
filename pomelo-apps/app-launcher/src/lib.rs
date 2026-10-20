@@ -133,14 +133,12 @@ use std::time::Instant;
 use iced::theme::Palette;
 use iced::widget::{button, column, container, stack, text, Column, Row, Space};
 use iced::{
-    Alignment, Border, Color, Element, Font, Length, Point, Rectangle, Shadow, Size, Subscription,
-    Task, Theme, Vector,
+    Alignment, Border, Color, Element, Length, Point, Rectangle, Shadow, Size, Subscription, Task,
+    Theme, Vector,
 };
 
 use app_host::ui::Fonts;
 use app_host::{Catalog, HostedApp, Installed};
-use calculator::Calculator;
-use clock::Clock;
 use cloud_monitor::CloudMonitor;
 use files::Files;
 use games::Games;
@@ -159,7 +157,9 @@ use wifi_map::WifiMap;
 
 pub use apps::{Entry, CATALOGUE};
 pub use pomelo_material_symbols::Icon;
-pub use pomelo_widgets::{AppIcon, BitmapIcon, Language, SystemPreferences, ThemeMode, FONT_BASE};
+pub use pomelo_widgets::{
+    icon_or, AppIcon, BitmapIcon, Language, SystemPreferences, ThemeMode, FONT_BASE,
+};
 pub use style::{
     DOT_REST, DOT_UP, LABEL, PER_PAGE, SCREEN, STATUS_BG, STATUS_BG_DARK, STATUS_BG_LIGHT,
     STATUS_HEIGHT, STATUS_INSET, WALLPAPER_DARK, WALLPAPER_LIGHT,
@@ -201,7 +201,11 @@ enum Screen {
 ///
 /// Indices, because that is what the grid hands over when a tile is tapped. The tests assert that
 /// each of these still names the app it says it does, and every entry has one: the catalogue and
-/// the list of apps are the same sixteen things, in the same order.
+/// the list of apps are the same things, in the same order.
+///
+/// The list shrinks as applications leave the image. The clock and the calculator were the first
+/// two: both are published as packages now, and an application that can be installed is one the
+/// image should not also carry — see the crate's module docs on what the shell keeps.
 pub const MUSIC: usize = 0;
 pub const WEB_MANAGER: usize = 1;
 pub const NAS_MONITOR: usize = 2;
@@ -212,14 +216,12 @@ pub const SETTINGS: usize = 6;
 pub const STORE: usize = 7;
 pub const TERMINAL: usize = 8;
 pub const TASK_VIEWER: usize = 9;
-pub const CLOCK: usize = 10;
-pub const POWER_LOG: usize = 11;
-pub const CALCULATOR: usize = 12;
-pub const WIFI_MAP: usize = 13;
-pub const CLOUD: usize = 14;
+pub const POWER_LOG: usize = 10;
+pub const WIFI_MAP: usize = 11;
+pub const CLOUD: usize = 12;
 /// The updater is the last tile on the grid: it is the one that is on its way out, and the store now
 /// holds the position it had — see the catalogue's own docs for both.
-pub const UPDATER: usize = 15;
+pub const UPDATER: usize = 13;
 
 /// What the launcher reacts to.
 ///
@@ -301,7 +303,6 @@ pub enum Message {
     /// The screen changed size: a window on a desktop, the panel on the board.
     Resized(Size),
     /// A message from one of the apps this launcher hosts.
-    Calculator(calculator::Message),
     Settings(settings::Message),
     /// The store's own: a tab, a row's one button, or the frame that reads a download.
     Store(store::Message),
@@ -313,7 +314,6 @@ pub enum Message {
     WebManager(web_manager::Message),
     TaskViewer(task_viewer::Message),
     NasMonitor(nas_monitor::Message),
-    Clock(clock::Message),
     /// The file manager's own: a volume, a row, one of its four actions, or a name typed into a prompt.
     Files(files::Message),
     /// The power log's own: the beat that looks at the gauge, or a finger asking for a sample now.
@@ -410,7 +410,6 @@ pub struct Launcher {
     hosted: Vec<Hosted>,
     /// When this launcher started. The clock an application's frames and events are stamped with.
     started: Instant,
-    calculator: Option<Calculator>,
     settings: Option<Settings>,
     /// The store. Plain `store` and not `store_app`, for the clock's reason: nothing else in the
     /// launcher is called that.
@@ -423,9 +422,6 @@ pub struct Launcher {
     web_manager: Option<WebManager>,
     task_viewer: Option<TaskViewer>,
     nas_monitor: Option<NasMonitor>,
-    /// The clock. Named `clock_app` because `clock` is the *status bar's* reading, and the two are
-    /// different things: the bar's is a string the platform pushes, and this is the app's own state.
-    clock_app: Option<Clock>,
     /// The file manager. Plain `files` and not `files_app`, for the clock's reason: there is no
     /// status bar reading of that name for a suffix to be told apart from.
     files: Option<Files>,
@@ -493,7 +489,6 @@ impl Launcher {
             screen: Screen::Grid,
             hosted: scan_hosted(),
             started: Instant::now(),
-            calculator: None,
             settings: None,
             store: None,
             updater: None,
@@ -512,7 +507,6 @@ impl Launcher {
             transition: None,
             task_viewer: None,
             nas_monitor: None,
-            clock_app: None,
             files: None,
             power_log: None,
             wifi_map: None,
@@ -551,9 +545,6 @@ impl Launcher {
     /// Propagates the active preferences to all loaded apps.
     fn propagate_preferences(&mut self) {
         let prefs = self.preferences;
-        if let Some(app) = &mut self.calculator {
-            app.set_preferences(prefs);
-        }
         if let Some(app) = &mut self.settings {
             app.set_preferences(prefs);
         }
@@ -576,9 +567,6 @@ impl Launcher {
             app.set_preferences(prefs);
         }
         if let Some(app) = &mut self.nas_monitor {
-            app.set_preferences(prefs);
-        }
-        if let Some(app) = &mut self.clock_app {
             app.set_preferences(prefs);
         }
         if let Some(app) = &mut self.files {
@@ -610,15 +598,6 @@ impl Launcher {
     pub fn set_language(&mut self, language: Language) {
         self.preferences.language = language;
         self.propagate_preferences();
-    }
-
-    pub fn get_or_create_calculator(&mut self) -> &mut Calculator {
-        if self.calculator.is_none() {
-            let mut app = Calculator::new();
-            app.set_preferences(self.preferences);
-            self.calculator = Some(app);
-        }
-        self.calculator.as_mut().unwrap()
     }
 
     /// The store, which is handed the board and reads two of its backends: the network (what the
@@ -760,21 +739,10 @@ impl Launcher {
         self.nas_monitor.as_mut().unwrap()
     }
 
-    /// The clock, which is handed the board like the task viewer and the NAS monitor and reads a
-    /// *third* thing through it: the wall clock and the uptime, both of which are the board's and
-    /// neither of which is the platform's to push into the status bar on this app's behalf — the bar's
-    /// reading is a string somebody formatted, and this app needs the number.
-    ///
-    /// The one piece of state that is not the board's is the alarm list, and `Clock::new` reads that
-    /// from the board's filesystem itself.
-    pub fn get_or_create_clock(&mut self) -> &mut Clock {
-        if self.clock_app.is_none() {
-            let mut app = Clock::new(Arc::clone(&self.board));
-            app.set_preferences(self.preferences);
-            self.clock_app = Some(app);
-        }
-        self.clock_app.as_mut().unwrap()
-    }
+    /// The clock left this launcher with the calculator: it is a package now, installed from the
+    /// store and read by the runtime like any other — see [`CATALOGUE`]'s own note. Its alarms and
+    /// its dial travel in the package, and the board's clock reaches it through the runtime's time
+    /// service rather than through this launcher handing it a `Board`.
 
     /// The file manager, which is handed the board like the apps before it and is the one that writes
     /// to it: the volumes come from the same storage backend the terminal reads, and the four actions
@@ -874,10 +842,6 @@ impl Launcher {
     }
 
     /// The hosted apps, for the host and the tests.
-    pub fn calculator(&mut self) -> &Calculator {
-        self.get_or_create_calculator()
-    }
-
     pub fn settings(&mut self) -> &Settings {
         self.get_or_create_settings()
     }
@@ -900,11 +864,6 @@ impl Launcher {
 
     pub fn nas_monitor(&mut self) -> &NasMonitor {
         self.get_or_create_nas_monitor()
-    }
-
-    /// The clock app. Not `clock()`: that name is the status bar's reading.
-    pub fn clock_app(&mut self) -> &Clock {
-        self.get_or_create_clock()
     }
 
     /// The file manager app.
@@ -978,7 +937,6 @@ impl Launcher {
         self.running_apps.retain(|&i| i != index);
         match index {
             TERMINAL => self.terminal = None,
-            CALCULATOR => self.calculator = None,
             SETTINGS => self.settings = None,
             STORE => self.store = None,
             UPDATER => self.updater = None,
@@ -986,7 +944,6 @@ impl Launcher {
             WEB_MANAGER => self.web_manager = None,
             TASK_VIEWER => self.task_viewer = None,
             NAS_MONITOR => self.nas_monitor = None,
-            CLOCK => self.clock_app = None,
             FILES => self.files = None,
             POWER_LOG => self.power_log = None,
             WIFI_MAP => self.wifi_map = None,
@@ -1299,13 +1256,18 @@ impl Launcher {
             Language::English => &meta.name,
         };
 
-        let initial = name.chars().next().unwrap_or('·').to_string();
+        // The package's own glyph, which is the picture this application's tile wore when it was
+        // compiled into the image: `meta.glyph` is the name the packer wrote, and `icon_or` is the
+        // one place a name becomes a picture. The fallback is the generic mark rather than the first
+        // character of the name — a tile is found by its colour and its shape, and a letter is
+        // neither: two applications whose names start the same way drew the same tile.
+        let icon = icon_or(&meta.glyph);
 
         let icon_button = button(
             container(
-                text(initial)
+                text(icon.glyph())
                     .size(style::GLYPH)
-                    .font(Font::DEFAULT)
+                    .font(pomelo_material_symbols::font())
                     .color(Color::WHITE),
             )
             .center_x(Length::Fill)
@@ -1479,14 +1441,6 @@ impl Launcher {
     }
 
 
-    fn calculator_screen(&self) -> Element<'_, Message> {
-        if let Some(app) = &self.calculator {
-            app.view().map(Message::Calculator)
-        } else {
-            Space::new().into()
-        }
-    }
-
     fn music_screen(&self) -> Element<'_, Message> {
         if let Some(app) = &self.music {
             app.view().map(Message::Music)
@@ -1522,16 +1476,6 @@ impl Launcher {
     fn nas_monitor_screen(&self) -> Element<'_, Message> {
         if let Some(app) = &self.nas_monitor {
             app.view().map(Message::NasMonitor)
-        } else {
-            Space::new().into()
-        }
-    }
-
-    /// The clock. It brings its own three tabs and no back button, like the calculator: a tab is a
-    /// place inside one page, not a page the launcher has to know about.
-    fn clock_screen(&self) -> Element<'_, Message> {
-        if let Some(app) = &self.clock_app {
-            app.view().map(Message::Clock)
         } else {
             Space::new().into()
         }
@@ -1957,9 +1901,6 @@ impl Launcher {
                     TERMINAL => {
                         self.get_or_create_terminal();
                     }
-                    CALCULATOR => {
-                        self.get_or_create_calculator();
-                    }
                     SETTINGS => {
                         self.get_or_create_settings();
                     }
@@ -1980,9 +1921,6 @@ impl Launcher {
                     }
                     NAS_MONITOR => {
                         self.get_or_create_nas_monitor();
-                    }
-                    CLOCK => {
-                        self.get_or_create_clock();
                     }
                     FILES => {
                         self.get_or_create_files();
@@ -2083,16 +2021,6 @@ impl Launcher {
                     monitor.update(nas_monitor::Message::Tick(Instant::now()));
                 }
 
-                // The clock is asked the third way, and its reason is neither cost nor a network:
-                // the page *is* the reading, and there is nothing to look at unless it is on screen.
-                // The app could not tell on its own — its own subscription is a window's frames, and
-                // on this board there are none — so the app is told, once a second, in the same beat
-                // the status bar is refreshed on. A pomodoro left running behind another app is not
-                // stalled by this: what the timer counts is the board's uptime and not these pulses.
-                if let (Screen::App(CLOCK), Some(app)) = (self.screen, &mut self.clock_app) {
-                    app.update(clock::Message::Tick);
-                }
-
                 // The power log is asked the fourth way, which is the clock's reason with a longer
                 // horizon on it: it is a curve, so the gauge is worth reading while somebody is looking
                 // at it — and worth writing down once an hour for as long as they do. Its own
@@ -2172,7 +2100,6 @@ impl Launcher {
                 self.size = size;
                 self.hand_over_size();
             }
-            Message::Calculator(message) => self.get_or_create_calculator().update(message),
             // The player navigates inside itself too — the list and the track — so its back is asked
             // before it is handled like any other message, exactly as the settings app's is. Both the
             // button on the playing screen and the hardware key arrive here as this one message.
@@ -2189,7 +2116,6 @@ impl Launcher {
                 return self.open_terminal_on_watched();
             }
             Message::NasMonitor(message) => self.get_or_create_nas_monitor().update(message),
-            Message::Clock(message) => self.get_or_create_clock().update(message),
             Message::Files(message) => self.get_or_create_files().update(message),
             Message::PowerLog(message) => self.get_or_create_power_log().update(message),
             Message::WifiMap(message) => self.get_or_create_wifi_map().update(message),
@@ -2660,7 +2586,6 @@ impl Launcher {
     fn app_screen(&self, app: usize) -> Element<'_, Message> {
         match app {
             TERMINAL => self.terminal_screen(),
-            CALCULATOR => self.calculator_screen(),
             SETTINGS => self.settings_screen(),
             STORE => self.store_screen(),
             UPDATER => self.updater_screen(),
@@ -2668,7 +2593,6 @@ impl Launcher {
             WEB_MANAGER => self.web_manager_screen(),
             TASK_VIEWER => self.task_viewer_screen(),
             NAS_MONITOR => self.nas_monitor_screen(),
-            CLOCK => self.clock_screen(),
             FILES => self.files_screen(),
             POWER_LOG => self.power_log_screen(),
             WIFI_MAP => self.wifi_map_screen(),
@@ -3125,7 +3049,6 @@ mod tests {
         assert_eq!(CATALOGUE[STORE].name, "App Store");
         assert_eq!(CATALOGUE[UPDATER].localized_name(Language::Chinese), "更新");
         assert_eq!(CATALOGUE[UPDATER].name, "Update");
-        assert_eq!(CATALOGUE[CALCULATOR].localized_name(Language::Chinese), "计算器");
         assert_eq!(
             CATALOGUE[TASK_VIEWER].localized_name(Language::Chinese),
             "任务详情"
@@ -3135,8 +3058,6 @@ mod tests {
             "服务器"
         );
         assert_eq!(CATALOGUE[NAS_MONITOR].name, "Server");
-        assert_eq!(CATALOGUE[CLOCK].localized_name(Language::Chinese), "时钟");
-        assert_eq!(CATALOGUE[CLOCK].name, "Clock");
         assert_eq!(CATALOGUE[FILES].localized_name(Language::Chinese), "文件管理");
         assert_eq!(CATALOGUE[FILES].name, "Files");
         assert_eq!(CATALOGUE[POWER_LOG].localized_name(Language::Chinese), "电量日志");
@@ -3182,19 +3103,17 @@ mod tests {
                 "App Store",
                 "Terminal",
                 "Tasks",
-                "Clock",
                 "Power Log",
-                "Calculator",
                 "Wi-Fi Map",
                 "Cloud",
                 "Update"
             ]
         );
-        assert_eq!(CATALOGUE.len(), 16, "and the sixteen are all the tiles there are");
+        assert_eq!(CATALOGUE.len(), 14, "and the fourteen are all the tiles there are");
         assert_eq!(
             Launcher::new(Arc::new(Board::simulated())).pages(),
             2,
-            "eight and eight"
+            "eight and six"
         );
     }
 
@@ -3304,7 +3223,6 @@ mod tests {
         // Switch theme via Settings message
         launcher.update(Message::Settings(settings::Message::SetTheme(ThemeMode::Light)));
         assert_eq!(launcher.preferences().theme, ThemeMode::Light);
-        assert_eq!(launcher.calculator().theme_mode(), ThemeMode::Light);
         assert_eq!(launcher.music().theme_mode(), ThemeMode::Light);
         assert_eq!(launcher.terminal().theme_mode(), ThemeMode::Light);
 
@@ -3313,10 +3231,8 @@ mod tests {
         launcher.set_preferences(custom_prefs);
         assert_eq!(launcher.preferences(), custom_prefs);
         assert_eq!(launcher.settings().preferences(), custom_prefs);
-        assert_eq!(launcher.calculator().preferences(), custom_prefs);
         assert_eq!(launcher.music().preferences(), custom_prefs);
         assert_eq!(launcher.terminal().preferences(), custom_prefs);
-        assert_eq!(launcher.calculator().theme_mode(), ThemeMode::Dark);
         assert_eq!(launcher.music().theme_mode(), ThemeMode::Dark);
         assert_eq!(launcher.terminal().theme_mode(), ThemeMode::Dark);
     }
@@ -3330,9 +3246,9 @@ mod tests {
         launcher.update(Message::Back);
         assert_eq!(launcher.screen, Screen::Grid);
 
-        // 2. Single-page app (e.g. Calculator) exits directly to Grid
-        launcher.update(Message::Open(CALCULATOR));
-        assert_eq!(launcher.screen, Screen::App(CALCULATOR));
+        // 2. Single-page app (e.g. Files) exits directly to Grid
+        launcher.update(Message::Open(FILES));
+        assert_eq!(launcher.screen, Screen::App(FILES));
         launcher.update(Message::Back);
         assert_eq!(launcher.screen, Screen::Grid);
 
@@ -3426,16 +3342,16 @@ mod tests {
         assert_eq!(launcher.screen, Screen::Grid);
         assert!(launcher.is_app_running(MUSIC));
 
-        // 3. Open Calculator as well: both apps running in memory
-        launcher.update(Message::Open(CALCULATOR));
-        assert_eq!(launcher.screen, Screen::App(CALCULATOR));
-        assert!(launcher.is_app_running(CALCULATOR));
-        assert_eq!(launcher.running_apps(), &[MUSIC, CALCULATOR]);
+        // 3. Open the file manager as well: both apps running in memory
+        launcher.update(Message::Open(FILES));
+        assert_eq!(launcher.screen, Screen::App(FILES));
+        assert!(launcher.is_app_running(FILES));
+        assert_eq!(launcher.running_apps(), &[MUSIC, FILES]);
 
-        // 4. Press Exit in Calculator: kills Calculator and returns to Grid
+        // 4. Press Exit in the file manager: kills it and returns to Grid
         launcher.update(Message::Exit);
         assert_eq!(launcher.screen, Screen::Grid);
-        assert!(!launcher.is_app_running(CALCULATOR));
+        assert!(!launcher.is_app_running(FILES));
         assert_eq!(launcher.running_apps(), &[MUSIC]);
 
         // 5. Press Exit on Grid: kills the last background app (Music)
@@ -4032,60 +3948,35 @@ mod tests {
         let mut launcher = Launcher::new(board);
 
         // At boot, all sub-apps are None (0 boot CPU time / 0 heap allocations for apps)
-        assert!(launcher.calculator.is_none());
         assert!(launcher.settings.is_none());
         assert!(launcher.music.is_none());
         assert!(launcher.terminal.is_none());
         assert!(launcher.web_manager.is_none());
-        assert!(launcher.clock_app.is_none());
         assert!(launcher.files.is_none());
         assert!(launcher.power_log.is_none());
 
-        // Opening Calculator instantiates only Calculator
-        launcher.update(Message::Open(CALCULATOR));
-        assert!(launcher.calculator.is_some());
-        assert!(launcher.settings.is_none());
+        // Opening the settings instantiates only the settings
+        launcher.update(Message::Open(SETTINGS));
+        assert!(launcher.settings.is_some());
         assert!(launcher.music.is_none());
         assert!(launcher.terminal.is_none());
         assert!(launcher.web_manager.is_none());
-        assert!(launcher.clock_app.is_none());
         assert!(launcher.files.is_none());
         assert!(launcher.power_log.is_none());
 
-        // Backgrounding Calculator (Back) preserves instance
+        // Backgrounding the settings (Back) preserves instance
         launcher.update(Message::Back);
         assert_eq!(launcher.screen, Screen::Grid);
-        assert!(launcher.calculator.is_some());
+        assert!(launcher.settings.is_some());
 
-        // Exiting / killing Calculator frees its heap memory (reverts to None)
+        // Exiting / killing the settings frees its heap memory (reverts to None)
         launcher.update(Message::Exit);
-        assert!(launcher.calculator.is_none());
-    }
-
-    /// The clock is the app that reads the board twice a tick, so it is the one whose instance is
-    /// worth watching: opened once, kept while backgrounded, and freed on exit like the rest.
-    #[test]
-    fn the_clock_is_loaded_on_demand_and_freed_on_kill() {
-        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
-
-        assert!(launcher.clock_app.is_none());
-
-        launcher.update(Message::Open(CLOCK));
-        assert!(launcher.clock_app.is_some());
-        assert_eq!(launcher.screen, Screen::App(CLOCK));
-
-        // The pump reaches the app only while it is the app that is up.
-        launcher.update(Message::Back);
-        assert_eq!(launcher.screen, Screen::Grid);
-        assert!(launcher.clock_app.is_some(), "backgrounding keeps it");
-
-        launcher.update(Message::Exit);
-        assert!(launcher.clock_app.is_none(), "killing frees it");
+        assert!(launcher.settings.is_none());
     }
 
     /// The file manager is loaded on demand like the rest, kept while it is only backgrounded, and
-    /// freed on exit — the same life the clock has, and the one that matters here because a
-    /// browsing session is a working directory the person expects to come back to.
+    /// freed on exit — and it is the one whose instance is worth watching here because a browsing
+    /// session is a working directory the person expects to come back to.
     #[test]
     fn the_files_app_is_loaded_on_demand_and_freed_on_kill() {
         let mut launcher = Launcher::new(Arc::new(Board::simulated()));
@@ -4201,8 +4092,8 @@ mod tests {
     #[test]
     fn an_installed_package_is_a_tile_after_the_shell_and_a_page_of_its_own() {
         let mut launcher = Launcher::new(Arc::new(Board::simulated()));
-        assert_eq!(launcher.tile_count(), 16, "the shell alone");
-        assert_eq!(launcher.pages(), 2, "eight and eight");
+        assert_eq!(launcher.tile_count(), 14, "the shell alone");
+        assert_eq!(launcher.pages(), 2, "eight and six");
 
         let meta = app_host::Meta::parse(
             r#"{"id":"notes","name":"Notes","name_zh":"笔记","version":"v1.0.0","memory_kb":64}"#,
@@ -4223,20 +4114,20 @@ mod tests {
             error: None,
         });
 
-        assert_eq!(launcher.tile_count(), 17);
-        assert_eq!(launcher.pages(), 3, "eight, eight and one");
+        assert_eq!(launcher.tile_count(), 15);
+        assert_eq!(launcher.pages(), 2, "eight and seven");
         assert_eq!(
-            launcher.card(16).expect("a card").name,
+            launcher.card(14).expect("a card").name,
             "笔记",
             "the sheet says what the package calls itself, in the panel's language"
         );
 
-        launcher.update(Message::Open(16));
-        assert_eq!(launcher.screen, Screen::App(16));
+        launcher.update(Message::Open(14));
+        assert_eq!(launcher.screen, Screen::App(14));
         assert!(launcher.hosted[0].error.is_some(), "the read failed");
 
         // The page is the sentence, not a panic and not a blank screen.
-        let _ = launcher.app_screen(16);
+        let _ = launcher.app_screen(14);
 
         // A page that is not running gives the back press back to the launcher.
         launcher.update(Message::Back);

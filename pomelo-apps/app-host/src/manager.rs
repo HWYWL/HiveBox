@@ -10,7 +10,7 @@
 //! The package is written into a staging directory on the *same volume* as the directory it is
 //! going to, verified by reading it back, and then renamed into place. A rename on one filesystem is
 //! the one operation that is either done or not: there is no moment at which the catalog can see a
-//! half-written `app.hbapp`. The old package is moved aside to [`crate::catalog::PREVIOUS_FILE`]
+//! half-written `app.app`. The old package is moved aside to [`crate::catalog::PREVIOUS_FILE`]
 //! first, so an upgrade that is interrupted recovers as the old version — see the catalog, which
 //! does that recovery on the next boot.
 //!
@@ -96,13 +96,15 @@ impl std::error::Error for InstallError {}
 
 /// Installs `bytes` into one of `roots`.
 ///
-/// `prefer` is where the store asked for it to go; the first root of that source that exists wins,
-/// and when it does not exist the other volume is used rather than failing — a card that was pulled
-/// between the press and the install should still install to flash.
+/// `prefer` is where the store asked for it to go; the first root of that source that can take the
+/// package wins, and when it cannot the other volume is used rather than failing — a card that was
+/// pulled between the press and the install should still install to flash. `volumes` is what says
+/// whether a root can take it; see [`choose_root`].
 pub fn install(
     bytes: &[u8],
     expected: &Expected,
     roots: &[Root],
+    volumes: &[Volume],
     prefer: Option<Source>,
 ) -> Result<Installed, InstallError> {
     verify(bytes, expected)?;
@@ -110,7 +112,8 @@ pub fn install(
     let package = Package::open(bytes).map_err(InstallError::Package)?;
     validate_id(&package.meta.id).map_err(|_| InstallError::BadId(package.meta.id.clone()))?;
 
-    let root = choose_root(roots, prefer, bytes.len() as u64).ok_or(InstallError::NoVolume)?;
+    let root =
+        choose_root(roots, volumes, prefer, bytes.len() as u64).ok_or(InstallError::NoVolume)?;
     let staging = staging_dir(&root);
 
     let io = |error: std::io::Error| InstallError::Io(error.to_string());
@@ -155,6 +158,7 @@ pub fn install_file(
     path: &Path,
     expected: &Expected,
     roots: &[Root],
+    volumes: &[Volume],
     prefer: Option<Source>,
 ) -> Result<Installed, InstallError> {
     let length = std::fs::metadata(path)
@@ -174,7 +178,7 @@ pub fn install_file(
         }
     }
 
-    let root = choose_root(roots, prefer, length).ok_or(InstallError::NoVolume)?;
+    let root = choose_root(roots, volumes, prefer, length).ok_or(InstallError::NoVolume)?;
     let staging = staging_dir(&root);
 
     let io = |error: std::io::Error| InstallError::Io(error.to_string());
@@ -226,8 +230,16 @@ pub fn install_file(
 /// The store asks this *before* the download, because the download's temporary file has to be on
 /// the same volume as the install: it is a rename that makes an install atomic, and a rename across
 /// filesystems is a copy.
-pub fn root_for(roots: &[Root], prefer: Option<Source>, size: u64) -> Option<Root> {
-    choose_root(roots, prefer, size)
+///
+/// `volumes` is what says whether a root can take the package — see [`choose_root`]. A caller with
+/// none to hand passes an empty slice and gets the choice the directories alone can give.
+pub fn root_for(
+    roots: &[Root],
+    volumes: &[Volume],
+    prefer: Option<Source>,
+    size: u64,
+) -> Option<Root> {
+    choose_root(roots, volumes, prefer, size)
 }
 
 /// Checks the bytes against what the manifest said, before anything is written.
@@ -341,8 +353,59 @@ fn fail(staging: &Path, error: InstallError) -> InstallError {
 /// The directory the installer keeps half-finished work in; never scanned, always cleaned.
 pub const STAGING_DIR: &str = ".staging";
 
-fn choose_root(roots: &[Root], prefer: Option<Source>, size: u64) -> Option<Root> {
-    let usable = |root: &&Root| root.path.is_dir();
+/// A filesystem an install may be written to: where it is mounted, and how much room is left.
+///
+/// Spelled out here rather than taken from `pomelo-hal` because the installer, its tests and the
+/// headless runner all build with no board feature at all, and the two fields are the whole of what
+/// choosing a root needs. The store fills these in from `StorageBackend::volumes()`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Volume {
+    /// The mount point, exactly as the filesystem spells it (`/internal`, `/sdcard`).
+    pub mount_point: String,
+    pub free_bytes: u64,
+}
+
+/// The room an install likes to see left over, as a fraction of the package: a tenth again.
+///
+/// Not a round number of kilobytes, because what fills a volume is applications and their data and
+/// a package is the smaller of the two — a volume with exactly the package's size left is a volume
+/// that will not start it.
+pub const SPARE_DIVISOR: u64 = 10;
+
+/// The volume a path lives on: the longest mount point that is a prefix of it, which is the one
+/// that holds the path when mount points nest.
+fn volume_for<'a>(root: &Root, volumes: &'a [Volume]) -> Option<&'a Volume> {
+    let path = root.path.to_string_lossy();
+
+    volumes
+        .iter()
+        .filter(|volume| path.starts_with(&volume.mount_point))
+        .max_by_key(|volume| volume.mount_point.len())
+}
+
+fn choose_root(
+    roots: &[Root],
+    volumes: &[Volume],
+    prefer: Option<Source>,
+    size: u64,
+) -> Option<Root> {
+    let wanted = size + size / SPARE_DIVISOR;
+
+    // A root is usable when the filesystem under it is mounted and has room for the package and a
+    // tenth over. Its directory does *not* have to exist: on a box that has never had an
+    // application installed neither `/internal/AppData/apps` nor `/sdcard/apps` is there yet, and
+    // `create_dir_all` on the staging path — the install's own first step — is what makes it.
+    // Asking whether the directory existed instead is what made the store answer "no writable
+    // storage" on a board with 4 MB of free flash and a card in the slot.
+    let usable = |root: &&Root| match volume_for(root, volumes) {
+        Some(volume) => volume.free_bytes >= wanted,
+        // Nothing says which filesystem this root is on: no volumes were handed over, or none of
+        // them is mounted above the path — a test with its roots in a temporary directory, or a host
+        // that cannot answer. The directory is all there is to go on, and one that exists is a root
+        // that was writable at least once. Refusing a root for want of an answer would be worse
+        // than being wrong about it, so the unknown is not the same as the known-full.
+        None => root.path.is_dir(),
+    };
 
     // A package bigger than the small-package threshold goes to the card by default: the internal
     // volume is 3.88 MB shared by every application's data, and the card is where the fonts already
@@ -498,7 +561,7 @@ pub fn rollback(root: &Root, id: &str) -> Result<bool, InstallError> {
         return Ok(false);
     }
 
-    let rejected = dir.join("app.hbapp.bad");
+    let rejected = dir.join("app.app.bad");
 
     if rejected.exists() {
         std::fs::remove_file(&rejected).ok();
@@ -579,7 +642,7 @@ mod tests {
         let bytes = package_bytes("calculator", "v1.0.0", None);
         let expected = Expected::new(bytes.len() as u64, sha256_hex(&bytes));
 
-        let installed = install(&bytes, &expected, std::slice::from_ref(&root), None)
+        let installed = install(&bytes, &expected, std::slice::from_ref(&root), &[], None)
             .expect("a package that matches its manifest");
 
         assert_eq!(installed.meta.id, "calculator");
@@ -599,13 +662,13 @@ mod tests {
 
         let wrong_hash = Expected::new(bytes.len() as u64, "00".repeat(32));
         assert!(matches!(
-            install(&bytes, &wrong_hash, std::slice::from_ref(&root), None),
+            install(&bytes, &wrong_hash, std::slice::from_ref(&root), &[], None),
             Err(InstallError::ShaMismatch { .. })
         ));
 
         let wrong_size = Expected::new(bytes.len() as u64 + 10, sha256_hex(&bytes));
         assert!(matches!(
-            install(&bytes, &wrong_size, std::slice::from_ref(&root), None),
+            install(&bytes, &wrong_size, std::slice::from_ref(&root), &[], None),
             Err(InstallError::SizeMismatch { .. })
         ));
 
@@ -621,8 +684,8 @@ mod tests {
         let first = package_bytes("games", "v1.0.0", None);
         let second = package_bytes("games", "v2.0.0", None);
 
-        install(&first, &Expected::default(), std::slice::from_ref(&root), None).unwrap();
-        install(&second, &Expected::default(), std::slice::from_ref(&root), None).unwrap();
+        install(&first, &Expected::default(), std::slice::from_ref(&root), &[], None).unwrap();
+        install(&second, &Expected::default(), std::slice::from_ref(&root), &[], None).unwrap();
 
         let previous = root.path.join("games").join(PREVIOUS_FILE);
         assert!(previous.exists());
@@ -647,7 +710,7 @@ mod tests {
     fn an_uninstall_leaves_no_directory_and_no_trash() {
         let (work, root) = temp_root("uninstall");
         let bytes = package_bytes("weather", "v1.0.0", None);
-        install(&bytes, &Expected::default(), std::slice::from_ref(&root), None).unwrap();
+        install(&bytes, &Expected::default(), std::slice::from_ref(&root), &[], None).unwrap();
 
         uninstall(&root, "weather").unwrap();
 
@@ -669,7 +732,7 @@ mod tests {
 
         let expected = Expected::new(bytes.len() as u64, sha256_hex(&bytes));
         let installed =
-            install_file(&download, &expected, std::slice::from_ref(&root), None).unwrap();
+            install_file(&download, &expected, std::slice::from_ref(&root), &[], None).unwrap();
 
         assert_eq!(installed.meta.id, "power-log");
         assert_eq!(installed.meta.version, "v1.0.0");
@@ -692,7 +755,7 @@ mod tests {
 
         let wrong_hash = Expected::new(bytes.len() as u64, "00".repeat(32));
         assert!(matches!(
-            install_file(&download, &wrong_hash, std::slice::from_ref(&root), None),
+            install_file(&download, &wrong_hash, std::slice::from_ref(&root), &[], None),
             Err(InstallError::ShaMismatch { .. })
         ));
         assert!(!root.path.join("weather").exists());
@@ -701,7 +764,7 @@ mod tests {
         // The module's section is the half a truncated file loses; the metadata may still be whole.
         std::fs::write(&download, &bytes[..bytes.len() - 1]).unwrap();
         assert!(matches!(
-            install_file(&download, &Expected::default(), std::slice::from_ref(&root), None),
+            install_file(&download, &Expected::default(), std::slice::from_ref(&root), &[], None),
             Err(InstallError::Package(PackageError::Container(
                 app_abi::PackageError::LengthMismatch { .. }
             )))
@@ -726,11 +789,12 @@ mod tests {
         std::fs::create_dir_all(&internal.path).unwrap();
         std::fs::create_dir_all(&card.path).unwrap();
 
-        let root = choose_root(&[internal.clone(), card.clone()], None, 1024).unwrap();
+        let root = choose_root(&[internal.clone(), card.clone()], &[], None, 1024).unwrap();
         assert_eq!(root.source, Source::Internal);
 
         let root = choose_root(
             &[internal.clone(), card.clone()],
+            &[],
             None,
             SMALL_PACKAGE_BYTES + 1,
         )
@@ -739,11 +803,100 @@ mod tests {
 
         let root = choose_root(
             &[internal.clone(), card.clone()],
+            &[],
             Some(Source::Internal),
             SMALL_PACKAGE_BYTES + 1,
         )
         .unwrap();
         assert_eq!(root.source, Source::Internal);
+
+        std::fs::remove_dir_all(&work).ok();
+    }
+
+    /// The store's own bug, in one test: a box that has never had an application installed has no
+    /// `apps` directory on either volume, and asking for the directory rather than for the volume is
+    /// what made the press answer "no writable storage" with 4 MB of flash free.
+    #[test]
+    fn a_root_whose_directory_does_not_exist_yet_is_still_a_root() {
+        let work = std::env::temp_dir().join(format!(
+            "hivebox-install-fresh-{}-{}",
+            std::process::id(),
+            stamp()
+        ));
+
+        let internal = Root::new(work.join("internal").join("apps"), Source::Internal);
+        let card = Root::new(work.join("card").join("apps"), Source::Card);
+        std::fs::create_dir_all(work.join("internal")).unwrap();
+        std::fs::create_dir_all(work.join("card")).unwrap();
+
+        assert!(!internal.path.is_dir(), "the test is about a directory that is not there");
+
+        let volumes = vec![
+            Volume {
+                mount_point: work.join("internal").to_string_lossy().into_owned(),
+                free_bytes: 4 * 1024 * 1024,
+            },
+            Volume {
+                mount_point: work.join("card").to_string_lossy().into_owned(),
+                free_bytes: 8 * 1024 * 1024,
+            },
+        ];
+
+        let root = choose_root(&[internal.clone(), card.clone()], &volumes, None, 1024).unwrap();
+        assert_eq!(root.source, Source::Internal);
+
+        std::fs::remove_dir_all(&work).ok();
+    }
+
+    /// The other half of choosing a volume: a mounted filesystem with no room for the package is not
+    /// one to install to, and a root on a volume that is not mounted at all is not either.
+    #[test]
+    fn a_volume_without_room_or_without_a_mount_is_not_chosen() {
+        let work = std::env::temp_dir().join(format!(
+            "hivebox-install-room-{}-{}",
+            std::process::id(),
+            stamp()
+        ));
+
+        let internal = Root::new(work.join("internal").join("apps"), Source::Internal);
+        let card = Root::new(work.join("card").join("apps"), Source::Card);
+        // Only the internal root's directory exists, which is what a box with no card in the slot
+        // looks like: the card's mount is not there, so neither is anything under it.
+        std::fs::create_dir_all(&internal.path).unwrap();
+
+        // Enough for the package and nothing of the tenth over it.
+        let tight = vec![
+            Volume {
+                mount_point: work.join("internal").to_string_lossy().into_owned(),
+                free_bytes: 1024,
+            },
+            Volume {
+                mount_point: work.join("card").to_string_lossy().into_owned(),
+                free_bytes: 1024,
+            },
+        ];
+
+        assert!(choose_root(&[internal.clone(), card.clone()], &tight, None, 1024).is_none());
+        assert!(choose_root(&[internal.clone(), card.clone()], &tight, None, 512).is_some());
+
+        // The card is not mounted, which on this board means it is not in the slot.
+        let without_card = vec![Volume {
+            mount_point: work.join("internal").to_string_lossy().into_owned(),
+            free_bytes: 4 * 1024 * 1024,
+        }];
+
+        let root = choose_root(
+            &[internal.clone(), card.clone()],
+            &without_card,
+            None,
+            SMALL_PACKAGE_BYTES + 1,
+        )
+        .unwrap();
+        assert_eq!(
+            root.source,
+            Source::Internal,
+            "a big package falls back to the volume that is there"
+        );
 
         std::fs::remove_dir_all(&work).ok();
     }

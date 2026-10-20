@@ -1,7 +1,7 @@
 //! The application runtime: packages, sandboxes, display lists.
 //!
 //! ```text
-//! .hbapp file ──▶ package.rs ──▶ Metal ─┐
+//! .app file ──▶ package.rs ──▶ Metal ─┐
 //!                                       ├─▶ vm.rs (wasmi) ──▶ display.rs ──▶ the launcher's widget
 //! catalog.rs ──▶ installed ──▶ services ─┘
 //! ```
@@ -29,7 +29,7 @@
 //! # Running a package on a PC
 //!
 //! ```text
-//! cargo run -p app-host -- ../bin/hivebox-app-calculator-v1.0.0.hbapp
+//! cargo run -p app-host -- ../bin/hivebox-app-calculator-v1.0.0.app
 //! ```
 //!
 //! The runner instantiates the package, builds one frame, and prints what the display list holds —

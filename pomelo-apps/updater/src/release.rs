@@ -58,6 +58,13 @@ pub enum Kind {
     Font,
 }
 
+/// The folder application packages are published in, under the manifest's own directory.
+///
+/// `bin/apps/`, and the store's download URL is the manifest's directory plus this plus the entry's
+/// `file` — see [`AppRelease::url`]. One place, because a package's address is not a thing anyone
+/// writes down twice.
+pub const APPS_DIR: &str = "apps";
+
 impl Kind {
     /// The manifest's member for it: `"firmware"`, `"font"`.
     pub fn member(self) -> &'static str {
@@ -215,9 +222,16 @@ pub struct AppRelease {
 }
 
 impl AppRelease {
-    /// Where this package is, on the repository: the manifest's own directory, like every other file.
+    /// Where this package is, on the repository: the manifest's directory, inside [`APPS_DIR`].
+    ///
+    /// Packages are the one thing the manifest names that does not sit right beside it. There are a
+    /// dozen of them and there will be more, and a `bin/` holding a merged image, an OTA image, a
+    /// glyph table and fourteen applications is a directory nobody can read — the applications have a
+    /// folder of their own. The name is still the file's own and never a path (see [`url_of`]), which
+    /// is why the folder is added here and not written into the manifest: an entry's `file` stays a
+    /// bare name, and a name that arrived with a directory in it is refused at publish time.
     pub fn url(&self) -> String {
-        url_of(&self.file)
+        url_of(&format!("{APPS_DIR}/{}", self.file))
     }
 
     /// One element of the manifest's `apps` array, when it names enough to install.
@@ -564,10 +578,10 @@ mod tests {
         let document = r##"{
             "apps": [
                 {"id": "calculator", "name": "Calculator", "name_zh": "计算器",
-                 "file": "hivebox-app-calculator-v0.1.0.hbapp", "size": 14726,
+                 "file": "hivebox-app-calculator-v0.1.0.app", "size": 14726,
                  "sha256": "b32a", "abi": 1, "accent": "#F69E22",
                  "description": "四则运算", "glyph": "calculate", "permissions": 0},
-                {"id": "clock", "file": "hivebox-app-clock-v0.2.0.hbapp", "version": "v0.2.0"}
+                {"id": "clock", "file": "hivebox-app-clock-v0.2.0.app", "version": "v0.2.0"}
             ]
         }"##;
 
@@ -582,9 +596,17 @@ mod tests {
         assert_eq!(calculator.accent, "#F69E22");
         assert_eq!(calculator.size, 14_726);
         assert_eq!(calculator.glyph, "calculate");
-        assert!(calculator
-            .url()
-            .ends_with("/hivebox-app-calculator-v0.1.0.hbapp"));
+
+        // Packages are published in a folder of their own under the manifest's directory — `bin/apps/`
+        // — while the manifest itself and the firmware image stay at the top. The name in an entry is
+        // the file's own and never a path; the folder is the repository's, and it is added here.
+        assert!(
+            calculator
+                .url()
+                .ends_with("/apps/hivebox-app-calculator-v0.1.0.app"),
+            "{} is not in the packages' folder",
+            calculator.url()
+        );
 
         // The second entry names its version in a field rather than in the file name, and a
         // manifest that omits the ABI is describing a package built for this firmware.
@@ -602,9 +624,9 @@ mod tests {
         let document = r#"{
             "apps": [
                 {"id": "no-file"},
-                {"file": "hivebox-app-no-id-v1.hbapp"},
-                {"id": "kept", "file": "hivebox-app-kept-v1.hbapp"},
-                {"id": "no-version", "file": "hivebox-app-no-version.hbapp"}
+                {"file": "hivebox-app-no-id-v1.app"},
+                {"id": "kept", "file": "hivebox-app-kept-v1.app"},
+                {"id": "no-version", "file": "hivebox-app-no-version.app"}
             ]
         }"#;
 

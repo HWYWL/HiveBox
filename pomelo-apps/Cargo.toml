@@ -28,8 +28,6 @@ members = [
     "wasm-apps/clock",
     "task-viewer",
     "app-launcher",
-    "calculator",
-    "clock",
     "cloud-monitor",
     "files",
     "games",

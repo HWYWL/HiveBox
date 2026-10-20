@@ -94,6 +94,50 @@ impl From<BitmapIcon> for AppIcon {
     }
 }
 
+/// The icon an application names for itself, when this OS has one by that name.
+///
+/// A package's `glyph` and a manifest entry's `glyph` are *strings* — Material Symbols' own names,
+/// lowercase with underscores — because a package is published before anything compiles against it,
+/// and a string is the one way to name a picture across that gap. This is where the string becomes a
+/// picture, and it is a list rather than a search: the icon table holds 4 299 glyphs and has no way
+/// to walk them, so an exhaustive lookup would be a 4 299-arm `match` referencing every constant in
+/// it. What is here is what this OS actually publishes, which is the whole set an application can
+/// ask for; a name that is not here is the caller's fallback, and [`icon_or`] is that fallback.
+///
+/// The names are the ones `tools/build_apps.py` writes into `bin/apps.json`, which are the ones the
+/// launcher's own tiles wear — an application's icon is the picture its tile already had, so the grid
+/// does not rearrange itself when an application stops being compiled in and starts being installed.
+pub fn icon_named(name: &str) -> Option<Icon> {
+    Some(match name {
+        "calculate" => Icon::CALCULATE,
+        "schedule" => Icon::SCHEDULE,
+        "insights" => Icon::INSIGHTS,
+        "music_note" => Icon::MUSIC_NOTE,
+        "public" => Icon::PUBLIC,
+        "dns" => Icon::DNS,
+        "folder_open" => Icon::FOLDER_OPEN,
+        "partly_cloudy_day" => Icon::PARTLY_CLOUDY_DAY,
+        "sports_esports" => Icon::SPORTS_ESPORTS,
+        "settings" => Icon::SETTINGS,
+        "store" => Icon::STORE,
+        "terminal" => Icon::TERMINAL,
+        "monitor_heart" => Icon::MONITOR_HEART,
+        "wifi_find" => Icon::WIFI_FIND,
+        "cloud_sync" => Icon::CLOUD_SYNC,
+        "system_update" => Icon::SYSTEM_UPDATE,
+        _ => return None,
+    })
+}
+
+/// [`icon_named`], with the generic mark for a name this OS does not draw.
+///
+/// `APPS` — a grid of squares — is the honest answer for an application that did not say, and it is
+/// the one the launcher's switcher already uses for a package with no glyph: the picture says "an
+/// application", which is what is known, and not something it is not.
+pub fn icon_or(name: &str) -> Icon {
+    icon_named(name).unwrap_or(Icon::APPS)
+}
+
 /// Metadata describing an application's identity in the launcher and shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AppMeta {

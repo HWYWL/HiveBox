@@ -1,7 +1,7 @@
 //! Runs one package on a PC, without a window.
 //!
 //! ```text
-//! cargo run -p app-host -- path/to/app.hbapp [--frames 3] [--size 480x480]
+//! cargo run -p app-host -- path/to/app.app [--frames 3] [--size 480x480]
 //! ```
 //!
 //! It prints what the package says about itself, then builds frames and counts what the display list
@@ -45,7 +45,7 @@ fn main() -> ExitCode {
     }
 
     let Some(path) = path else {
-        eprintln!("用法: app-host <app.hbapp> [--frames N] [--size 480x480]");
+        eprintln!("用法: app-host <app.app> [--frames N] [--size 480x480]");
         return ExitCode::from(2);
     };
 

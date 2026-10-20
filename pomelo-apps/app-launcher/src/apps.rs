@@ -161,17 +161,10 @@ pub const CATALOGUE: &[Entry] = &[
         icon: AppIcon::glyph(Icon::MONITOR_HEART),
         accent: (0, 168, 190),
     },
-    Entry {
-        name: "Clock",
-        name_zh: "时钟",
-        // The face rather than a bell: this tile is the dial, the pomodoro and the alarms in one app,
-        // and the dial is the page it opens on. A clock glyph is what the *whole* of it is, and the
-        // time is what it is about.
-        icon: AppIcon::glyph(Icon::SCHEDULE),
-        // The plum end of the spread: the two hues either side of it are the music app's rose and the
-        // server's violet, and this is the one place left between them that is not a grey.
-        accent: (214, 51, 132),
-    },
+    // The clock and the calculator left the grid when they became packages: both are published in
+    // `bin/apps/` and installed from the store, and an application a person can install is one the
+    // image has no business also carrying. Their colours and glyphs went with them into
+    // `tools/build_apps.py`, which is what draws them now.
     Entry {
         name: "Power Log",
         name_zh: "电量日志",
@@ -182,12 +175,6 @@ pub const CATALOGUE: &[Entry] = &[
         // A violet, in the widest hue gap left: between the server's blue-violet and the clock's plum
         // there is a stretch of purple that nothing else on the grid is using.
         accent: (170, 96, 214),
-    },
-    Entry {
-        name: "Calculator",
-        name_zh: "计算器",
-        icon: AppIcon::glyph(Icon::CALCULATE),
-        accent: (246, 158, 34),
     },
     Entry {
         name: "Wi-Fi Map",

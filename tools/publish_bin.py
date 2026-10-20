@@ -49,12 +49,14 @@ README 与发布工作流都指着它，不能改），`hivebox-ota-<版本>.bin
 **应用包是清单里的第三个数组 `apps`。**它和固件、字库不是一回事：那两项是「机器自己用的」
 （一个槽、一张表），而应用包是**给人装、给人卸**的，所以清单里是一项一个条目，商店按它画
 「可安装」那一栏。条目的内容由 `tools/build_apps.py` 从包本身读出来，写进 `bin/apps.json`；
-这个脚本用 `--apps` 把那份片段并进清单，同时把 `.hbapp` 平铺进 `bin/`（名字里的 id 与版本
-就是清单里的 id 与版本），并按 **id** 清理旧版本 —— 一个应用同时只该有一个包在 `bin/`，否则
-清单里留哪个都是猜。
+这个脚本用 `--apps` 把那份片段并进清单，同时把 `.app` 放进 `bin/apps/`（名字里的 id 与版本
+就是清单里的 id 与版本），并按 **id** 清理旧版本 —— 一个应用同时只该有一个包在 `bin/apps/`，
+否则清单里留哪个都是猜。`bin/` 自己留着合并镜像、OTA 镜像和字库表，十几份应用不平铺在它们
+旁边。
 
-应用包的下载地址和固件、字库一样是「清单所在目录 + `file`」，所以 `file` 只能是一个名字，
-不能带目录：带目录的条目在这里就被拒绝，而不是等到商店把包下到 `bin/` 之外的地方去。
+应用包的下载地址是「清单所在目录 + `apps/` + `file`」，那一层由 `release::APPS_DIR` 加，所以
+`file` 只能是一个名字，不能带目录：带目录的条目在这里就被拒绝，而不是等到商店把包下到
+`bin/apps/` 之外的地方去。
 
 用法：
 
@@ -124,11 +126,17 @@ FONT_GLOB = re.compile(r"^hivebox-font-.*\.bin$")
 #    版本必须和表的**完全相同**，这一点由 `card_pair` 认死；这里只管名字长什么样。
 CARD_FACE_GLOB = re.compile(r"^hivebox-face-.*\.otf$")
 
-# 6. 应用包的命名规则：`hivebox-app-<id>-<版本>.hbapp`，与 `build_apps.py` 写出的名字一致。
+# 6. 应用包的命名规则：`hivebox-app-<id>-<版本>.app`，与 `build_apps.py` 写出的名字一致。
 #
-#    捕获 id 是为了按 id 清理：应用包和固件不同，`bin/` 里可以同时有十几个不同的应用，
+#    捕获 id 是为了按 id 清理：应用包和固件不同，`bin/apps/` 里可以同时有十几个不同的应用，
 #    每个只该有一版。id 的字符集与 `app-host` 的 `validate_id` 一致（小写字母、数字、`-`、`_`）。
-APP_GLOB = re.compile(r"^hivebox-app-(?P<id>[a-z0-9][a-z0-9_-]*)-v[0-9][^/\\]*\.hbapp$")
+APP_GLOB = re.compile(r"^hivebox-app-(?P<id>[a-z0-9][a-z0-9_-]*)-v[0-9][^/\\]*\.app$")
+
+# 7. 应用包在 `bin/` 里占的那层目录。
+#
+#    `bin/` 里还躺着合并镜像、OTA 镜像和字库表，十几个应用平铺在旁边就成了读不懂的一堆；
+#    商店下载地址里的这一层由 `release::APPS_DIR` 加上，两边必须同名。
+APPS_SUBDIR = "apps"
 
 
 def display_path(path):
@@ -459,8 +467,8 @@ def read_app_fragment(path):
             return None, f"{app_id} 没有 file"
         if not APP_GLOB.match(name):
             return None, (
-                f"{app_id} 的包名不是 `hivebox-app-<id>-v<版本>.hbapp`：{name}"
-                "（商店把 file 当 URL 的最后一段，也当 bin/ 里的名字）"
+                f"{app_id} 的包名不是 `hivebox-app-<id>-v<版本>.app`：{name}"
+                f"（商店把 file 当 URL 的最后一段，也当 bin/{APPS_SUBDIR}/ 里的名字）"
             )
 
         if "/" in name or "\\" in name:
@@ -470,8 +478,9 @@ def read_app_fragment(path):
             return None, f"应用片段里有两个 {app_id}：一个应用一次只能发布一版"
         seen.add(app_id)
 
-        if not os.path.isfile(os.path.join(os.path.dirname(os.path.abspath(path)), name)):
-            return None, f"应用片段提到的包不在它旁边：{name}"
+        beside = os.path.join(os.path.dirname(os.path.abspath(path)), APPS_SUBDIR, name)
+        if not os.path.isfile(beside):
+            return None, f"应用片段提到的包不在它旁边的 {APPS_SUBDIR}/：{name}"
 
     return entries, None
 
@@ -505,28 +514,34 @@ def prune_apps(directory, app_id, keep, dry_run):
 
 
 def publish_apps(entries, source_dir, bin_dir, dry_run):
-    """把应用包平铺进 `bin/`，返回写进清单 `apps` 的那一份。
+    """把应用包放进 `bin/apps/`，返回写进清单 `apps` 的那一份。
 
     大小与摘要**重新算**，不信片段里写的那两个数：片段是上一次构建的产物，而这个函数是
-    发布这一步 —— 清单里的 sha256 是商店核对下载的凭据，它必须是 `bin/` 里那个文件的值。
+    发布这一步 —— 清单里的 sha256 是商店核对下载的凭据，它必须是 `bin/apps/` 里那个文件的
+    值。清单里的 `file` 仍然是**光名字**，不带目录：那一层由 `release::AppRelease::url`
+    用 `APPS_DIR` 拼回下载地址。
     """
+    apps_dir = os.path.join(bin_dir, APPS_SUBDIR)
+    if not dry_run:
+        os.makedirs(apps_dir, exist_ok=True)
+
     published = []
 
     for entry in sorted(entries, key=lambda item: item["id"]):
         name = entry["file"]
         source = os.path.join(source_dir, name)
-        target = os.path.join(bin_dir, name)
+        target = os.path.join(apps_dir, name)
 
         if os.path.abspath(source) == os.path.abspath(target):
-            # 片段就在 bin/ 里（`build_apps.py` 的默认输出），文件已经在该在的地方了。
+            # 片段就在 bin/apps/ 里（`build_apps.py` 的默认输出），文件已经在该在的地方了。
             size = os.path.getsize(target)
             digest = sha256_of(target)
             if not dry_run:
-                print(f"[=] 已在 bin/：{name}（{size} 字节）")
+                print(f"[=] 已在 bin/{APPS_SUBDIR}/：{name}（{size} 字节）")
         else:
-            size, digest = place(source, bin_dir, name, dry_run)
+            size, digest = place(source, apps_dir, name, dry_run)
 
-        prune_apps(bin_dir, entry["id"], name, dry_run)
+        prune_apps(apps_dir, entry["id"], name, dry_run)
 
         published.append(
             {
@@ -719,7 +734,8 @@ def main():
 
     app_entries = []
     if apps is not None:
-        source_dir = os.path.dirname(os.path.abspath(args.apps))
+        # 包在片段旁边的 `apps/` 里（build_apps.py 的布局），不在片段自己那一层。
+        source_dir = os.path.join(os.path.dirname(os.path.abspath(args.apps)), APPS_SUBDIR)
         app_entries = publish_apps(apps, source_dir, args.bin, args.dry_run)
         manifest["apps"] = app_entries
 

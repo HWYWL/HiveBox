@@ -31,7 +31,7 @@ A window that feels slow is a *debug* build — iced's tiny-skia rasteriser is s
 
 ## Applications as packages
 
-An application no longer has to be compiled into the image. A `.hbapp` is a manifest, a WebAssembly
+An application no longer has to be compiled into the image. A `.app` is a manifest, a WebAssembly
 module and an icon; `app-host` instantiates the module and replays the display list it writes into its
 own memory, and `store` downloads the package, checks its size and SHA-256 against the repository's
 manifest, and renames it into `/internal/AppData/apps/<id>/` or `/sdcard/apps/<id>/`. The two

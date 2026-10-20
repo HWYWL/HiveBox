@@ -28,7 +28,7 @@ use crate::package::{Icon, Package, PackageError};
 use crate::version::Version;
 
 /// The name of the package file inside an application's directory.
-pub const PACKAGE_FILE: &str = "app.hbapp";
+pub const PACKAGE_FILE: &str = "app.app";
 
 /// The name of the icon cache inside an application's directory.
 ///
@@ -41,7 +41,7 @@ pub const ICON_FILE: &str = "icon.bin";
 pub const DISABLED_FILE: &str = "disabled";
 
 /// The previous package, kept across an upgrade so that a bad version can be gone back from.
-pub const PREVIOUS_FILE: &str = "app.hbapp.prev";
+pub const PREVIOUS_FILE: &str = "app.app.prev";
 
 /// The directory an application keeps its own data in.
 pub const DATA_DIR: &str = "data";
