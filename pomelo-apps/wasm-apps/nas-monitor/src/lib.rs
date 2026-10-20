@@ -30,10 +30,13 @@ use app_sdk::{
 const ACCENT: Color = 0x0070_5CF0;
 
 /// 列表页右上角的「添加」、详情页右上角的「终端」、以及详情页那颗「重读」。
-const ADD: Rect = Rect::new(318.0, 22.0, 144.0, 44.0);
-const TERMINAL_PILL: Rect = Rect::new(300.0, 18.0, 162.0, 44.0);
-const REFRESH: Rect = Rect::new(318.0, 70.0, 144.0, 36.0);
-const BACK: Rect = Rect::new(18.0, 18.0, 48.0, 44.0);
+///
+/// 都压在 56 以下：屏幕最上面那 48 像素是外壳从屏幕顶边拉下任务列表的那一条，落在那里的手指
+/// 归它，应用一个事件也收不到 —— 摆在 22 上的那颗「添加」按下去没有反应，就是这个原因。
+const ADD: Rect = Rect::new(318.0, 56.0, 144.0, 44.0);
+const TERMINAL_PILL: Rect = Rect::new(300.0, 52.0, 162.0, 44.0);
+const REFRESH: Rect = Rect::new(318.0, 100.0, 144.0, 36.0);
+const BACK: Rect = Rect::new(18.0, 52.0, 48.0, 44.0);
 
 /// 一台机器一行，一行 80：两行字，右边两颗按钮。
 const ROW: f32 = 80.0;
@@ -52,7 +55,8 @@ const SECRET_MAX: usize = 64;
 const PORT_MAX: usize = 5;
 
 /// 表格与键盘的尺寸。四格从 66 起，每格 46；键盘从 250 起，五排。
-const SHEET_CANCEL: Rect = Rect::new(280.0, 16.0, 182.0, 44.0);
+///
+/// 「取消」不在顶上那一排：那里落不到手指（见 [`ADD`]），所以它和「保存」一起排在键盘最后一排。
 const FIELD_X: f32 = 104.0;
 const FIELD_W: f32 = 352.0;
 const FIELD_H: f32 = 40.0;
@@ -93,6 +97,8 @@ enum Key {
     Mode,
     Space,
     Save,
+    /// 收起表格。它排在键盘最后一排，因为顶边那一带的手指落不到（见 [`ADD`]）。
+    Cancel,
 }
 
 const ROW_DIGITS: [Key; 10] = [
@@ -578,14 +584,6 @@ impl Monitor {
         let mut action = Action::None;
         let mut down = None;
 
-        if context.input.pressing(SHEET_CANCEL) {
-            down = Some(SHEET_CANCEL);
-        }
-
-        if context.tapped(SHEET_CANCEL) {
-            action = Action::Cancel;
-        }
-
         for (index, field) in Field::ALL.iter().enumerate() {
             let rect = field_rect(index);
 
@@ -620,6 +618,7 @@ impl Monitor {
                         Key::Mode => Action::Mode,
                         Key::Backspace => Action::Erase,
                         Key::Save => Action::Save,
+                        Key::Cancel => Action::Cancel,
                     };
                 }
             }
@@ -864,7 +863,7 @@ impl Monitor {
         if count == 0 {
             widgets::empty(
                 ui,
-                Rect::new(18.0, 120.0, 444.0, 180.0),
+                Rect::new(18.0, 128.0, 444.0, 172.0),
                 icons::DVR,
                 "点「添加」填上地址、账号与密码",
                 theme::MUTED,
@@ -956,7 +955,7 @@ impl Monitor {
             self.pressed == Some(BACK),
         );
 
-        ui.text(78.0, 30.0, self.device_host(self.chosen), 20.0, theme::TEXT);
+        ui.text(78.0, 62.0, self.device_host(self.chosen), 20.0, theme::TEXT);
 
         widgets::pill(
             ui,
@@ -969,7 +968,7 @@ impl Monitor {
 
         let online = self.status == app_abi::nas::ONLINE;
 
-        ui.circle((26.0, 92.0), 4.0, if online { theme::OK } else { theme::DANGER });
+        ui.circle((26.0, 108.0), 4.0, if online { theme::OK } else { theme::DANGER });
 
         let mut storage = [0u8; 64];
         let mut buffer = app_sdk::text::Buf::new(&mut storage);
@@ -984,7 +983,7 @@ impl Monitor {
             self.fault()
         };
 
-        ui.text(42.0, 84.0, line, 16.0, if online { theme::MUTED } else { theme::DANGER });
+        ui.text(42.0, 100.0, line, 16.0, if online { theme::MUTED } else { theme::DANGER });
 
         widgets::pill(
             ui,
@@ -1120,18 +1119,9 @@ fn sheet(ui: &mut Ui, form: &Form) {
         theme::MUTED
     };
 
-    ui.clip(Rect::new(24.0, 44.0, 244.0, 20.0));
+    ui.clip(Rect::new(24.0, 44.0, 432.0, 20.0));
     ui.text(24.0, 44.0, hint, 13.0, hint_color);
     ui.clip_end();
-
-    widgets::pill(
-        ui,
-        SHEET_CANCEL,
-        "取消",
-        icons::ARROW_BACK,
-        theme::SURFACE_HIGH,
-        form.pressed == Some(SHEET_CANCEL),
-    );
 
     for (index, field) in Field::ALL.iter().enumerate() {
         let field = *field;
@@ -1201,6 +1191,17 @@ fn sheet(ui: &mut Ui, form: &Form) {
                 continue;
             }
 
+            if key == Key::Cancel {
+                ui.rounded_rect(rect, 8.0, theme::SURFACE_HIGH);
+
+                if pressed {
+                    ui.rounded_stroke(rect, 8.0, 2.0, theme::DANGER);
+                }
+
+                ui.text_centered(rect, "取消", 16.0, theme::DANGER);
+                continue;
+            }
+
             ui.rounded_rect(
                 rect,
                 8.0,
@@ -1244,7 +1245,7 @@ fn sheet(ui: &mut Ui, form: &Form) {
 
                     ui.text_centered(rect, text, 17.0, theme::TEXT);
                 }
-                Key::Save => {}
+                Key::Save | Key::Cancel => {}
             }
         }
     }
@@ -1288,7 +1289,8 @@ fn key_at(row: usize, slot: usize, symbols: bool) -> Option<(Key, u8)> {
             1 => Some((Key::Char('_'), 1)),
             2 => Some((Key::Char('@'), 1)),
             3 => Some((Key::Char('/'), 1)),
-            4 => Some((Key::Space, 4)),
+            4 => Some((Key::Space, 2)),
+            6 => Some((Key::Cancel, 2)),
             8 => Some((Key::Save, 2)),
             _ => None,
         },
@@ -1308,7 +1310,7 @@ fn key_rect(row: usize, slot: usize, units: u8) -> Rect {
 }
 
 fn row_rect(index: usize) -> Rect {
-    Rect::new(18.0, 96.0 + index as f32 * ROW, 444.0, 68.0)
+    Rect::new(18.0, 108.0 + index as f32 * ROW, 444.0, 68.0)
 }
 
 /// 行右边那颗「编辑」。
@@ -1334,7 +1336,7 @@ fn tile_rect(index: usize) -> Rect {
     let column = index % 3;
     let row = index / 3;
 
-    Rect::new(18.0 + column as f32 * (W + GAP), 116.0 + row as f32 * (H + GAP), W, H)
+    Rect::new(18.0 + column as f32 * (W + GAP), 140.0 + row as f32 * (H + GAP), W, H)
 }
 
 /// 一份「一行一条」的文本里，第 `index` 行的第 `slot` 个字段。
