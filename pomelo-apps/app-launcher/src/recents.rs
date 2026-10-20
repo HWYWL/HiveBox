@@ -318,7 +318,7 @@ fn nothing_running(language: Language) -> &'static str {
 mod tests {
     use super::*;
 
-    use crate::{CATALOGUE, FILES, MUSIC, TERMINAL};
+    use crate::{CATALOGUE, SETTINGS, TERMINAL, UPDATER};
 
     /// Every word exists in both languages, and the two are not the same word.
     ///
@@ -353,7 +353,7 @@ mod tests {
             })
         };
 
-        for apps in [vec![], vec![MUSIC], vec![MUSIC, TERMINAL, FILES]] {
+        for apps in [vec![], vec![TERMINAL], vec![TERMINAL, SETTINGS, UPDATER]] {
             for theme_mode in [ThemeMode::Dark, ThemeMode::Light] {
                 let _ = view(&apps, Language::Chinese, theme_mode, &card);
                 let _ = view(&apps, Language::English, theme_mode, &card);

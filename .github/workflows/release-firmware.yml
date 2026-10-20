@@ -201,7 +201,11 @@ jobs:
           . "$HOME/esp-idf/export.sh"
 
           card="ui-framework/pomelo-font/dist/card"
-          python tools/publish_bin.py --card-dir "${card}"
+          # `--apps`：清单里的第三个数组。不给它，发布出来的清单就只有固件和字库，商店的
+          # 「可安装」一栏对着一份没有 apps 的清单，于是一台刚刷完的盒子什么也装不上 ——
+          # 而应用现在是装上去的，不是编译进去的。片段是 `tools/build_apps.py` 写的那份
+          # `bin/apps.json`，包本身也在 `bin/apps/` 里等着被平铺进去。
+          python tools/publish_bin.py --card-dir "${card}" --apps bin/apps.json
 
           ls -l bin/
           firmware="$(ls bin/hivebox-firmware-*.bin)"

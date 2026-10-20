@@ -24,9 +24,8 @@ members = [
     "store",
     # The applications that are packages rather than crates in the firmware. Their build target is
     # `wasm32-unknown-unknown`; they are members so that one `cargo test` still covers the whole tree.
-    # The pairs below (a `wasm-apps/<id>` and the crate of the same name still in the image) are the
-    # migration as it stands: a package is published, then the crate it replaces is taken out — see
-    # `tools/build_apps.py`, whose catalogue is the one list of what is published.
+    # This is the whole list: every application a person installs is one of these, and the twelve
+    # crates they replaced are gone from the image — see `tools/build_apps.py`.
     "wasm-apps/calculator",
     "wasm-apps/clock",
     "wasm-apps/cloud-monitor",
@@ -39,20 +38,13 @@ members = [
     "wasm-apps/weather",
     "wasm-apps/web-manager",
     "wasm-apps/wifi-map",
-    "task-viewer",
+    # What the image still carries: the shell. The settings (and the Wi-Fi page inside it), the store,
+    # the terminal and the update tile are the four a box cannot do without — see
+    # `app-launcher/src/apps.rs` on why these four and not others.
     "app-launcher",
-    "cloud-monitor",
-    "files",
-    "games",
-    "music-player",
-    "nas-monitor",
-    "power-log",
     "settings",
     "terminal",
     "updater",
-    "weather",
-    "web-manager",
-    "wifi-map",
 ]
 
 [patch."https://github.com/pomelos-on-sale/pomelo-widgets.git"]

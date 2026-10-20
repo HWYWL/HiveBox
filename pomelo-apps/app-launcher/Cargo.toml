@@ -37,23 +37,19 @@ app-host = { path = "../app-host", features = ["ui", "board"] }
 # The shapes of a touch and the layout of a display list, shared with the runtime and the SDK.
 app-abi = { path = "../app-abi" }
 
-# The apps it hosts, as widgets. `default-features = false` everywhere so that the *renderer* is this
-# project's or the firmware's choice and never a child's: their `desktop` default would otherwise
-# decide it from inside a dependency.
-cloud-monitor = { path = "../cloud-monitor", default-features = false }
-files = { path = "../files", default-features = false }
-games = { path = "../games", default-features = false }
-music-player = { path = "../music-player", default-features = false }
-power-log = { path = "../power-log", default-features = false }
-nas-monitor = { path = "../nas-monitor", default-features = false }
+# The apps it still hosts as widgets. Ten of them left: they are packages now, installed from the
+# store and drawn by the runtime like any other, and an application a person can install is one the
+# image has no business also carrying. What stays is the shell — the settings (with the Wi-Fi page
+# that gets the box back on a network), the store (which is how an application comes back), the
+# terminal, and the update tile.
+#
+# `default-features = false` everywhere so that the *renderer* is this project's or the firmware's
+# choice and never a child's: their `desktop` default would otherwise decide it from inside a
+# dependency.
 settings = { path = "../settings", default-features = false }
 store = { path = "../store", default-features = false }
-task-viewer = { path = "../task-viewer", default-features = false }
 terminal = { path = "../terminal", default-features = false }
 updater = { path = "../updater", default-features = false }
-weather = { path = "../weather", default-features = false }
-web-manager = { path = "../web-manager", default-features = false }
-wifi-map = { path = "../wifi-map", default-features = false }
 
 # The icons the grid draws. A crate of its own -- a font and a table of `Icon` constants, with no
 # widgets in it -- so that this app does not have to depend on `pomelo-widgets` to draw a picture:

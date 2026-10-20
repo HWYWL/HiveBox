@@ -139,21 +139,11 @@ use iced::{
 
 use app_host::ui::Fonts;
 use app_host::{Catalog, HostedApp, Installed};
-use cloud_monitor::CloudMonitor;
-use files::Files;
-use games::Games;
-use music_player::Player;
-use nas_monitor::NasMonitor;
 use pomelo_hal::Board;
-use power_log::PowerLog;
 use settings::Settings;
 use store::Store;
-use task_viewer::TaskViewer;
 use updater::Updater;
 use terminal::Terminal;
-use weather::Weather;
-use web_manager::WebManager;
-use wifi_map::WifiMap;
 
 pub use apps::{Entry, CATALOGUE};
 pub use pomelo_material_symbols::Icon;
@@ -165,12 +155,7 @@ pub use style::{
     STATUS_HEIGHT, STATUS_INSET, WALLPAPER_DARK, WALLPAPER_LIGHT,
 };
 
-/// The launcher as an iced program, with `board` for its apps.
 ///
-/// The result is iced's own `Application`, which is both a builder — `main.rs` calls `run()` on it —
-/// and a [`Program`](iced::Program), so the platform can run it directly (`app_launcher::program(board).run()`).
-/// One definition, the same wiring in both places: the subject of the launcher is not a *shape* of
-/// program, it is these four functions.
 ///
 /// Text draws with the platform's default font — a Simplified-Chinese subset of Source Han Sans, installed by the
 /// host unless an app installs one of its own first; see `pomelo_iced_host::fonts`. The icon font is
@@ -197,149 +182,62 @@ enum Screen {
     App(usize),
 }
 
-/// The entries in [`CATALOGUE`] that have an iced app behind them.
 ///
-/// Indices, because that is what the grid hands over when a tile is tapped. The tests assert that
-/// each of these still names the app it says it does, and every entry has one: the catalogue and
-/// the list of apps are the same things, in the same order.
 ///
-/// The list shrinks as applications leave the image. The clock and the calculator were the first
-/// two: both are published as packages now, and an application that can be installed is one the
-/// image should not also carry — see the crate's module docs on what the shell keeps.
-pub const MUSIC: usize = 0;
-pub const WEB_MANAGER: usize = 1;
-pub const NAS_MONITOR: usize = 2;
-pub const FILES: usize = 3;
-pub const WEATHER: usize = 4;
-pub const GAMES: usize = 5;
-pub const SETTINGS: usize = 6;
-pub const STORE: usize = 7;
-pub const TERMINAL: usize = 8;
-pub const TASK_VIEWER: usize = 9;
-pub const POWER_LOG: usize = 10;
-pub const WIFI_MAP: usize = 11;
-pub const CLOUD: usize = 12;
+/// The list shrinks as applications leave the image, and it is four long now: the clock, the
+/// calculator and ten more are published as packages, and an application that can be installed is
+/// one the image should not also carry — see the crate's module docs on what the shell keeps.
+///
+/// The store is first: an image that carries no applications is a box whose first question is where
+/// they come from, and the tile that answers it is the one a thumb reaches without looking.
+pub const STORE: usize = 0;
+pub const SETTINGS: usize = 1;
+pub const TERMINAL: usize = 2;
 /// The updater is the last tile on the grid: it is the one that is on its way out, and the store now
 /// holds the position it had — see the catalogue's own docs for both.
-pub const UPDATER: usize = 13;
+pub const UPDATER: usize = 3;
 
-/// What the launcher reacts to.
 ///
 /// No longer `Eq`: the terminal's own `Message` carries a `Size`, and a size is a pair of floats.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
-    /// An icon was tapped.
     Open(usize),
-    /// A finger on the page of an installed application: which tile it was, and the touch itself.
     ///
-    /// The index rather than the package's id, because the tile is what the finger touched and the
-    /// page the touch belongs to is the page that index is showing. A rescan of the catalog happens
-    /// between pages, never inside one — see [`Launcher::sync_hosted`].
     HostedInput(usize, app_abi::Event),
-    /// One frame for the installed application on screen.
     HostedFrame,
-    /// The paged grid turned to `page`.
     PageChanged(usize),
-    /// The back button, or hardware button 1 (moves to background).
     Back,
-    /// The bottom edge was swiped up: back to the desktop, leaving the app running.
     ///
-    /// Its own message and not [`Message::Back`], because the two differ exactly where it matters:
-    /// back asks the app first — the settings list takes it to leave a sub-page — while a swipe up
-    /// from the foot of the panel says which of the two things the finger meant.
     Home,
-    /// The exit / kill button, or hardware button 2 (kills app and frees memory).
     Exit,
-    /// A tap on the wash under the switcher's cards: put the sheet away, stopping nothing.
     ///
-    /// The one way the sheet is left that is not a gesture of its own, and it is answered the same way
-    /// the drags are: the sheet goes back up under its own frames. Nothing it lists is stopped — the
-    /// crosses on the cards and "clear all" are the two things that stop anything.
     RecentsClose,
-    /// The cross on one of the switcher's cards: stop that app.
     RecentsKill(usize),
-    /// The switcher's "clear all": stop every app it lists.
     RecentsClearAll,
-    /// A transition reported itself over: the app that was on its way has arrived, or has gone.
     ///
-    /// The one message here that comes from a widget rather than from a finger or a key
-    /// (`pomelo_widgets::ScreenTransition` publishes it on the frame the app stops moving), and it
-    /// is what ends the transition — until it arrives, the app is still drawn over the desktop.
     TransitionSettled,
-    /// A finger the edge layer is reporting, once a frame: where it came down and how far it has taken
-    /// the layer in front since.
     ///
-    /// A *drag* and not a swipe, because what moves is the layer itself: what the finger has done so
-    /// far is where it is drawn, and what it does next is where it goes next. Both numbers are here
-    /// because both are needed — the *start* is what says which edge this gesture came out of, and
-    /// therefore which gesture it is, while the distance is what says how far it has gone. See
-    /// [`Launcher::layer_for`].
     Pulled {
         /// Where the finger came down, on the panel.
         start: Point,
         /// How far it has travelled since.
         delta: Vector,
     },
-    /// The finger left the panel, at the end of a drag: how fast it was moving when it left.
     ///
-    /// Speed is half of what decides where an app ends up — a short flick is a decision as much as a
-    /// long pull — and this is the velocity of the whole drag rather than of its last frame, which is
-    /// what a flick is. See [`Launcher::release_app`].
     Released(Vector),
-    /// The status bar's readings, driven by the [`Subscription`].
     ///
-    /// Produced periodically by [`status_stream`] and whenever underlying
-    /// hardware events occur (battery level, charging state, Wi-Fi status changes, clock minute updates).
     Status(String, u8, bool, u8),
-    /// A second has passed on the board ([`pomelo_hal::SystemEvent::Tick`]).
     ///
-    /// The launcher has no clock of its own to advance: the status bar's minute arrives with the
-    /// battery push. This exists for the hosted apps that show something *moving* — the settings
-    /// list's readout, the task viewer's list and the clock's hands — which
-    /// are told to look at the board again rather than being handed values to draw. None of them is
-    /// read while it is not being looked at, and an app that was never opened makes this one match
-    /// arm.
     Tick,
-    /// The screen changed size: a window on a desktop, the panel on the board.
     Resized(Size),
-    /// A message from one of the apps this launcher hosts.
     Settings(settings::Message),
-    /// The store's own: a tab, a row's one button, or the frame that reads a download.
     Store(store::Message),
-    /// The updater's own: a row opened, a finger on one of its four buttons, or the frame that reads
-    /// what the network answered.
     Updater(updater::Message),
-    Music(music_player::Message),
     Terminal(terminal::Message),
-    WebManager(web_manager::Message),
-    TaskViewer(task_viewer::Message),
-    NasMonitor(nas_monitor::Message),
-    /// The file manager's own: a volume, a row, one of its four actions, or a name typed into a prompt.
-    Files(files::Message),
-    /// The power log's own: the beat that looks at the gauge, or a finger asking for a sample now.
-    PowerLog(power_log::Message),
-    /// The channel map's own: the frame that reads a scan, or a finger asking for another one.
-    WifiMap(wifi_map::Message),
-    /// The weather page's own: the frame that reads the answer, or a finger asking for another forecast.
-    Weather(weather::Message),
-    /// The games app's own: the row that opened a game, the direction that steered it, the way back to
-    /// the list, or the frame a snake stepped on.
-    Games(games::Message),
-    /// The cloud page's own: the frame that reads an answer, a chip or a row picked, or a power button.
-    Cloud(cloud_monitor::Message),
 }
 
-/// The layer over the desktop that is moving, and which way it is going.
 ///
-/// The *resting state* is not part of this, and that is the point: a layer that is arriving is already
-/// the thing it is arriving over — an app is [`Screen::App`], the switcher is `recents` — and one that
-/// is leaving has already given way. Either state changes on the frame the *gesture* decides, not on
-/// the frame the layer has finished moving. What is left to do after that is *show* it: the layer is
-/// drawn over the desktop for as long as it takes to slide off it, by
-/// [`pomelo_widgets::transition`].
 ///
-/// While a finger is still on it, nothing has been decided at all: the layer is drawn where the finger
-/// has put it, and what is behind it is only what the drag is uncovering.
 ///
 /// Which is why a layer is remembered by name rather than by element: an app's state never left this
 /// launcher — the same reason a backgrounded app comes back on the page it was on — and the view
@@ -349,14 +247,11 @@ struct Transition {
     /// What is moving over the desktop.
     layer: Layer,
     motion: pomelo_widgets::Motion,
-    /// Where it was when the gesture reached it, in `0.0..=1.0`.
     ///
     /// An app rests on the panel; the switcher rests *off* it or *over* it, depending on whether it
     /// was up when the finger arrived. It is where a release falls back to, and what tells a gesture
     /// that meant it from one that changed its mind. See [`Launcher::release_layer`].
     start: f32,
-    /// Where the layer is now, in the launcher's own copy of it: where a finger has pulled it to while
-    /// one is on it, or the place it was sent to when the finger left.
     ///
     /// Kept here rather than asked back out of the widget, because the widget decides nothing and is
     /// only ever told where to draw. One answer to "where is it" is worth more than a widget that can
@@ -367,15 +262,11 @@ struct Transition {
 /// The two things that are drawn *over* the desktop, and can be taken off it by a finger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Layer {
-    /// One of the apps, by the index the grid hands over.
     App(usize),
-    /// The task switcher: a sheet over whatever is up, which is what makes it the layer in front
-    /// whenever it is there at all.
     Switcher,
 }
 
 impl Layer {
-    /// Where this layer rests when nothing is moving it.
     ///
     /// An app rests on the panel — `0.0`, drawn exactly where it always is — and the switcher rests
     /// off the panel when it is down and over it when it is up. Which is the one place its resting
@@ -389,11 +280,7 @@ impl Layer {
     }
 }
 
-/// One installed package, as the grid thinks of it.
 ///
-/// The catalog says what is installed; this says what this launcher has done about it. An
-/// application is a package on disk until its tile is pressed, and a VM from then until it is
-/// killed — which is exactly the difference between [`Hosted::app`] being `None` and `Some`.
 struct Hosted {
     installed: Installed,
     /// The running application, once its tile has been pressed.
@@ -417,27 +304,17 @@ pub struct Launcher {
     /// The updater. Plain `updater` and not `updater_app`, for the clock's reason: nothing else in
     /// the launcher is called that.
     updater: Option<Updater>,
-    music: Option<Player>,
     terminal: Option<Terminal>,
-    web_manager: Option<WebManager>,
-    task_viewer: Option<TaskViewer>,
-    nas_monitor: Option<NasMonitor>,
     /// The file manager. Plain `files` and not `files_app`, for the clock's reason: there is no
     /// status bar reading of that name for a suffix to be told apart from.
-    files: Option<Files>,
     /// The power log. Plain `power_log` and not `power_log_app`, for the same reason as the one above:
     /// nothing else in the launcher is called that.
-    power_log: Option<PowerLog>,
     /// The channel map. Plain `wifi_map` and not `wifi_map_app`, for the power log's reason: the
     /// launcher has no status bar reading called that, only a count of bars.
-    wifi_map: Option<WifiMap>,
     /// The weather page. Plain `weather` and not `weather_app`, for the wifi map's reason: nothing
     /// else in the launcher is called that.
-    weather: Option<Weather>,
     /// The games app. Plain `games` and not `games_app`, for the weather page's reason.
-    games: Option<Games>,
     /// The cloud page. Plain `cloud` and not `cloud_app`, for the games app's reason.
-    cloud: Option<CloudMonitor>,
     /// Apps currently running in memory (foreground or background).
     running_apps: Vec<usize>,
     board: Arc<Board>,
@@ -447,13 +324,11 @@ pub struct Launcher {
     size: Size,
     /// Which page of the grid is currently up.
     page: usize,
-    /// Whether the task switcher is down.
     ///
     /// A `bool` and not a `Screen`, because it is not one: the sheet is a layer over whatever is on
     /// screen, and the screen under it is still what is running. What it lists is `running_apps`,
     /// which is the same list the status bar's row of icons is drawn from.
     recents: bool,
-    /// An app on its way in or out, while it is moving.
     ///
     /// `Some` for the few hundred milliseconds between the gesture and the app having arrived or
     /// gone, and the only thing that makes the view draw two screens in one frame.
@@ -466,7 +341,6 @@ pub struct Launcher {
 }
 
 impl Launcher {
-    /// The launcher and every app it hosts, all sharing `board`.
     ///
     /// Hosted apps are lazily loaded on demand when first opened, rather than during boot,
     /// eliminating startup CPU overhead, track scanning, and initial heap allocations.
@@ -492,9 +366,7 @@ impl Launcher {
             settings: None,
             store: None,
             updater: None,
-            music: None,
             terminal: None,
-            web_manager: None,
             running_apps: Vec::new(),
             board,
             // What the screen is until the platform says: the design panel. The first `Resized`
@@ -505,14 +377,6 @@ impl Launcher {
             page: 0,
             recents: false,
             transition: None,
-            task_viewer: None,
-            nas_monitor: None,
-            files: None,
-            power_log: None,
-            wifi_map: None,
-            weather: None,
-            games: None,
-            cloud: None,
             clock,
             battery,
             charging,
@@ -521,7 +385,6 @@ impl Launcher {
         }
     }
 
-    /// The screen the launcher is laying out for, as the platform last reported it.
     ///
     /// Read by the host and by the tests. It is the platform's number and never a constant: the
     /// grid's pages and the pager's thresholds are this width, and the apps whose layout follows the
@@ -554,37 +417,7 @@ impl Launcher {
         if let Some(app) = &mut self.updater {
             app.set_preferences(prefs);
         }
-        if let Some(app) = &mut self.music {
-            app.set_preferences(prefs);
-        }
         if let Some(app) = &mut self.terminal {
-            app.set_preferences(prefs);
-        }
-        if let Some(app) = &mut self.web_manager {
-            app.set_preferences(prefs);
-        }
-        if let Some(app) = &mut self.task_viewer {
-            app.set_preferences(prefs);
-        }
-        if let Some(app) = &mut self.nas_monitor {
-            app.set_preferences(prefs);
-        }
-        if let Some(app) = &mut self.files {
-            app.set_preferences(prefs);
-        }
-        if let Some(app) = &mut self.power_log {
-            app.set_preferences(prefs);
-        }
-        if let Some(app) = &mut self.wifi_map {
-            app.set_preferences(prefs);
-        }
-        if let Some(app) = &mut self.weather {
-            app.set_preferences(prefs);
-        }
-        if let Some(app) = &mut self.games {
-            app.set_preferences(prefs);
-        }
-        if let Some(app) = &mut self.cloud {
             app.set_preferences(prefs);
         }
     }
@@ -600,8 +433,6 @@ impl Launcher {
         self.propagate_preferences();
     }
 
-    /// The store, which is handed the board and reads two of its backends: the network (what the
-    /// repository publishes) and the two volumes a package may live on.
     ///
     /// It asks the repository what it has on the way in, for the updater's reason: the page's whole
     /// subject is what there is to install. The installed list does not need the network, so the
@@ -615,9 +446,6 @@ impl Launcher {
         self.store.as_mut().unwrap()
     }
 
-    /// The updater, which is handed the board and reads three backends through it: the network (the
-    /// list of what the repository has), the storage (the card a glyph table has to land on) and the
-    /// system (the version this image was built with, and the partition a new image is written to).
     ///
     /// It asks the repository what it has on the way in, for the weather page's reason one step
     /// further on: a page whose whole subject is "is there a newer one" should open on that question
@@ -653,15 +481,6 @@ impl Launcher {
         self.settings.as_mut().unwrap()
     }
 
-    pub fn get_or_create_music(&mut self) -> &mut Player {
-        if self.music.is_none() {
-            let mut app = Player::new(Arc::clone(&self.board));
-            app.set_preferences(self.preferences);
-            self.music = Some(app);
-        }
-        self.music.as_mut().unwrap()
-    }
-
     pub fn get_or_create_terminal(&mut self) -> &mut Terminal {
         if self.terminal.is_none() {
             // The board is handed over here and nowhere else: the terminal is hosted by the launcher, so
@@ -676,227 +495,28 @@ impl Launcher {
         self.terminal.as_mut().unwrap()
     }
 
-    /// Somebody tapped the terminal entry on the monitoring page: open the terminal onto the machine
-    /// that page is about, and bring it to the front.
     ///
-    /// The one place a hosted app's message turns into *the launcher opening an app*, and the reason
-    /// [`nas_monitor::Message::Terminal`] is caught rather than passed on: which app is on screen is the
-    /// launcher's business and no page inside it can decide it. The machine is asked of the monitor
-    /// rather than carried in the message, because "which machine is this page about" is one answer and
-    /// the monitor already gives it — see [`NasMonitor::watched`].
-    fn open_terminal_on_watched(&mut self) -> Task<Message> {
-        // A monitor with no machine on screen has no machine to open a shell on. Nothing to do and
-        // nothing to say: the entry only exists on a header that is drawn with a machine on it.
-        let Some(device) = self.get_or_create_nas_monitor().watched().cloned() else {
-            return Task::none();
-        };
 
-        // Connected before the screen changes, so the terminal's first frame is already the session
-        // rather than a local prompt it is on its way out of — see [`Terminal::connect`]. A board that
-        // cannot raise the session says so on the terminal's own page, in the terminal's own words.
-        self.get_or_create_terminal().connect(&device);
-
-        // And in front, through the same door a tile tap uses, so the switcher's order, the status
-        // bar's row of icons and the size hand-off are maintained by the one piece of code that
-        // maintains them rather than by a second copy of it here. Asked directly and not handed back as
-        // a message, because a message would make the switch something a running loop has to come round
-        // to: the terminal would be connected for a frame before it was on screen.
-        self.update(Message::Open(TERMINAL))
-    }
-
-    /// The web manager is the one app here whose state outlives the app: the server it switches is
-    /// the board's, so an app opened onto a server that is already up reads that from the board
-    /// rather than assuming it is down — see `WebManager::new`.
-    pub fn get_or_create_web_manager(&mut self) -> &mut WebManager {
-        if self.web_manager.is_none() {
-            let mut app = WebManager::new(Arc::clone(&self.board));
-            app.set_preferences(self.preferences);
-            self.web_manager = Some(app);
-        }
-        self.web_manager.as_mut().unwrap()
-    }
-
-    /// The task viewer, which is the one app here that is nothing *but* its readings: it is handed the
-    /// board and reads the task list, the two memory pools and the uptime from it. There is no state of
-    /// its own to seed.
-    pub fn get_or_create_task_viewer(&mut self) -> &mut TaskViewer {
-        if self.task_viewer.is_none() {
-            let mut app = TaskViewer::new(Arc::clone(&self.board));
-            app.set_preferences(self.preferences);
-            self.task_viewer = Some(app);
-        }
-        self.task_viewer.as_mut().unwrap()
-    }
-
-    /// The NAS monitor, which is handed the board like the task viewer and reads a *different*
-    /// machine through it: what this board can reach is the backend's business, not this app's.
-    pub fn get_or_create_nas_monitor(&mut self) -> &mut NasMonitor {
-        if self.nas_monitor.is_none() {
-            let mut app = NasMonitor::new(Arc::clone(&self.board));
-            app.set_preferences(self.preferences);
-            self.nas_monitor = Some(app);
-        }
-        self.nas_monitor.as_mut().unwrap()
-    }
-
-    /// The clock left this launcher with the calculator: it is a package now, installed from the
-    /// store and read by the runtime like any other — see [`CATALOGUE`]'s own note. Its alarms and
-    /// its dial travel in the package, and the board's clock reaches it through the runtime's time
-    /// service rather than through this launcher handing it a `Board`.
-
-    /// The file manager, which is handed the board like the apps before it and is the one that writes
-    /// to it: the volumes come from the same storage backend the terminal reads, and the four actions
-    /// go back through its `fopen` rather than through `std::fs`.
     ///
-    /// [`Files::new`] looks for a card and lists the built-in volume before the first frame, so opening
-    /// the page shows a directory rather than an empty listing waiting for a probe.
-    pub fn get_or_create_files(&mut self) -> &mut Files {
-        if self.files.is_none() {
-            let mut app = Files::new(Arc::clone(&self.board));
-            app.set_preferences(self.preferences);
-            self.files = Some(app);
-        }
-        self.files.as_mut().unwrap()
-    }
 
-    /// The power log, which is handed the board and nothing else: it reads the gauge and the PMIC's
-    /// temperature out of the power backend, the clock out of the system one, and writes its hour's
-    /// record through the storage backend's `append_file` — and it is the only app in this launcher
-    /// whose state is *time* rather than a thing, so the beat it is handed is the whole of what makes it
-    /// move on a board with no window frames of its own.
-    pub fn get_or_create_power_log(&mut self) -> &mut PowerLog {
-        if self.power_log.is_none() {
-            let mut app = PowerLog::new(Arc::clone(&self.board));
-            app.set_preferences(self.preferences);
-            self.power_log = Some(app);
-        }
-        self.power_log.as_mut().unwrap()
-    }
+    ///
 
-    /// The channel map, which is handed the board and reads one backend through it: the radio.
     ///
-    /// [`WifiMap::new`] starts a scan on the way in, so opening the tile shows a chart filling in rather
-    /// than an empty page waiting for somebody to press something. The scan is asynchronous and
-    /// tick-driven — see the app's own docs — which is why this app, like the four before it, is parked
-    /// in [`Launcher::subscription`] and poked by [`Message::Tick`] rather than being allowed to block.
-    pub fn get_or_create_wifi_map(&mut self) -> &mut WifiMap {
-        if self.wifi_map.is_none() {
-            let mut app = WifiMap::new(Arc::clone(&self.board));
-            app.set_preferences(self.preferences);
-            self.wifi_map = Some(app);
-        }
-        self.wifi_map.as_mut().unwrap()
-    }
 
-    /// The weather page, which is handed the board and reads one backend through it: the network.
     ///
-    /// [`Weather::new`] asks for a forecast on the way in, which is the channel map's argument one
-    /// layer up: a page whose whole subject is a reading should open on that reading having been
-    /// *asked for* rather than on an empty card. The request is asynchronous and frame-driven — see
-    /// the app's own docs — so this app, like the one before it, is parked in
-    /// [`Launcher::subscription`] and poked by [`Message::Tick`] rather than being allowed to block.
-    pub fn get_or_create_weather(&mut self) -> &mut Weather {
-        if self.weather.is_none() {
-            let mut app = Weather::new(Arc::clone(&self.board));
-            app.set_preferences(self.preferences);
-            self.weather = Some(app);
-        }
-        self.weather.as_mut().unwrap()
-    }
 
-    /// The games app, which is handed the board for two questions and never again: how long it has
-    /// been up, which is the seed the first game is dealt from — see `Games::seed` — and what the
-    /// accelerometer is reading, which is how a snake is steered by tipping the box.
     ///
-    /// The one hosted app here with a second page inside it, and therefore the one whose
-    /// subscription means something different on each: the list and 2048 listen for nothing a board
-    /// can send, while a snake steps on the board's own frames and reads a tilt on the same ones.
-    /// That is why it parks a subscription in [`Launcher::subscription`] and is also handed the
-    /// beat — see the [`Message::Tick`] arm — while every other app here needs one or the other.
-    pub fn get_or_create_games(&mut self) -> &mut Games {
-        if self.games.is_none() {
-            let mut app = Games::new(Arc::clone(&self.board));
-            app.set_preferences(self.preferences);
-            self.games = Some(app);
-        }
-        self.games.as_mut().unwrap()
-    }
-
-    /// The cloud page, which is handed the board and reads one backend through it: the account.
     ///
-    /// [`CloudMonitor::new`] asks for the list on the way in, which is the weather page's argument
-    /// again: a page whose whole subject is a set of machines should open on that set having been
-    /// *asked for*, rather than on an empty card. The request is asynchronous and frame-driven — see
-    /// the app's own docs — so this app, like the ones before it, is parked in
-    /// [`Launcher::subscription`] and poked by [`Message::Tick`] rather than being allowed to block.
-    ///
-    /// It is also the one app here that reads a *masked* secret: [`CloudMonitor`] is told whether an
-    /// account has a key and never what the key is — see the app's own docs.
-    pub fn get_or_create_cloud(&mut self) -> &mut CloudMonitor {
-        if self.cloud.is_none() {
-            let mut app = CloudMonitor::new(Arc::clone(&self.board));
-            app.set_preferences(self.preferences);
-            self.cloud = Some(app);
-        }
-        self.cloud.as_mut().unwrap()
-    }
 
     /// The hosted apps, for the host and the tests.
     pub fn settings(&mut self) -> &Settings {
         self.get_or_create_settings()
     }
 
-    pub fn music(&mut self) -> &Player {
-        self.get_or_create_music()
-    }
-
     pub fn terminal(&mut self) -> &Terminal {
         self.get_or_create_terminal()
     }
 
-    pub fn web_manager(&mut self) -> &WebManager {
-        self.get_or_create_web_manager()
-    }
-
-    pub fn task_viewer(&mut self) -> &TaskViewer {
-        self.get_or_create_task_viewer()
-    }
-
-    pub fn nas_monitor(&mut self) -> &NasMonitor {
-        self.get_or_create_nas_monitor()
-    }
-
-    /// The file manager app.
-    pub fn files(&mut self) -> &Files {
-        self.get_or_create_files()
-    }
-
-    /// The power log app.
-    pub fn power_log(&mut self) -> &PowerLog {
-        self.get_or_create_power_log()
-    }
-
-    /// The channel map app.
-    pub fn wifi_map(&mut self) -> &WifiMap {
-        self.get_or_create_wifi_map()
-    }
-
-    /// The weather app.
-    pub fn weather(&mut self) -> &Weather {
-        self.get_or_create_weather()
-    }
-
-    /// The games app.
-    pub fn games(&mut self) -> &Games {
-        self.get_or_create_games()
-    }
-
-    /// The cloud page.
-    pub fn cloud(&mut self) -> &CloudMonitor {
-        self.get_or_create_cloud()
-    }
-
-    /// Sets what the status bar shows.
     ///
     /// The platform owns these, and pushes them — rather than iced pulling them from a timer,
     /// which would need an async executor this stack does not have. `wifi` is a count of bars on
@@ -940,16 +560,6 @@ impl Launcher {
             SETTINGS => self.settings = None,
             STORE => self.store = None,
             UPDATER => self.updater = None,
-            MUSIC => self.music = None,
-            WEB_MANAGER => self.web_manager = None,
-            TASK_VIEWER => self.task_viewer = None,
-            NAS_MONITOR => self.nas_monitor = None,
-            FILES => self.files = None,
-            POWER_LOG => self.power_log = None,
-            WIFI_MAP => self.wifi_map = None,
-            WEATHER => self.weather = None,
-            GAMES => self.games = None,
-            CLOUD => self.cloud = None,
             // An installed package: the VM goes and the package stays, because killing an
             // application is not uninstalling it. Its tile keeps its place on the grid.
             _ => {
@@ -990,7 +600,6 @@ impl Launcher {
         self.started.elapsed().as_millis() as i64
     }
 
-    /// Opens an installed package: reads it, builds the VM, and leaves it on screen.
     ///
     /// The package is read here rather than at boot, because a tile is a name and an accent and a
     /// module is a module. What the read costs is paid once per open, by the person waiting for it —
@@ -1060,7 +669,6 @@ impl Launcher {
         }
     }
 
-    /// Hands the installed application on screen one frame.
     ///
     /// The exit bit and the failure sentence are read after the frame rather than inside it: both
     /// are the application's answers to having been asked, and both end in the same place — the page
@@ -1105,7 +713,6 @@ impl Launcher {
         }
     }
 
-    /// Re-reads the catalog and moves what is running onto the new indices.
     ///
     /// A package installed or removed while the store was open shifts every tile after it, and
     /// `running_apps` and the screen are indices into that list. Matching by id — not by position —
@@ -1238,7 +845,6 @@ impl Launcher {
         .into()
     }
 
-    /// One installed package's tile: its accent, the first letter of its name, and that name.
     ///
     /// The package's own bitmap is not drawn here yet — see `apps.rs` on why the shell's icons are
     /// baked and this one is a letter — but the accent and the name come from the package, so a
@@ -1330,7 +936,6 @@ impl Launcher {
         })
     }
 
-    /// The screen showing the grid.
     ///
     /// Paged with [`pomelo_widgets::pager`]: the pages follow the finger while it is down, and settle
     /// onto — or back from — the turn it decided when it leaves. See the module docs.
@@ -1357,7 +962,6 @@ impl Launcher {
         container(screen).width(Length::Fill).height(Length::Fill).into()
     }
 
-    /// One page of the grid: up to [`PER_PAGE`] tiles, evenly distributed in rows and columns.
     ///
     /// Both the columns (horizontal) and rows (vertical) are evenly spaced with flexible spaces
     /// (`space-evenly`), ensuring identical gaps between adjacent icons and towards the screen boundaries.
@@ -1440,15 +1044,6 @@ impl Launcher {
         self.tile_count().div_ceil(style::PER_PAGE)
     }
 
-
-    fn music_screen(&self) -> Element<'_, Message> {
-        if let Some(app) = &self.music {
-            app.view().map(Message::Music)
-        } else {
-            Space::new().into()
-        }
-    }
-
     fn terminal_screen(&self) -> Element<'_, Message> {
         if let Some(app) = &self.terminal {
             app.view().map(Message::Terminal)
@@ -1457,90 +1052,8 @@ impl Launcher {
         }
     }
 
-    fn web_manager_screen(&self) -> Element<'_, Message> {
-        if let Some(app) = &self.web_manager {
-            app.view().map(Message::WebManager)
-        } else {
-            Space::new().into()
-        }
-    }
-
-    fn task_viewer_screen(&self) -> Element<'_, Message> {
-        if let Some(app) = &self.task_viewer {
-            app.view().map(Message::TaskViewer)
-        } else {
-            Space::new().into()
-        }
-    }
-
-    fn nas_monitor_screen(&self) -> Element<'_, Message> {
-        if let Some(app) = &self.nas_monitor {
-            app.view().map(Message::NasMonitor)
-        } else {
-            Space::new().into()
-        }
-    }
-
-    /// The file manager. One page and no tabs, so the launcher's own back gesture is the way out, as
-    /// it is for the NAS monitor.
-    fn files_screen(&self) -> Element<'_, Message> {
-        if let Some(app) = &self.files {
-            app.view().map(Message::Files)
-        } else {
-            Space::new().into()
-        }
-    }
-
-    /// The power log. One page and no tabs, so the launcher's own back gesture is the way out, as it is
-    /// for the three pages beside it.
-    fn power_log_screen(&self) -> Element<'_, Message> {
-        if let Some(app) = &self.power_log {
-            app.view().map(Message::PowerLog)
-        } else {
-            Space::new().into()
-        }
-    }
-
-    /// The channel map. One page and no tabs, so the launcher's own back gesture is the way out, as it
-    /// is for the five pages before it.
-    fn wifi_map_screen(&self) -> Element<'_, Message> {
-        if let Some(app) = &self.wifi_map {
-            app.view().map(Message::WifiMap)
-        } else {
-            Space::new().into()
-        }
-    }
-
-    /// The weather page. One page and no tabs, so the launcher's own back gesture is the way out, as it
-    /// is for the six pages before it.
-    fn weather_screen(&self) -> Element<'_, Message> {
-        if let Some(app) = &self.weather {
-            app.view().map(Message::Weather)
-        } else {
-            Space::new().into()
-        }
-    }
-
-    /// The games app, the one screen here with a second page *inside* it: the list it opens on and the
-    /// game a row starts. Both are the app's own, so the launcher's back gesture leaves the whole app
-    /// rather than the game — the game's own way back to the list is on its page.
-    fn games_screen(&self) -> Element<'_, Message> {
-        if let Some(app) = &self.games {
-            app.view().map(Message::Games)
-        } else {
-            Space::new().into()
-        }
-    }
-
     /// The cloud page. One page and no tabs, so the launcher's own back gesture is the way out, as it
     /// is for the pages beside it.
-    fn cloud_screen(&self) -> Element<'_, Message> {
-        if let Some(app) = &self.cloud {
-            app.view().map(Message::Cloud)
-        } else {
-            Space::new().into()
-        }
-    }
 
     /// The settings app, which is the one app here that brings its own back button: it navigates
     /// *inside* itself, so a second one from the launcher would be a second way out of a page. Its
@@ -1574,8 +1087,6 @@ impl Launcher {
         }
     }
 
-
-    /// One app tile: an icon button and label, sized strictly to [`style::TILE_WIDTH`] width.
     ///
     /// Only the app's application icon is tappable. Surrounding spaces and margins allow swipe
     /// gestures to pass through cleanly to [`pomelo_widgets::pager`].
@@ -1651,7 +1162,6 @@ impl Launcher {
             .into()
     }
 
-    /// The clock, the signal and the battery.
     ///
     /// The three readings are the platform's to push, so the bar is built from what was pushed and
     /// not read from the board here: a `Program` cannot hold a subscription to a timer, and the
@@ -1685,7 +1195,6 @@ impl Launcher {
 }
 
 impl Launcher {
-    /// The app's subscriptions: the screen's size, keyboard shortcuts, and hosted app subscriptions.
     ///
     /// Background apps like `music-player` and `settings` (Wi-Fi scanning) keep their subscriptions
     /// alive in the background, while on-screen apps get their subscriptions.
@@ -1747,11 +1256,6 @@ impl Launcher {
             _ => {}
         }
 
-        if self.running_apps.contains(&MUSIC) {
-            if let Some(music) = &self.music {
-                subs.push(music.subscription().map(Message::Music));
-            }
-        }
         if self.running_apps.contains(&SETTINGS) {
             if let Some(settings) = &self.settings {
                 subs.push(settings.subscription().map(Message::Settings));
@@ -1764,25 +1268,16 @@ impl Launcher {
         // "running" to "drawn" in the thirty milliseconds it takes rather than in the second the
         // launcher's own beat would take. On the board there are no frames and the beat is all there is,
         // which is why [`Message::Tick`] is forwarded to it below as well.
-        if let (Screen::App(WIFI_MAP), Some(app)) = (self.screen, &self.wifi_map) {
-            subs.push(app.subscription().map(Message::WifiMap));
-        }
 
         // The weather page's subscription is the channel map's, letter for letter: frames only while
         // its request is in flight — see `Weather::waiting` — so a page showing a finished forecast
         // costs nothing, and the same beat below is what ends the wait on a board with no frames.
-        if let (Screen::App(WEATHER), Some(app)) = (self.screen, &self.weather) {
-            subs.push(app.subscription().map(Message::Weather));
-        }
 
         // The games app's subscription is asked for only while a snake is open — see
         // `Games::subscription` — because that is the only thing in it that is not a desktop's arrow
         // key: a snake moves on its own, and the frames it moves on are this platform's. The other
         // game subscribes to nothing a board can hear, so a page showing 2048 costs what it always
         // did. This is the one forwarding here that is not a wait ending: a snake is a clock.
-        if let (Screen::App(GAMES), Some(app)) = (self.screen, &self.games) {
-            subs.push(app.subscription().map(Message::Games));
-        }
 
         // An installed application's clock, and the only one it has: a sandbox may not make a timer,
         // so the frames of the window are what its animation steps on and what its redraw requests
@@ -1822,9 +1317,6 @@ impl Launcher {
         // costs nothing, and the beat above is what ends the wait on a board with no frames. The one
         // thing this page waits on that the others do not is a *power command*: it is the same kind of
         // wait, and it is ended by the same beat.
-        if let (Screen::App(CLOUD), Some(app)) = (self.screen, &self.cloud) {
-            subs.push(app.subscription().map(Message::Cloud));
-        }
 
         Subscription::batch(subs)
     }
@@ -1851,7 +1343,6 @@ impl Launcher {
         }
     }
 
-    /// Reacts to one message.
     ///
     /// The only work that comes back is the settings app's: it scrolls its own body when the page
     /// changes, and a widget operation has to travel as a [`Task`] from whoever owns the loop.
@@ -1909,36 +1400,6 @@ impl Launcher {
                     }
                     UPDATER => {
                         self.get_or_create_updater();
-                    }
-                    MUSIC => {
-                        self.get_or_create_music();
-                    }
-                    WEB_MANAGER => {
-                        self.get_or_create_web_manager();
-                    }
-                    TASK_VIEWER => {
-                        self.get_or_create_task_viewer();
-                    }
-                    NAS_MONITOR => {
-                        self.get_or_create_nas_monitor();
-                    }
-                    FILES => {
-                        self.get_or_create_files();
-                    }
-                    POWER_LOG => {
-                        self.get_or_create_power_log();
-                    }
-                    WIFI_MAP => {
-                        self.get_or_create_wifi_map();
-                    }
-                    WEATHER => {
-                        self.get_or_create_weather();
-                    }
-                    GAMES => {
-                        self.get_or_create_games();
-                    }
-                    CLOUD => {
-                        self.get_or_create_cloud();
                     }
                     // An installed package: no `Option` field of its own, because the catalog may
                     // hold a number of them the shell cannot name at compile time.
@@ -2009,17 +1470,10 @@ impl Launcher {
                 // reading the task list holds the scheduler still for a moment, and a page nobody is
                 // on does not need that — while the app cannot tell whether it is the page being
                 // looked at. So the question is asked here, and only while it is the screen.
-                if let (Screen::App(TASK_VIEWER), Some(viewer)) = (self.screen, &mut self.task_viewer) {
-                    viewer.update(task_viewer::Message::Tick(Instant::now()));
-                }
 
                 // The NAS monitor is asked the same way and for a sharper version of the same reason:
                 // a look at it is a network round trip to another machine, and a page nobody is on has
                 // no business opening sessions to a NAS that nobody is asking about.
-                if let (Screen::App(NAS_MONITOR), Some(monitor)) = (self.screen, &mut self.nas_monitor)
-                {
-                    monitor.update(nas_monitor::Message::Tick(Instant::now()));
-                }
 
                 // The power log is asked the fourth way, which is the clock's reason with a longer
                 // horizon on it: it is a curve, so the gauge is worth reading while somebody is looking
@@ -2027,26 +1481,17 @@ impl Launcher {
                 // subscription is a window's frames and this board has none, so the beat comes from
                 // here, and the app throws away everything faster than a minute for the curve and an
                 // hour for the log.
-                if let (Screen::App(POWER_LOG), Some(app)) = (self.screen, &mut self.power_log) {
-                    app.update(power_log::Message::Tick(Instant::now()));
-                }
 
                 // The channel map is asked the fifth way, and its reason is the first one in this list
                 // again: a scan is a wait, and this is the beat that ends it on a board whose host
                 // serves no frames. One a second is slow for something that is over in thirty
                 // milliseconds, and it is the whole of what this page needs: what it draws is a
                 // finished scan, and a press of its own button asks for the next one.
-                if let (Screen::App(WIFI_MAP), Some(app)) = (self.screen, &mut self.wifi_map) {
-                    app.update(wifi_map::Message::Tick(Instant::now()));
-                }
 
                 // The weather page is asked the sixth way, and its reason is the fifth one again: a
                 // request is a wait, and this is the beat that ends it on a board whose host serves no
                 // frames. One a second is the whole of what the page needs — it draws an answer, and a
                 // press of its own button asks for the next one.
-                if let (Screen::App(WEATHER), Some(app)) = (self.screen, &mut self.weather) {
-                    app.update(weather::Message::Tick(Instant::now()));
-                }
 
                 // The games app is asked the seventh way, and it is the odd one here: it is the only
                 // app this launcher hands a beat to that has a clock of its own. A snake steps about
@@ -2054,9 +1499,6 @@ impl Launcher {
                 // subscribes to — see [`Launcher::subscription`], which forwards them while it is the
                 // screen. This is the floor under that: on a host that serves no frames at all, a
                 // snake still moves, slowly, rather than sitting still until somebody steers it.
-                if let (Screen::App(GAMES), Some(app)) = (self.screen, &mut self.games) {
-                    app.update(games::Message::Tick(Instant::now()));
-                }
 
                 // The updater is asked the eighth way, and the weather page's reason applies to it
                 // twice over: both of its rows are waits — a repository's list, and then a download
@@ -2074,9 +1516,6 @@ impl Launcher {
                 // press of its own button asks for the next one. A power command asks for the list
                 // again a few of these later, which is the same wait a second time rather than a clock
                 // of the page's own — see `CloudMonitor::tick`.
-                if let (Screen::App(CLOUD), Some(app)) = (self.screen, &mut self.cloud) {
-                    app.update(cloud_monitor::Message::Tick(Instant::now()));
-                }
 
                 // The store is asked the tenth way, and its reason is the updater's: a check is a
                 // wait and a download is a longer one. It is asked only while it *is* the screen,
@@ -2100,28 +1539,7 @@ impl Launcher {
                 self.size = size;
                 self.hand_over_size();
             }
-            // The player navigates inside itself too — the list and the track — so its back is asked
-            // before it is handled like any other message, exactly as the settings app's is. Both the
-            // button on the playing screen and the hardware key arrive here as this one message.
-            Message::Music(music_player::Message::Back) => return self.go_back(),
-            Message::Music(message) => self.get_or_create_music().update(message),
             Message::Terminal(message) => self.get_or_create_terminal().update(message),
-            Message::WebManager(message) => self.get_or_create_web_manager().update(message),
-            Message::TaskViewer(message) => self.get_or_create_task_viewer().update(message),
-            // The monitor's terminal entry, asked *before* the forwarding arm below, exactly as the
-            // player's and the settings app's backs are: the one message from a hosted app that is not
-            // that app's to handle, because it is about which app is on screen. See
-            // [`Launcher::open_terminal_on_watched`].
-            Message::NasMonitor(nas_monitor::Message::Terminal) => {
-                return self.open_terminal_on_watched();
-            }
-            Message::NasMonitor(message) => self.get_or_create_nas_monitor().update(message),
-            Message::Files(message) => self.get_or_create_files().update(message),
-            Message::PowerLog(message) => self.get_or_create_power_log().update(message),
-            Message::WifiMap(message) => self.get_or_create_wifi_map().update(message),
-            Message::Weather(message) => self.get_or_create_weather().update(message),
-            Message::Games(message) => self.get_or_create_games().update(message),
-            Message::Cloud(message) => self.get_or_create_cloud().update(message),
             Message::Store(message) => {
                 // The store installs into the same directories the grid is built from, so a page
                 // that has just changed them is the one thing that makes the grid rescan. Nothing
@@ -2153,12 +1571,7 @@ impl Launcher {
         Task::none()
     }
 
-    /// Tells the app on screen the size of the screen, if its layout depends on it.
     ///
-    /// The terminal is the one app that does: its keyboard band is a share of the screen's *height*
-    /// (clamped — see `touch_keyboard::band_height`) and its transcript wraps to the screen's width.
-    /// Its keyboard's width is nobody's business any more, which is why the settings app — whose
-    /// whole layout is flex boxes — is not told anything.
     ///
     /// The terminal can also hear the platform itself while it is on screen —
     /// [`Launcher::subscription`] merges its subscription — but it was not on screen when the size
@@ -2172,10 +1585,6 @@ impl Launcher {
         }
     }
 
-    /// Navigates back: asks the currently active app to go back if it has sub-pages
-    /// (e.g. settings using enum state machine mode A). If the app consumes the back
-    /// press, the launcher stays in the app. Otherwise (or if the app has no sub-pages),
-    /// the launcher backgrounds the app and returns to the grid. In the grid, back does nothing.
     ///
     /// Whatever the app's back press produced comes back out: the settings app scrolls its own
     /// body, and a widget operation has to travel as a [`Task`] from whoever owns the loop.
@@ -2221,10 +1630,6 @@ impl Launcher {
             // The player has two screens, and back steps between them before it leaves the app: the
             // playing screen gives way to the list, and only a press *from* the list backgrounds it.
             // Nothing to scroll and nothing to redraw, so the answer is a `bool`.
-            Screen::App(MUSIC) => match &mut self.music {
-                Some(player) => (player.go_back(), Task::none()),
-                None => (false, Task::none()),
-            },
             Screen::App(_) => (false, Task::none()),
         };
 
@@ -2255,19 +1660,9 @@ impl Launcher {
         task
     }
 
-    /// Returns to the desktop, leaving the running app where it is.
     ///
-    /// What the swipe up from the foot of the panel does, and what it means on a phone: the app is
-    /// not closed, it is put aside. It stays in `running_apps` and in the status bar, and its tile
-    /// brings it back with the page it was on still up. On the grid there is nothing to do, because
-    /// the grid *is* home.
     ///
-    /// It also puts the task switcher away, because the same gesture means the same thing to it: the
-    /// sheet is in front, so "put this aside" is about the sheet.
     ///
-    /// The app leaves the panel the way the finger went — upwards, which is the direction that says
-    /// "put this aside" rather than "go back". Which is the only difference between this and a back:
-    /// the screen, the effect on `running_apps` and the app's own page are the same either way.
     ///
     /// Sent rather than pulled, like a back key: this is what a home *button* asks for. The drag up
     /// from the foot of the panel that ends in the same place is [`Launcher::release_layer`]'s.
@@ -2287,12 +1682,7 @@ impl Launcher {
         self.recents = false;
     }
 
-    /// Takes the layer in front to where a finger has pulled it, and settles nothing.
     ///
-    /// What the edge layer sends once a frame while a finger is down. The layer follows the finger:
-    /// nothing changes state here and nothing is decided — a drag is a question, and this is the answer
-    /// being written down as the finger asks it. What the finger *meant* is settled in
-    /// [`Launcher::release_layer`].
     ///
     /// Which layer that is, and which way it is going, come off the drag itself — see
     /// [`Launcher::layer_for`]. This is the arithmetic: how far along its own axis the finger has taken
@@ -2350,16 +1740,7 @@ impl Launcher {
         });
     }
 
-    /// Which layer the gesture a finger is making takes hold of, and which way it takes it — or `None`
-    /// for a drag that is on its way to something else.
     ///
-    /// The band the finger came *down* in decides what the gesture is about, and the direction it is
-    /// going now decides which way the layer moves. The band rather than the direction the drag started
-    /// in, because the first eighteen pixels of a thumb's drag are not a direction: a swipe up from the
-    /// foot of the panel that begins with a sideways twitch is still that gesture, and the edge a finger
-    /// came down beside is a fact about it that does not wobble. It is also what tells two gestures
-    /// apart that go the same way — down from the head of the panel is the switcher, while down from
-    /// anywhere else is nothing at all.
     ///
     /// The switcher comes first, and not by accident: it is over everything while it is down, so a
     /// finger on it is talking to it and not to the app behind it.
@@ -2397,16 +1778,8 @@ impl Launcher {
         }
     }
 
-    /// Lets go of a layer a finger was holding: it goes where the gesture decided.
     ///
-    /// Two ways for a drag to be a decision, and a phone reads both of them: pushed far enough from
-    /// where it started, or moving fast enough when the finger left. Either way the layer goes to the
-    /// end it was pushed *towards*; anything else is it coming back to where it came from.
     ///
-    /// That is one rule for four gestures — an app taken off the panel and an app put aside, a sheet
-    /// pulled down and a sheet pushed back up — and it is why a transition carries the place it started
-    /// at: an app starts on the panel and a sheet starts over it, so the same push sends one away and
-    /// keeps the other.
     ///
     /// The decision changes the layer's *state* here, on this frame, because the gesture has decided:
     /// what is left is drawing it sliding, over a desktop that has already been left behind or a sheet
@@ -2475,7 +1848,6 @@ impl Launcher {
         }
     }
 
-    /// Sends the switcher back up over the panel it came from.
     ///
     /// What a tap on the wash under the cards — [`Message::RecentsClose`] — and the back key both ask
     /// for, and the same answer a finger pushing it back gets: the sheet is *sent*, because whoever
@@ -2497,7 +1869,6 @@ impl Launcher {
         });
     }
 
-    /// Stops every app that is running: what the switcher's "clear all" asks for.
     ///
     /// One at a time through [`Launcher::kill_app`], and not by clearing the fields: killing is what
     /// gives an app the chance to release what it holds — the player its audio and its open track,
@@ -2509,7 +1880,6 @@ impl Launcher {
         }
     }
 
-    /// The apps that are running, most recent first — what the switcher lists.
     ///
     /// Reversed, because `running_apps` is oldest-first: an app enters the list when it is opened
     /// and moves to the back of it whenever it is opened again (see [`Message::Open`]), so its last
@@ -2520,7 +1890,6 @@ impl Launcher {
         self.running_apps.iter().rev().copied().collect()
     }
 
-    /// Describes the interface for the current state.
     ///
     /// The screen is wrapped in the panel's edge gestures (see [`Launcher::edge_gestures`]), and
     /// this is the only place they can be put: the platform draws *this* program, so a gesture
@@ -2575,7 +1944,6 @@ impl Launcher {
         self.edge_gestures(screen).into()
     }
 
-    /// The screen one of the apps draws.
     ///
     /// The same match [`Launcher::view`] used to make inline, and it is a method because a
     /// transition needs an app's screen whether or not that app *is* the screen: one on its way out
@@ -2589,16 +1957,6 @@ impl Launcher {
             SETTINGS => self.settings_screen(),
             STORE => self.store_screen(),
             UPDATER => self.updater_screen(),
-            MUSIC => self.music_screen(),
-            WEB_MANAGER => self.web_manager_screen(),
-            TASK_VIEWER => self.task_viewer_screen(),
-            NAS_MONITOR => self.nas_monitor_screen(),
-            FILES => self.files_screen(),
-            POWER_LOG => self.power_log_screen(),
-            WIFI_MAP => self.wifi_map_screen(),
-            WEATHER => self.weather_screen(),
-            GAMES => self.games_screen(),
-            CLOUD => self.cloud_screen(),
             // An installed package: a page the shell knows nothing about beyond the index it was
             // given. Anything else — an index the catalog has lost since — is the desktop, which is
             // the one screen that is always there.
@@ -2607,7 +1965,6 @@ impl Launcher {
         }
     }
 
-    /// The screen the launcher is on: the desktop, or the app that is up.
     ///
     /// The one place that question is answered, because two things ask it — the view, and a transition
     /// whose layer is the switcher, which needs whatever the sheet has come down over.
@@ -2618,7 +1975,6 @@ impl Launcher {
         }
     }
 
-    /// The task switcher, as the layer it is.
     ///
     /// A method because two places draw it — the view, over a screen that is not moving, and a
     /// transition, over a screen the sheet has brought itself down over — and a sheet built twice would
@@ -2632,35 +1988,11 @@ impl Launcher {
         )
     }
 
-    /// The screen, with the panel's edge gestures around it.
     ///
-    /// Three gestures, and all three are ones a phone has: a drag up from the foot of the panel puts
-    /// the app aside, a drag down from its head brings the task switcher over whatever is up, and a
-    /// drag in from the **left** side goes back a page.
     ///
-    /// All three are *drags*, and that is the whole of what this layer reports: the finger's path
-    /// ([`Message::Pulled`], once a frame) and its last velocity ([`Message::Released`]). Everything
-    /// they do is something that moves under the finger — an app off the panel, an app put aside, a
-    /// sheet coming down — and none of it is decided until the finger leaves. See
-    /// [`Launcher::pull_layer`], [`Launcher::release_layer`].
     ///
-    /// Every one of them is pinned to the edge it *starts* at, and that pin is the whole of what makes
-    /// this layer possible: an unpinned gesture would take every drag there is, and a page that scrolls
-    /// is a page of drags. The origin is asked the moment a drag passes [`style::SLOP`], so a scroll in
-    /// the middle of a page is never interrupted in the first place — see
-    /// `GestureDetector::swipe_origin`. The pans need the pins as much as the swipes do, and for one
-    /// more reason: a pan callback with no pin hears nothing at all.
     ///
-    /// What a pin means for a pan is *where the drag began* rather than which way it first went: the
-    /// first eighteen pixels of a thumb's drag are not a direction, and a gesture layer that judged them
-    /// as one would never hear about the gestures that began with a twitch. Turning the band into a
-    /// gesture — down from the head is the switcher, up from the foot puts an app aside, right out of
-    /// the left edge takes it off the panel — is [`Launcher::layer_for`]'s.
     ///
-    /// The downward pin is not a formality, it is the reason the mechanism exists. Of the four
-    /// directions it is the one a *page* is most likely to want for itself — every list on this board
-    /// scrolls downwards — so the head of the panel is the only place it is claimed from, and a drag
-    /// that begins in the middle of an app stays that app's scroll.
     ///
     /// The two horizontal pins are opposite sides of the same idea: a phone's back gesture is a
     /// rightward drag that began at the **left** edge, and a leftward one that began at the right.
@@ -2701,7 +2033,6 @@ impl Launcher {
     }
 }
 
-/// One of [`style`]'s `(u8, u8, u8)` colours, as an iced one.
 ///
 /// The metrics tables are plain `const`s of bytes so that they stay readable in a diff; this is the one
 /// place that turns them into the type the renderer wants.
@@ -2719,7 +2050,6 @@ fn lift(colour: Color, lift: f32) -> Color {
     }
 }
 
-/// What is installed, as the grid's tiles: the catalog's order, every package still unopened.
 ///
 /// A boot scans and stops there. Reading a module here would be paying for every application at
 /// start-up to draw a tile that is a name, an accent and a letter.
@@ -2759,7 +2089,6 @@ fn icon_style(entry: &'static Entry, status: button::Status) -> button::Style {
     accent_icon_style(entry.color(), status)
 }
 
-/// The tile's fill, for a colour that came from somewhere other than an [`Entry`].
 ///
 /// The same rule either way: the accent at rest, and a white wash over it when pressed — not a
 /// brighter copy, because the accents are saturated and multiplying one clips the channels it is
@@ -2874,7 +2203,6 @@ fn render_bitmap_icon<'a, Message: 'a>(icon: BitmapIcon) -> Element<'a, Message>
     .into()
 }
 
-
 /// Returns the current (formatted clock string, minute index in day).
 fn current_time_info() -> (String, u32) {
     if let Ok(duration) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
@@ -2969,8 +2297,6 @@ mod tests {
     // What that task does — the settings app scrolling its own body — belongs to the loop.
     #![allow(unused_must_use)]
 
-    /// Opens the switcher the way a finger does: down from the head of the panel, and let go of once
-    /// it is far enough down to stay.
     ///
     /// A drag and not a field, because that is what it is now: the sheet follows the finger like
     /// everything else on this panel, and a test that set `recents` itself would be testing a `bool`
@@ -2986,7 +2312,6 @@ mod tests {
         launcher.update(Message::TransitionSettled);
     }
 
-    /// A finger's drag in from the left edge: how far it has since gone to the right.
     ///
     /// The start is what these carry and not just the distance, because the edge a finger came down
     /// beside is what says which gesture it is making — see [`Launcher::layer_for`]. Written down once
@@ -3038,8 +2363,6 @@ mod tests {
             assert!(!entry.localized_name(Language::English).is_empty());
         }
 
-        assert_eq!(CATALOGUE[MUSIC].localized_name(Language::Chinese), "音乐");
-        assert_eq!(CATALOGUE[WEB_MANAGER].localized_name(Language::Chinese), "网页管理");
         assert_eq!(CATALOGUE[TERMINAL].localized_name(Language::Chinese), "终端");
         assert_eq!(CATALOGUE[SETTINGS].localized_name(Language::Chinese), "设置");
         assert_eq!(
@@ -3049,37 +2372,8 @@ mod tests {
         assert_eq!(CATALOGUE[STORE].name, "App Store");
         assert_eq!(CATALOGUE[UPDATER].localized_name(Language::Chinese), "更新");
         assert_eq!(CATALOGUE[UPDATER].name, "Update");
-        assert_eq!(
-            CATALOGUE[TASK_VIEWER].localized_name(Language::Chinese),
-            "任务详情"
-        );
-        assert_eq!(
-            CATALOGUE[NAS_MONITOR].localized_name(Language::Chinese),
-            "服务器"
-        );
-        assert_eq!(CATALOGUE[NAS_MONITOR].name, "Server");
-        assert_eq!(CATALOGUE[FILES].localized_name(Language::Chinese), "文件管理");
-        assert_eq!(CATALOGUE[FILES].name, "Files");
-        assert_eq!(CATALOGUE[POWER_LOG].localized_name(Language::Chinese), "电量日志");
-        assert_eq!(CATALOGUE[POWER_LOG].name, "Power Log");
-        assert_eq!(CATALOGUE[WIFI_MAP].localized_name(Language::Chinese), "信道地图");
-        assert_eq!(CATALOGUE[WIFI_MAP].name, "Wi-Fi Map");
-        assert_eq!(CATALOGUE[WEATHER].localized_name(Language::Chinese), "天气");
-        assert_eq!(CATALOGUE[WEATHER].name, "Weather");
-        assert_eq!(CATALOGUE[GAMES].localized_name(Language::Chinese), "游戏");
-        assert_eq!(CATALOGUE[GAMES].name, "Games");
-        assert_eq!(CATALOGUE[CLOUD].localized_name(Language::Chinese), "云服务");
-        assert_eq!(CATALOGUE[CLOUD].name, "Cloud");
     }
 
-    /// The grid's two pages, in the order they are drawn: the eight the first page holds, which is
-    /// the box in use — what it plays, the page it serves, the machine beside it, the files on either,
-    /// then the sky, the person holding it, and the two pages about its own software, the settings and
-    /// the store — then the eight of the second page, which is the box itself: the terminal, what it
-    /// is running, the time it thinks it is, what its battery has been doing, the two that are only
-    /// ever opened to play with, the calculator and the channel map, the cloud, which is the one tile
-    /// on that page whose subject is not the box at all but the machines in an account, and the
-    /// updater, which is last because it is on its way out.
     ///
     /// Written out rather than derived, because the order *is* the interface: a page and a position
     /// are what a finger learns, and a reshuffle that left this test green would be the one kind of
@@ -3087,39 +2381,26 @@ mod tests {
     /// four to a row and two rows is what the first page holds, and what falls past the eighth tile
     /// opens the second — which is where the two rows of the second page are the two rows of it.
     #[test]
-    fn the_catalogue_is_two_pages_in_the_order_the_grid_shows_them() {
+    fn the_catalogue_is_one_page_in_the_order_the_grid_shows_them() {
         let names: Vec<&str> = CATALOGUE.iter().map(|entry| entry.name).collect();
 
         assert_eq!(
             names,
             [
-                "Music",
-                "Web Manager",
-                "Server",
-                "Files",
-                "Weather",
-                "Games",
-                "Settings",
                 "App Store",
+                "Settings",
                 "Terminal",
-                "Tasks",
-                "Power Log",
-                "Wi-Fi Map",
-                "Cloud",
                 "Update"
             ]
         );
-        assert_eq!(CATALOGUE.len(), 14, "and the fourteen are all the tiles there are");
+        assert_eq!(CATALOGUE.len(), 4, "and the four are all the tiles there are");
         assert_eq!(
             Launcher::new(Arc::new(Board::simulated())).pages(),
-            2,
-            "eight and six"
+            1,
+            "four on one page"
         );
     }
 
-    /// A tile's accent *is* the picture, so the catalogue's are saturated — and a press lights one rather
-    /// than multiplying it, which on a saturated colour would clip every channel it is strongest in and
-    /// flash a colour nobody chose.
     ///
     /// Both halves are the reason the accents and the press were changed together: an accent dim enough to
     /// survive a multiplication is an accent that has stopped being the thing a tile is recognised by.
@@ -3190,7 +2471,6 @@ mod tests {
         assert!(style::text_width(&truncated_zh, style::LABEL) <= style::LABEL_MAX_WIDTH);
     }
 
-    /// No Chinese name in the catalogue is cut by a tile's label.
     ///
     /// The truncation above is what the label *does*, and for the English names it is what it is for:
     /// "Web Manager" is 151 px against the 113 a quarter of the panel leaves and is meant to be cut.
@@ -3223,7 +2503,7 @@ mod tests {
         // Switch theme via Settings message
         launcher.update(Message::Settings(settings::Message::SetTheme(ThemeMode::Light)));
         assert_eq!(launcher.preferences().theme, ThemeMode::Light);
-        assert_eq!(launcher.music().theme_mode(), ThemeMode::Light);
+        assert_eq!(launcher.terminal().theme_mode(), ThemeMode::Light);
         assert_eq!(launcher.terminal().theme_mode(), ThemeMode::Light);
 
         // Set preferences directly on launcher
@@ -3231,9 +2511,9 @@ mod tests {
         launcher.set_preferences(custom_prefs);
         assert_eq!(launcher.preferences(), custom_prefs);
         assert_eq!(launcher.settings().preferences(), custom_prefs);
-        assert_eq!(launcher.music().preferences(), custom_prefs);
         assert_eq!(launcher.terminal().preferences(), custom_prefs);
-        assert_eq!(launcher.music().theme_mode(), ThemeMode::Dark);
+        assert_eq!(launcher.terminal().preferences(), custom_prefs);
+        assert_eq!(launcher.terminal().theme_mode(), ThemeMode::Dark);
         assert_eq!(launcher.terminal().theme_mode(), ThemeMode::Dark);
     }
 
@@ -3247,8 +2527,6 @@ mod tests {
         assert_eq!(launcher.screen, Screen::Grid);
 
         // 2. Single-page app (e.g. Files) exits directly to Grid
-        launcher.update(Message::Open(FILES));
-        assert_eq!(launcher.screen, Screen::App(FILES));
         launcher.update(Message::Back);
         assert_eq!(launcher.screen, Screen::Grid);
 
@@ -3288,41 +2566,6 @@ mod tests {
         assert_eq!(launcher.screen, Screen::Grid);
     }
 
-    /// The player is the second app here that navigates inside itself, and it takes the back press
-    /// the same way the settings app does: from the track it steps to the list, and only from the
-    /// list does the press leave the app.
-    #[test]
-    fn back_returns_the_music_player_to_its_list_before_the_grid() {
-        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
-
-        launcher.update(Message::Open(MUSIC));
-        assert_eq!(launcher.screen, Screen::App(MUSIC));
-        assert_eq!(
-            launcher.music().page(),
-            music_player::Page::Library,
-            "the app opens on the list and plays nothing"
-        );
-
-        // What a tap on a row sends: the playing screen comes up.
-        launcher.update(Message::Music(music_player::Message::Open(0)));
-        assert_eq!(launcher.music().page(), music_player::Page::NowPlaying);
-
-        launcher.update(Message::Back);
-        assert_eq!(
-            launcher.screen,
-            Screen::App(MUSIC),
-            "the player consumes the press that leaves its track"
-        );
-        assert_eq!(launcher.music().page(), music_player::Page::Library);
-
-        launcher.update(Message::Back);
-        assert_eq!(
-            launcher.screen,
-            Screen::Grid,
-            "and the press from the list is the launcher's own"
-        );
-    }
-
     #[test]
     fn back_keeps_app_running_in_background_and_exit_kills_app() {
         let board = Arc::new(Board::simulated());
@@ -3332,31 +2575,30 @@ mod tests {
         assert!(launcher.running_apps().is_empty());
 
         // 1. Open Music: it is added to running_apps
-        launcher.update(Message::Open(MUSIC));
-        assert_eq!(launcher.screen, Screen::App(MUSIC));
-        assert!(launcher.is_app_running(MUSIC));
-        assert_eq!(launcher.running_apps(), &[MUSIC]);
+        launcher.update(Message::Open(TERMINAL));
+        launcher.update(Message::TransitionSettled);
+        assert!(launcher.is_app_running(TERMINAL));
+        assert_eq!(launcher.running_apps(), &[TERMINAL]);
 
         // 2. Press Back: returns to Grid, but app continues running in background
         launcher.update(Message::Back);
         assert_eq!(launcher.screen, Screen::Grid);
-        assert!(launcher.is_app_running(MUSIC));
+        assert!(launcher.is_app_running(TERMINAL));
 
         // 3. Open the file manager as well: both apps running in memory
-        launcher.update(Message::Open(FILES));
-        assert_eq!(launcher.screen, Screen::App(FILES));
-        assert!(launcher.is_app_running(FILES));
-        assert_eq!(launcher.running_apps(), &[MUSIC, FILES]);
+        launcher.update(Message::Open(SETTINGS));
+        assert!(launcher.is_app_running(SETTINGS));
+        assert_eq!(launcher.running_apps(), &[TERMINAL, SETTINGS]);
 
         // 4. Press Exit in the file manager: kills it and returns to Grid
         launcher.update(Message::Exit);
         assert_eq!(launcher.screen, Screen::Grid);
-        assert!(!launcher.is_app_running(FILES));
-        assert_eq!(launcher.running_apps(), &[MUSIC]);
+        assert!(!launcher.is_app_running(SETTINGS));
+        assert_eq!(launcher.running_apps(), &[TERMINAL]);
 
         // 5. Press Exit on Grid: kills the last background app (Music)
         launcher.update(Message::Exit);
-        assert!(!launcher.is_app_running(MUSIC));
+        assert!(!launcher.is_app_running(TERMINAL));
         assert!(launcher.running_apps().is_empty());
 
         // 6. Test Settings reset on kill: navigate to Wifi subpage, kill app, next open is fresh
@@ -3386,7 +2628,6 @@ mod tests {
         assert!(launcher.settings().battery().charging);
     }
 
-    /// The swipe up from the foot of the panel: home, with the app put aside rather than closed.
     ///
     /// Its own message and not `Message::Back` is the point of the test. Back asks the app first, so
     /// on a settings sub-page it turns the page; a swipe up says which of the two things the finger
@@ -3419,8 +2660,6 @@ mod tests {
         assert_eq!(launcher.screen, Screen::Grid);
     }
 
-    /// An app is drawn over the desktop while it moves, and the desktop is the screen from the frame
-    /// the gesture is recognised on.
     ///
     /// The design in one test: the screen changing and the app still being drawn are two different
     /// events, and what ends the second is the widget reporting that the app has arrived or gone —
@@ -3452,8 +2691,6 @@ mod tests {
 
         // 2. A tile tapped while an app is up — the switcher's cards do this — is not an arrival:
         //    the desktop is what an app is over, and two apps are never over each other.
-        launcher.update(Message::Open(MUSIC));
-        assert_eq!(launcher.screen, Screen::App(MUSIC));
         assert!(
             launcher.transition.is_none(),
             "one app over another does not slide"
@@ -3466,14 +2703,14 @@ mod tests {
         assert_eq!(
             launcher.transition,
             Some(Transition {
-                layer: Layer::App(MUSIC),
+                layer: Layer::App(SETTINGS),
                 motion: pomelo_widgets::Motion::Home,
                 start: 0.0,
                 progress: pomelo_widgets::Progress::To(1.0),
             }),
         );
         assert!(
-            launcher.is_app_running(MUSIC),
+            launcher.is_app_running(SETTINGS),
             "put aside rather than closed: the state the slide is drawn from is this launcher's"
         );
 
@@ -3482,10 +2719,11 @@ mod tests {
 
         launcher.update(Message::TransitionSettled);
         assert!(launcher.transition.is_none());
+        launcher.update(Message::Open(SETTINGS));
+        launcher.update(Message::TransitionSettled);
 
         // 4. An app stopped while it is still moving stops being drawn: there is nothing left to
         //    slide. The switcher's cross is where this happens.
-        launcher.update(Message::Open(MUSIC));
         launcher.update(Message::Home);
         assert!(launcher.transition.is_some());
 
@@ -3494,7 +2732,7 @@ mod tests {
             launcher.transition.is_none(),
             "a killed app is not on its way anywhere"
         );
-        assert!(!launcher.is_app_running(MUSIC));
+        assert!(!launcher.is_app_running(TERMINAL));
     }
 
     /// A finger takes the app with it, and what happens when it lets go depends on how far and how
@@ -3506,6 +2744,7 @@ mod tests {
 
         let mut launcher = Launcher::new(Arc::new(Board::simulated()));
         launcher.update(Message::Open(SETTINGS));
+        launcher.update(Message::TransitionSettled);
         launcher.update(Message::TransitionSettled);
         assert_eq!(launcher.screen, Screen::App(SETTINGS));
 
@@ -3587,10 +2826,7 @@ mod tests {
         // A finger coming *down* the panel is not about the app at all: down from the head of the
         // panel is the switcher, and the app it comes down over is drawn exactly where it was.
         launcher.update(Message::TransitionSettled);
-        launcher.update(Message::Open(MUSIC));
         launcher.update(Message::TransitionSettled);
-
-        assert_eq!(launcher.screen, Screen::App(MUSIC));
 
         launcher.update(pulled_from_top(200.0));
 
@@ -3604,12 +2840,10 @@ mod tests {
             }),
             "down from the head of the panel brings the sheet, not the app"
         );
-        assert_eq!(launcher.screen, Screen::App(MUSIC));
 
         launcher.update(Message::Released(Vector::new(0.0, 0.0)));
 
         assert!(launcher.recents, "and letting go of it leaves the sheet down");
-        assert_eq!(launcher.screen, Screen::App(MUSIC));
 
         // With the sheet down it is the layer in front, and it moves the way it came: up. The app
         // behind it does not move at all, and a flick upwards is what puts the sheet away.
@@ -3628,18 +2862,15 @@ mod tests {
         );
         assert_eq!(
             launcher.screen,
-            Screen::App(MUSIC),
+            Screen::Grid,
             "and never the app behind it"
         );
 
         launcher.update(Message::Released(Vector::new(0.0, -600.0)));
 
         assert!(!launcher.recents, "an upward flick puts the sheet away");
-        assert_eq!(launcher.screen, Screen::App(MUSIC));
     }
 
-    /// A gesture is what the *edge* it came from says it is, and it does not have to be dragged nearly
-    /// as far as a page turn to count.
     ///
     /// Both halves of that are about how hard a gesture is to make. The band a finger comes down in
     /// decides which gesture it is — a thumb that begins a swipe up from the foot of the panel with a
@@ -3651,7 +2882,8 @@ mod tests {
         use pomelo_widgets::{Motion, Progress};
 
         let mut launcher = Launcher::new(Arc::new(Board::simulated()));
-        launcher.update(Message::Open(MUSIC));
+        launcher.update(Message::TransitionSettled);
+        launcher.update(Message::Open(TERMINAL));
         launcher.update(Message::TransitionSettled);
 
         // A thumb down in the last 24 px of the panel, going up and a little sideways.
@@ -3663,7 +2895,7 @@ mod tests {
         assert_eq!(
             launcher.transition,
             Some(Transition {
-                layer: Layer::App(MUSIC),
+                layer: Layer::App(TERMINAL),
                 motion: Motion::Home,
                 start: 0.0,
                 progress: Progress::At((50.0 - style::SLOP) / SCREEN as f32),
@@ -3675,8 +2907,6 @@ mod tests {
         launcher.update(Message::Released(Vector::new(0.0, 0.0)));
         launcher.update(Message::TransitionSettled);
 
-        assert_eq!(launcher.screen, Screen::App(MUSIC));
-
         // Then 118 px out of the left edge: past the point of no return on distance alone, with no help
         // from speed and without crossing a third of the panel.
         launcher.update(pulled_from_left(style::SLOP + 118.0));
@@ -3685,7 +2915,7 @@ mod tests {
         assert_eq!(
             launcher.transition,
             Some(Transition {
-                layer: Layer::App(MUSIC),
+                layer: Layer::App(TERMINAL),
                 motion: Motion::Back,
                 start: 0.0,
                 progress: Progress::To(1.0),
@@ -3708,9 +2938,10 @@ mod tests {
         );
 
         // And — the case this was reported for — a finger that comes down *inside* the band but not
+        launcher.update(Message::Open(TERMINAL));
+        launcher.update(Message::TransitionSettled);
         // glued to the edge is making the gesture just the same. 48 px of a 480 px panel is under 4 mm
         // of board, and a thumb goes where it goes.
-        launcher.update(Message::Open(MUSIC));
         launcher.update(Message::TransitionSettled);
         launcher.update(Message::Pulled {
             start: Point::new(SCREEN as f32 / 2.0, SCREEN as f32 - style::EDGE_ZONE + 4.0),
@@ -3721,7 +2952,7 @@ mod tests {
             matches!(
                 launcher.transition,
                 Some(Transition {
-                    layer: Layer::App(MUSIC),
+                    layer: Layer::App(TERMINAL),
                     motion: Motion::Home,
                     ..
                 })
@@ -3751,7 +2982,7 @@ mod tests {
         assert_eq!(
             launcher.transition,
             Some(Transition {
-                layer: Layer::App(MUSIC),
+                layer: Layer::App(TERMINAL),
                 motion: Motion::Home,
                 start: 0.0,
                 progress: Progress::To(1.0),
@@ -3760,7 +2991,6 @@ mod tests {
         );
     }
 
-    /// Every edge gesture is pinned to the edge it starts at.
     ///
     /// The wiring, and not the dragging: a finger's path through the widget tree is the panel
     /// tests' business. What matters here — and what would still build if it went missing — is that
@@ -3804,7 +3034,7 @@ mod tests {
     fn the_top_edge_lists_what_is_running_newest_first() {
         let mut launcher = Launcher::new(Arc::new(Board::simulated()));
 
-        for index in [TERMINAL, MUSIC] {
+        for index in [STORE, TERMINAL] {
             launcher.update(Message::Open(index));
             launcher.update(Message::Back);
         }
@@ -3819,33 +3049,34 @@ mod tests {
         assert!(launcher.recents);
         assert_eq!(
             launcher.recent_apps(),
-            vec![MUSIC, TERMINAL],
+            vec![TERMINAL, STORE],
             "the one opened last is listed first"
         );
 
         // The same app opened again is the newest, wherever it was in the list before.
         launcher.update(Message::RecentsClose);
         launcher.update(Message::Open(TERMINAL));
+        launcher.update(Message::TransitionSettled);
         launcher.update(Message::Back);
 
-        assert_eq!(launcher.recent_apps(), vec![TERMINAL, MUSIC]);
+        assert_eq!(launcher.recent_apps(), vec![TERMINAL, STORE]);
     }
 
     /// A tap on the wash puts the sheet away, and stops nothing: it is a layer, not a decision.
     #[test]
     fn putting_the_sheet_away_stops_nothing() {
         let mut launcher = Launcher::new(Arc::new(Board::simulated()));
+        launcher.update(Message::Open(TERMINAL));
+        launcher.update(Message::TransitionSettled);
 
-        launcher.update(Message::Open(MUSIC));
         launcher.update(Message::Back);
         pull_the_switcher_down(&mut launcher);
         launcher.update(Message::RecentsClose);
 
         assert!(!launcher.recents);
-        assert!(launcher.is_app_running(MUSIC), "put away, not killed");
+        assert!(launcher.is_app_running(TERMINAL), "put away, not killed");
     }
 
-    /// The cross stops one app; the clear-all stops every one of them, and frees what they held.
     ///
     /// "Freed" is the half a test can see: a kill that only forgot the index would leave the player
     /// holding the audio device and the terminal holding its transcript, and both would go on
@@ -3854,17 +3085,17 @@ mod tests {
     fn the_sheet_stops_one_app_or_all_of_them() {
         let mut launcher = Launcher::new(Arc::new(Board::simulated()));
 
-        for index in [TERMINAL, MUSIC, SETTINGS] {
+        for index in [TERMINAL, STORE, SETTINGS] {
             launcher.update(Message::Open(index));
             launcher.update(Message::Back);
         }
 
         pull_the_switcher_down(&mut launcher);
-        launcher.update(Message::RecentsKill(MUSIC));
+        launcher.update(Message::RecentsKill(TERMINAL));
 
-        assert!(!launcher.is_app_running(MUSIC), "the cross stopped that one");
+        assert!(!launcher.is_app_running(TERMINAL), "the cross stopped that one");
         assert!(
-            launcher.is_app_running(TERMINAL) && launcher.is_app_running(SETTINGS),
+            launcher.is_app_running(STORE) && launcher.is_app_running(SETTINGS),
             "and left the others alone"
         );
         assert!(
@@ -3876,7 +3107,7 @@ mod tests {
 
         assert!(launcher.running_apps().is_empty());
         assert!(
-            launcher.terminal.is_none() && launcher.music.is_none() && launcher.settings.is_none(),
+            launcher.terminal.is_none() && launcher.store.is_none() && launcher.settings.is_none(),
             "each one was killed, which is what lets it release what it holds"
         );
         assert!(
@@ -3896,6 +3127,7 @@ mod tests {
         let mut launcher = Launcher::new(Arc::new(Board::simulated()));
 
         launcher.update(Message::Open(TERMINAL));
+        launcher.update(Message::TransitionSettled);
         pull_the_switcher_down(&mut launcher);
         launcher.update(Message::Back);
 
@@ -3949,20 +3181,16 @@ mod tests {
 
         // At boot, all sub-apps are None (0 boot CPU time / 0 heap allocations for apps)
         assert!(launcher.settings.is_none());
-        assert!(launcher.music.is_none());
+        assert!(launcher.store.is_none());
         assert!(launcher.terminal.is_none());
-        assert!(launcher.web_manager.is_none());
-        assert!(launcher.files.is_none());
-        assert!(launcher.power_log.is_none());
+        assert!(launcher.settings.is_none());
 
         // Opening the settings instantiates only the settings
         launcher.update(Message::Open(SETTINGS));
         assert!(launcher.settings.is_some());
-        assert!(launcher.music.is_none());
         assert!(launcher.terminal.is_none());
-        assert!(launcher.web_manager.is_none());
-        assert!(launcher.files.is_none());
-        assert!(launcher.power_log.is_none());
+        assert!(launcher.store.is_none());
+        assert!(launcher.updater.is_none());
 
         // Backgrounding the settings (Back) preserves instance
         launcher.update(Message::Back);
@@ -3971,120 +3199,6 @@ mod tests {
 
         // Exiting / killing the settings frees its heap memory (reverts to None)
         launcher.update(Message::Exit);
-        assert!(launcher.settings.is_none());
-    }
-
-    /// The file manager is loaded on demand like the rest, kept while it is only backgrounded, and
-    /// freed on exit — and it is the one whose instance is worth watching here because a browsing
-    /// session is a working directory the person expects to come back to.
-    #[test]
-    fn the_files_app_is_loaded_on_demand_and_freed_on_kill() {
-        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
-
-        assert!(launcher.files.is_none());
-
-        launcher.update(Message::Open(FILES));
-        assert!(launcher.files.is_some());
-        assert_eq!(launcher.screen, Screen::App(FILES));
-
-        launcher.update(Message::Back);
-        assert_eq!(launcher.screen, Screen::Grid);
-        assert!(launcher.files.is_some(), "backgrounding keeps it");
-
-        launcher.update(Message::Exit);
-        assert!(launcher.files.is_none(), "killing frees it");
-    }
-
-    /// The file manager's own message goes to the file manager and only to it, and reaches it even
-    /// when it was not up — the router is where a message would otherwise be dropped.
-    #[test]
-    fn the_files_messages_reach_the_files_app() {
-        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
-
-        launcher.update(Message::Files(files::Message::Refresh));
-
-        assert!(launcher.files.is_some(), "which creates it if it was not up");
-    }
-
-    /// The power log's life is the same four steps, and the step that matters most here is the last
-    /// one: a page whose whole state is a curve must not be *rebuilt* by a backgrounded minute, or it
-    /// would come back from the grid having forgotten the hour it just spent watching.
-    #[test]
-    fn the_power_log_is_loaded_on_demand_and_freed_on_kill() {
-        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
-
-        assert!(launcher.power_log.is_none());
-
-        launcher.update(Message::Open(POWER_LOG));
-        assert!(launcher.power_log.is_some());
-        assert_eq!(launcher.screen, Screen::App(POWER_LOG));
-
-        launcher.update(Message::Back);
-        assert_eq!(launcher.screen, Screen::Grid);
-        assert!(launcher.power_log.is_some(), "backgrounding keeps it");
-
-        launcher.update(Message::Exit);
-        assert!(launcher.power_log.is_none(), "killing frees it");
-    }
-
-    /// The power log's own message goes to the power log and only to it — and the beat the pump hands
-    /// it is the only thing that moves the curve on a board with no window frames to draw it from.
-    #[test]
-    fn the_power_log_is_asked_the_time_by_the_pump_and_not_by_the_grid() {
-        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
-
-        // A beat on the grid goes nowhere near it: the app is not even built.
-        launcher.update(Message::Tick);
-        assert!(
-            launcher.power_log.is_none(),
-            "a page nobody is looking at is not read"
-        );
-
-        // On the page, the pump's own beat is what moves it on.
-        launcher.update(Message::Open(POWER_LOG));
-        let before = launcher.power_log().samples().len();
-
-        launcher.update(Message::Tick);
-
-        assert_eq!(
-            launcher.power_log().samples().len(),
-            before + 1,
-            "the pump's beat is the page's clock"
-        );
-    }
-
-    /// The weather page and the games app live the same four steps as the eight before them — built
-    /// when the tile is tapped, kept while backgrounded, freed on exit — and they are one test because
-    /// they are the two *shapes* a hosted app comes in: one that is waiting on the network, and one
-    /// that waits on nothing at all.
-    #[test]
-    fn the_weather_page_and_the_games_app_are_loaded_on_demand_and_freed_on_kill() {
-        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
-
-        assert!(launcher.weather.is_none());
-        assert!(launcher.games.is_none());
-
-        launcher.update(Message::Open(WEATHER));
-        assert!(launcher.weather.is_some());
-        assert_eq!(launcher.screen, Screen::App(WEATHER));
-
-        launcher.update(Message::Back);
-        assert_eq!(launcher.screen, Screen::Grid);
-        assert!(launcher.weather.is_some(), "backgrounding keeps it");
-
-        launcher.update(Message::Open(GAMES));
-        assert!(launcher.games.is_some());
-        assert_eq!(launcher.screen, Screen::App(GAMES));
-
-        launcher.update(Message::Exit);
-        assert!(launcher.games.is_none(), "killing frees it");
-
-        launcher.update(Message::Open(WEATHER));
-        launcher.update(Message::Exit);
-        assert!(
-            launcher.weather.is_none(),
-            "and the one that was only backgrounded goes the same way"
-        );
     }
 
     /// An installed package is a tile after the shell's and a page of its own — and a package that
@@ -4092,8 +3206,8 @@ mod tests {
     #[test]
     fn an_installed_package_is_a_tile_after_the_shell_and_a_page_of_its_own() {
         let mut launcher = Launcher::new(Arc::new(Board::simulated()));
-        assert_eq!(launcher.tile_count(), 14, "the shell alone");
-        assert_eq!(launcher.pages(), 2, "eight and six");
+        assert_eq!(launcher.tile_count(), 4, "the shell alone");
+        assert_eq!(launcher.pages(), 1, "four on one page");
 
         let meta = app_host::Meta::parse(
             r#"{"id":"notes","name":"Notes","name_zh":"笔记","version":"v1.0.0","memory_kb":64}"#,
@@ -4114,20 +3228,20 @@ mod tests {
             error: None,
         });
 
-        assert_eq!(launcher.tile_count(), 15);
-        assert_eq!(launcher.pages(), 2, "eight and seven");
+        assert_eq!(launcher.tile_count(), 5);
+        assert_eq!(launcher.pages(), 1, "five on one page");
         assert_eq!(
-            launcher.card(14).expect("a card").name,
+            launcher.card(4).expect("a card").name,
             "笔记",
             "the sheet says what the package calls itself, in the panel's language"
         );
 
-        launcher.update(Message::Open(14));
-        assert_eq!(launcher.screen, Screen::App(14));
+        launcher.update(Message::Open(4));
+        assert_eq!(launcher.screen, Screen::App(4));
         assert!(launcher.hosted[0].error.is_some(), "the read failed");
 
         // The page is the sentence, not a panic and not a blank screen.
-        let _ = launcher.app_screen(14);
+        let _ = launcher.app_screen(4);
 
         // A page that is not running gives the back press back to the launcher.
         launcher.update(Message::Back);
@@ -4164,90 +3278,4 @@ mod tests {
             store::Section::Updates
         );
     }
-
-    /// Their own messages reach them and only them — the router is where a message would otherwise be
-    /// dropped — and these two are the ends of its range: the app that is waiting on a request, and
-    /// the one that never waits at all.
-    #[test]
-    fn the_weather_and_games_messages_reach_their_apps() {
-        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
-
-        launcher.update(Message::Weather(weather::Message::Refresh));
-        assert!(launcher.weather.is_some(), "which creates it if it was not up");
-
-        launcher.update(Message::Games(games::Message::Open(
-            games::Game::TwentyFortyEight,
-        )));
-        assert!(launcher.games.is_some(), "and this one too");
-        assert!(
-            launcher.games().playing(),
-            "and the games app is the one that handled it"
-        );
-    }
-
-    /// The monitoring page's terminal entry is the one message from a hosted app that the launcher
-    /// acts on rather than passing on. The page asks and the launcher answers: *its* terminal, opened
-    /// on the machine the page is about, with the session already asked for by the time the screen
-    /// changes — so the terminal's first frame is the session rather than a local prompt.
-    #[test]
-    fn the_monitors_terminal_entry_opens_the_terminal_on_that_machine() {
-        let board = Arc::new(Board::simulated());
-        board
-            .nas()
-            .remember(&pomelo_hal::NasCredentials {
-                host: String::from("nas.local"),
-                port: 22,
-                user: String::from("alice"),
-                password: String::from("hunter2"),
-                interval_secs: 5,
-                host_key: None,
-            })
-            .expect("the machine is taken");
-
-        let mut launcher = Launcher::new(Arc::clone(&board));
-
-        // A header — and so an entry on it — exists only with a machine on the page.
-        launcher.update(Message::Open(NAS_MONITOR));
-        launcher.update(Message::NasMonitor(nas_monitor::Message::Open(0)));
-
-        launcher.update(Message::NasMonitor(nas_monitor::Message::Terminal));
-
-        assert_eq!(
-            launcher.screen,
-            Screen::App(TERMINAL),
-            "the entry brings the terminal to the front"
-        );
-
-        let session = launcher
-            .get_or_create_terminal()
-            .session()
-            .expect("and a session was asked for before the screen changed");
-        assert_eq!(session.host(), "nas.local");
-        assert!(
-            session.is_live(),
-            "on the machine the page was showing, which the sim answers"
-        );
-    }
-
-    /// The same entry on a monitor with no machine on the page: there is nothing to open a session on,
-    /// so nothing happens and nothing panics. The header the entry sits on is not even drawn.
-    #[test]
-    fn the_monitors_terminal_entry_does_nothing_without_a_machine() {
-        let mut launcher = Launcher::new(Arc::new(Board::simulated()));
-
-        launcher.update(Message::Open(NAS_MONITOR));
-        launcher.update(Message::NasMonitor(nas_monitor::Message::Terminal));
-
-        assert_eq!(
-            launcher.screen,
-            Screen::App(NAS_MONITOR),
-            "the page stays where it is"
-        );
-        assert!(
-            launcher.terminal.is_none(),
-            "and no terminal was built for a machine that is not there"
-        );
-    }
 }
-
-
