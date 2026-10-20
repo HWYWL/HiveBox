@@ -582,6 +582,16 @@ impl Services for BoardServices {
         }
     }
 
+    fn nas_devices(&mut self) -> Vec<(String, String)> {
+        // 板子读过的那份配置就是答案：应用既不读文件，也不该知道密码。
+        self.board
+            .nas()
+            .devices()
+            .into_iter()
+            .map(|device| (device.host, device.user))
+            .collect()
+    }
+
     fn nas_shell_open(&mut self, host: &str, columns: u16, rows: u16) -> i32 {
         match self.board.nas().shell_open(host, columns, rows) {
             Ok(()) => code::OK,

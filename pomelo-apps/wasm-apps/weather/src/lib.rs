@@ -231,11 +231,16 @@ impl Weather {
                     .unwrap_or(day as i32 + 1);
             }
 
+            // 在 `current` 那一段里找，而不是整份文档：`current_units` 里也有同名的键，而它们
+            // 说的是单位（`"°C"`、`"%"`、`"km/h"`）。在整份文档里找第一个 `temperature_2m`，
+            // 找到的正是那一个，读出来的不是数字 —— 温湿度与风速一直显示 0 就是这个。
+            let current = current_of(body);
+
             (
-                find_int(body, b"temperature_2m").unwrap_or(0),
-                find_int(body, b"weather_code").unwrap_or(0),
-                find_int(body, b"relative_humidity_2m").unwrap_or(0),
-                find_int(body, b"wind_speed_10m").unwrap_or(0),
+                find_int(current, b"temperature_2m").unwrap_or(0),
+                find_int(current, b"weather_code").unwrap_or(0),
+                find_int(current, b"relative_humidity_2m").unwrap_or(0),
+                find_int(current, b"wind_speed_10m").unwrap_or(0),
                 day_codes,
                 day_highs,
                 day_lows,
@@ -369,6 +374,25 @@ fn find_str<'a>(body: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
     let end = value[1..].iter().position(|byte| *byte == b'"')?;
 
     Some(&value[1..1 + end])
+}
+
+/// `"current":{` 之后的那一段。
+///
+/// Open-Meteo 的回答里，`current_units` 就在 `current` 前面，而且那些键是同一个名字 —— 它们
+/// 说的是单位（`"°C"`、`"%"`、`"km/h"`），不是读数。读数和单位在同一个名字下，只能靠「在哪一
+/// 段里」分开。
+fn current_of<'a>(body: &'a [u8]) -> &'a [u8] {
+    let rest = match find_value(body, b"current") {
+        Some(rest) => skip(rest),
+        None => return body,
+    };
+
+    // 万一没有这个对象（换了接口），退回整份文档也比什么都不读好。
+    if rest.first() == Some(&b'{') {
+        rest
+    } else {
+        body
+    }
 }
 
 /// `"key":123` 里的整数。小数只读整数部分：这一页画的是「23°」而不是「23.4°」。

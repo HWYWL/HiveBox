@@ -281,6 +281,15 @@ pub fn nas_refresh() -> bool {
     imp::nas_refresh() == code::OK
 }
 
+/// 板子被交代过的那些机器，一行一台：`host\tuser`。
+///
+/// 列表页要画几行，靠的就是这一条：快照只有一份，而「有哪几台」在板子读过的那份配置里。
+pub fn nas_devices(out: &mut [u8]) -> Option<usize> {
+    let written = imp::nas_devices(out.as_mut_ptr() as u32, out.len() as u32);
+
+    (written >= 0).then_some(written as usize)
+}
+
 pub fn nas_shell_open(host: &str, columns: u16, rows: u16) -> bool {
     imp::nas_shell_open(
         host.as_ptr() as u32,
@@ -474,6 +483,8 @@ mod imp {
         fn raw_nas_disks(out_ptr: u32, out_len: u32) -> i32;
         #[link_name = "hb_nas_refresh"]
         fn raw_nas_refresh() -> i32;
+        #[link_name = "hb_nas_devices"]
+        fn raw_nas_devices(out_ptr: u32, out_len: u32) -> i32;
         #[link_name = "hb_nas_shell_open"]
         fn raw_nas_shell_open(
             host_ptr: u32,
@@ -643,6 +654,10 @@ mod imp {
 
     pub fn nas_refresh() -> i32 {
         unsafe { raw_nas_refresh() }
+    }
+
+    pub fn nas_devices(out_ptr: u32, out_len: u32) -> i32 {
+        unsafe { raw_nas_devices(out_ptr, out_len) }
     }
 
     pub fn nas_shell_open(host_ptr: u32, host_len: u32, columns: u32, rows: u32) -> i32 {
@@ -821,6 +836,10 @@ mod imp {
         app_abi::code::UNSUPPORTED
     }
     pub fn nas_refresh() -> i32 {
+        app_abi::code::UNSUPPORTED
+    }
+
+    pub fn nas_devices(_out_ptr: u32, _out_len: u32) -> i32 {
         app_abi::code::UNSUPPORTED
     }
     pub fn nas_shell_open(_host_ptr: u32, _host_len: u32, _columns: u32, _rows: u32) -> i32 {

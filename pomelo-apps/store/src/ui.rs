@@ -391,10 +391,11 @@ fn badge<'a>(icon: Icon, accent: Color, sizes: Sizes) -> Element<'a, Message> {
             .size(sizes.badge)
             .color(Color::WHITE),
     )
-    .width(Length::Fixed(style::BADGE))
-    .height(Length::Fixed(style::BADGE))
-    .center_x(Length::Fill)
-    .center_y(Length::Fill)
+    // `center_x`/`center_y` 在 iced 里设的是**长度**，不只是对齐：`center_x(Length::Fill)` 等于
+    // 把宽度改成 Fill，于是刚设好的 `Fixed(BADGE)` 被盖掉 —— 那个方块就是这么变成长条的，图标
+    // 也就跟着被摊平。宽度和高度都交给这两个调用，它们顺带把内容居中。
+    .center_x(Length::Fixed(style::BADGE))
+    .center_y(Length::Fixed(style::BADGE))
     .style(move |_theme| container::Style {
         background: Some(accent.into()),
         border: Border {

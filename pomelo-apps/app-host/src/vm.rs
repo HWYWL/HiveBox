@@ -971,6 +971,28 @@ fn bind(linker: &mut Linker<HostState>) -> Result<(), VmError> {
 
     link(linker.func_wrap(
         host::MODULE,
+        host::NAS_DEVICES,
+        |mut caller: Caller<'_, HostState>, out_ptr: u32, out_len: u32| -> i32 {
+            if !granted(&caller, perm::NAS) {
+                return code::DENIED;
+            }
+
+            let devices = caller.data_mut().services.nas_devices();
+            let mut text = String::new();
+
+            for (host, user) in devices {
+                text.push_str(&host);
+                text.push('\t');
+                text.push_str(&user);
+                text.push('\n');
+            }
+
+            write_bytes(&mut caller, out_ptr, out_len, text.as_bytes())
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
         host::NAS_SHELL_OPEN,
         |mut caller: Caller<'_, HostState>,
          host_ptr: u32,

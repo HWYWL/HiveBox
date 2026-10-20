@@ -47,7 +47,7 @@ pub const ABI_MAJOR: u16 = 1;
 /// An application built against `1.0` still runs on this host: every addition is an import it never
 /// calls. An application built against `1.3` on a `1.0` host fails at instantiation, which is the
 /// answer the store draws as "needs a newer system".
-pub const ABI_MINOR: u16 = 4;
+pub const ABI_MINOR: u16 = 5;
 
 /// Packs a major and a minor into the word [`export::ABI_VERSION`] returns.
 pub const fn version_word(major: u16, minor: u16) -> u32 {
@@ -193,6 +193,13 @@ pub mod host {
     pub const NAS_DISKS: &str = "hb_nas_disks";
     /// `() -> i32`: asks for a fresh look at the machine.
     pub const NAS_REFRESH: &str = "hb_nas_refresh";
+    /// `(out_ptr, out_len) -> i32`: writes one line per machine this board has been told about,
+    /// tab separated: `host\tuser`. Requires [`super::perm::NAS`].
+    ///
+    /// 仪表盘只有一份快照，所以一个应用要画出「服务器列表」就得知道有哪几台 —— 而配置在哪台
+    /// 机器上、用什么账号，只有板子自己读过那份文件才知道。这一条把那份清单递出去，列表页才
+    /// 有第二行可画；没有它，应用只能猜。
+    pub const NAS_DEVICES: &str = "hb_nas_devices";
     /// `(host_ptr, host_len, columns: u32, rows: u32) -> i32`: opens a shell session.
     pub const NAS_SHELL_OPEN: &str = "hb_nas_shell_open";
     /// `(bytes_ptr, bytes_len) -> i32`: types into the open session.
@@ -523,6 +530,7 @@ pub mod perm {
             super::host::NAS_SNAPSHOT
             | super::host::NAS_DISKS
             | super::host::NAS_REFRESH
+            | super::host::NAS_DEVICES
             | super::host::NAS_SHELL_OPEN
             | super::host::NAS_SHELL_WRITE
             | super::host::NAS_SHELL_STATUS

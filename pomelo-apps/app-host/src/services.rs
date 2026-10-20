@@ -209,6 +209,12 @@ pub trait Services {
         code::UNSUPPORTED
     }
 
+    /// 板子被交代过的那些机器：`(host, user)`，一台一条。默认一台也没有 —— 桌面宿主不碰
+    /// 网络，而一份空的清单说的是实话。
+    fn nas_devices(&mut self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
     fn nas_shell_open(&mut self, _host: &str, _columns: u16, _rows: u16) -> i32 {
         code::UNSUPPORTED
     }
