@@ -1,21 +1,24 @@
 //! 服务器，作为一个可安装的包。
 //!
-//! 三页，跟内置版一样：**列表**（这台盒子的配置里有哪几台机器）、**详情**（选中的那一台的六个
-//! 数字）、**终端**（在那一台上开一个 shell）。列表页右上角是「添加」，详情页右上角是「终端」——
-//! 它们原来在哪儿，现在还 在哪儿。
+//! 两页：**列表**（板子的配置里有哪几台机器）、**详情**（选中的那一台的六个数字）。列表页每行
+//! 右侧是「编辑」与「删除」，右上角是「添加」—— 按下去弹出的是一张带键盘的表格，地址、端口、
+//! 账号、密码都在这一页上填完，写进的是板子自己的 `nas.conf`。
 //!
-//! # 读数是别人的，不是这个包的
+//! # 键盘为什么画在包里
 //!
-//! 快照带一个 `age_secs`：这份读数是几秒前取的。它写在页面上，因为一台机器的「现在」和一块
-//! 面板的「现在」不是同一件事 —— 取一次读数要一次连接，而这一页每帧画一次。
+//! 这一块屏幕只有手指，没有物理键盘，而 ABI 里没有「请给我一个输入框」这一条：能画的只有矩形、
+//! 文字与图标。所以键盘就画在包自己的画布上 —— 它和别的控件一样是矩形，按下去一样收到坐标，填
+//! 完的那几个字由 [`host::nas_remember`] 递给板子。
+//!
+//! # 终端是别人的页面
+//!
+//! 详情页右上角的「终端」不再在这一页里开 shell，而是请外壳把**终端应用**翻上来：
+//! [`host::nas_terminal`]。会话、回滚、`^C` 都在那边，这个包只说了「开在哪台机器上」。
 //!
 //! # 有哪几台机器，是板子说的
 //!
-//! 快照只有一份（当前盯着的那台），而「列表里有几行」来自 [`host::nas_devices`] —— 板子读过
-//! 的那份 `/internal/AppData/NAS/nas.conf`。密码不过边界：这一页只拿到 `host` 与 `user`。
-//!
-//! 没配置（还有在设置里填过一台机器）和连不上是两件事，页面也分开说：前者要人去设置里填，后者
-//! 可能是那台机器关了。权限：`NAS`。
+//! 「列表里有几行」来自 [`host::nas_devices`] —— 板子读过的那份 `nas.conf`。密码不过边界：这
+//! 一页只拿到 `host` 与 `user`，改一台机器时密码那格留空就是「不改」。权限：`NAS`。
 #![no_std]
 
 use app_sdk::{
@@ -31,9 +34,8 @@ const ADD: Rect = Rect::new(318.0, 22.0, 144.0, 44.0);
 const TERMINAL_PILL: Rect = Rect::new(300.0, 18.0, 162.0, 44.0);
 const REFRESH: Rect = Rect::new(318.0, 70.0, 144.0, 36.0);
 const BACK: Rect = Rect::new(18.0, 18.0, 48.0, 44.0);
-const HANG_UP: Rect = Rect::new(318.0, 18.0, 144.0, 44.0);
 
-/// 一台机器一行，一行 72：两行字加一个状态点。
+/// 一台机器一行，一行 80：两行字，右边两颗按钮。
 const ROW: f32 = 80.0;
 
 /// 列表一屏最多几台。第四台之后要翻页，而一台盒子被交代过的机器很少有那么多。
@@ -43,18 +45,315 @@ const ROWS: usize = 4;
 /// write_per_sec\tpurpose`，一行一块。
 const DISK_LINES: usize = 8;
 
-/// 终端里保留多少字节的输出：一块面板一屏画十几行，而 8 KB 够往回翻好几屏。
-const SHELL: usize = 8192;
+/// 表格里那四格能有多长。地址与密码宽一些，账号与端口短。
+const HOST_MAX: usize = 64;
+const USER_MAX: usize = 32;
+const SECRET_MAX: usize = 64;
+const PORT_MAX: usize = 5;
 
-/// 终端里那四个快捷命令。键盘不在这一页上：一个人在这里要看的是「它还活着吗」，而四条命令
-/// 就是那个问题的答案。
-const COMMANDS: [&str; 4] = ["ls", "df -h", "uptime", "free -h"];
+/// 表格与键盘的尺寸。四格从 66 起，每格 46；键盘从 250 起，五排。
+const SHEET_CANCEL: Rect = Rect::new(280.0, 16.0, 182.0, 44.0);
+const FIELD_X: f32 = 104.0;
+const FIELD_W: f32 = 352.0;
+const FIELD_H: f32 = 40.0;
+const FIELD_TOP: f32 = 66.0;
+const FIELD_STEP: f32 = 46.0;
+
+const KEY_X: f32 = 8.0;
+const KEY_TOP: f32 = 250.0;
+const KEY_W: f32 = 43.0;
+const KEY_H: f32 = 38.0;
+const KEY_GAP: f32 = 3.0;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Screen {
     List,
     Detail,
-    Terminal,
+}
+
+/// 表格里的四格，从上到下。
+#[derive(Clone, Copy, PartialEq)]
+enum Field {
+    Host,
+    Port,
+    User,
+    Secret,
+}
+
+impl Field {
+    const ALL: [Field; 4] = [Field::Host, Field::Port, Field::User, Field::Secret];
+}
+
+/// 键盘上的一个键。字母与符号是 [`Key::Char`]，其余各有各的名字。
+#[derive(Clone, Copy, PartialEq)]
+enum Key {
+    Char(char),
+    Shift,
+    Backspace,
+    Mode,
+    Space,
+    Save,
+}
+
+const ROW_DIGITS: [Key; 10] = [
+    Key::Char('1'),
+    Key::Char('2'),
+    Key::Char('3'),
+    Key::Char('4'),
+    Key::Char('5'),
+    Key::Char('6'),
+    Key::Char('7'),
+    Key::Char('8'),
+    Key::Char('9'),
+    Key::Char('0'),
+];
+
+/// 数字那一排换成符号：密码里那几个不常见的字都在这里。
+const ROW_SYMBOLS: [Key; 10] = [
+    Key::Char('!'),
+    Key::Char('@'),
+    Key::Char('#'),
+    Key::Char('$'),
+    Key::Char('%'),
+    Key::Char('&'),
+    Key::Char('*'),
+    Key::Char('('),
+    Key::Char(')'),
+    Key::Char('~'),
+];
+
+const ROW_TOP: [Key; 10] = [
+    Key::Char('q'),
+    Key::Char('w'),
+    Key::Char('e'),
+    Key::Char('r'),
+    Key::Char('t'),
+    Key::Char('y'),
+    Key::Char('u'),
+    Key::Char('i'),
+    Key::Char('o'),
+    Key::Char('p'),
+];
+
+const ROW_HOME: [Key; 10] = [
+    Key::Char('a'),
+    Key::Char('s'),
+    Key::Char('d'),
+    Key::Char('f'),
+    Key::Char('g'),
+    Key::Char('h'),
+    Key::Char('j'),
+    Key::Char('k'),
+    Key::Char('l'),
+    Key::Char('-'),
+];
+
+const ROW_LETTERS: [Key; 7] = [
+    Key::Char('z'),
+    Key::Char('x'),
+    Key::Char('c'),
+    Key::Char('v'),
+    Key::Char('b'),
+    Key::Char('n'),
+    Key::Char('m'),
+];
+
+/// 表格：一条正在填的机器，或者没有表格。
+struct Form {
+    /// 改的是清单里的第几台；新的一条是 `None`。
+    editing: Option<usize>,
+    host: [u8; HOST_MAX],
+    host_len: usize,
+    port: [u8; PORT_MAX],
+    port_len: usize,
+    user: [u8; USER_MAX],
+    user_len: usize,
+    secret: [u8; SECRET_MAX],
+    secret_len: usize,
+    focus: Field,
+    /// 字母是大写，还是小写。
+    shift: bool,
+    /// 数字那一排换成了符号。
+    symbols: bool,
+    error: Option<&'static str>,
+    pressed: Option<Rect>,
+}
+
+/// 表格上按下来的那一下。
+#[derive(Clone, Copy, PartialEq)]
+enum Action {
+    None,
+    Cancel,
+    Focus(Field),
+    Insert(char),
+    Erase,
+    Shift,
+    Mode,
+    Save,
+}
+
+impl Form {
+    /// 空表格：新的一条。端口先填 22，那是九成的机器。
+    fn blank() -> Self {
+        let mut form = Self {
+            editing: None,
+            host: [0; HOST_MAX],
+            host_len: 0,
+            port: [0; PORT_MAX],
+            port_len: 0,
+            user: [0; USER_MAX],
+            user_len: 0,
+            secret: [0; SECRET_MAX],
+            secret_len: 0,
+            focus: Field::Host,
+            shift: false,
+            symbols: false,
+            error: None,
+            pressed: None,
+        };
+
+        form.put(Field::Port, "22");
+
+        form
+    }
+
+    /// 改清单里的第 `index` 台：地址与账号先填上，端口与密码留空 —— 空就是「不动它」。密码不在
+    /// 这一页上出现，也就不该要求人再输一遍。
+    fn edit(index: usize, host: &str, user: &str) -> Self {
+        let mut form = Self::blank();
+
+        form.editing = Some(index);
+        form.focus = Field::Host;
+
+        form.put(Field::Host, host);
+        form.put(Field::Port, "");
+        form.put(Field::User, user);
+
+        form
+    }
+
+    fn buffer_mut(&mut self, field: Field) -> (&mut [u8], &mut usize) {
+        match field {
+            Field::Host => (&mut self.host[..HOST_MAX - 1], &mut self.host_len),
+            Field::Port => (&mut self.port[..PORT_MAX - 1], &mut self.port_len),
+            Field::User => (&mut self.user[..USER_MAX - 1], &mut self.user_len),
+            Field::Secret => (&mut self.secret[..SECRET_MAX - 1], &mut self.secret_len),
+        }
+    }
+
+    fn len(&self, field: Field) -> usize {
+        match field {
+            Field::Host => self.host_len,
+            Field::Port => self.port_len,
+            Field::User => self.user_len,
+            Field::Secret => self.secret_len,
+        }
+    }
+
+    fn text(&self, field: Field) -> &str {
+        let bytes = match field {
+            Field::Host => &self.host[..self.host_len],
+            Field::Port => &self.port[..self.port_len],
+            Field::User => &self.user[..self.user_len],
+            Field::Secret => &self.secret[..self.secret_len],
+        };
+
+        core::str::from_utf8(bytes).unwrap_or("")
+    }
+
+    /// 往某一格里写一整段字，从头上开始。
+    fn put(&mut self, field: Field, text: &str) {
+        let count = text.len();
+        let (buffer, len) = self.buffer_mut(field);
+        let count = count.min(buffer.len());
+
+        buffer[..count].copy_from_slice(&text.as_bytes()[..count]);
+        *len = count;
+    }
+
+    /// 在光标后面接一个字。端口那格只收数字 —— 一串字母进去只会在保存时变成一个 0。
+    fn insert(&mut self, character: char) {
+        if self.focus == Field::Port && !character.is_ascii_digit() {
+            return;
+        }
+
+        let character = if self.shift && character.is_ascii_lowercase() {
+            character.to_ascii_uppercase()
+        } else {
+            character
+        };
+
+        let field = self.focus;
+        let (buffer, len) = self.buffer_mut(field);
+        let mut bytes = [0u8; 4];
+        let text = character.encode_utf8(&mut bytes);
+
+        for byte in text.as_bytes() {
+            if *len == buffer.len() {
+                break;
+            }
+
+            buffer[*len] = *byte;
+            *len += 1;
+        }
+
+        // 大写是一下一下的：按一次只给一个字，跟手机一样。
+        self.shift = false;
+    }
+
+    /// 退掉最后一格。退到空格子上就换到上一格 —— 一行四个格子，手指不用回去点。
+    fn erase(&mut self) {
+        let field = self.focus;
+
+        if self.len(field) > 0 {
+            let (_, len) = self.buffer_mut(field);
+            *len -= 1;
+            return;
+        }
+
+        self.focus = match field {
+            Field::Host => Field::Host,
+            Field::Port => Field::Host,
+            Field::User => Field::Port,
+            Field::Secret => Field::User,
+        };
+    }
+
+    /// 端口：空的是 0，等于「22 或原来那个」，由板子决定。
+    fn port(&self) -> u16 {
+        let mut value = 0u16;
+
+        for byte in &self.port[..self.port_len] {
+            value = value.saturating_mul(10).saturating_add(u16::from(byte - b'0'));
+        }
+
+        value
+    }
+
+    /// 这一格在框里写什么：密码换成星号，空的时候是灰色的提示。
+    fn shown(&self, field: Field) -> &str {
+        if self.len(field) > 0 {
+            return self.text(field);
+        }
+
+        match field {
+            Field::Host => "192.168.1.10",
+            Field::Port => "22",
+            Field::User => "root",
+            Field::Secret => "密码",
+        }
+    }
+
+    /// 密码格里那几个星号。写在一份自己的缓冲上，因为 [`Form::shown`] 借的是表格。
+    fn stars<'a>(&self, buffer: &'a mut [u8; SECRET_MAX]) -> &'a str {
+        let count = self.secret_len.min(buffer.len());
+
+        for slot in &mut buffer[..count] {
+            *slot = b'*';
+        }
+
+        core::str::from_utf8(&buffer[..count]).unwrap_or("")
+    }
 }
 
 struct Monitor {
@@ -81,13 +380,11 @@ struct Monitor {
     disk_text: [u8; 1024],
     disk_len: usize,
 
-    /// 终端那一段：会话说过的话，以及这一页是不是已经开过一次会话。
-    shell: [u8; SHELL],
-    shell_len: usize,
-    opened: bool,
+    /// 正在填的那一条，或者没有表格。
+    form: Option<Form>,
 
-    /// 「添加」按下去之后那一句说明：往哪儿添，比一个什么也不做的按钮诚实。
-    hint: bool,
+    /// 详情页底部那一句：终端没开成时它说为什么。
+    notice: Option<&'static str>,
 
     pressed: Option<Rect>,
 }
@@ -153,7 +450,9 @@ impl Monitor {
 
         total
     }
+}
 
+impl Monitor {
     /// 一帧的开头问一次：板子才是权威，而这个包只把它说的话画出来。
     fn poll(&mut self) {
         if let Some(snapshot) = host::nas_snapshot() {
@@ -181,55 +480,228 @@ impl Monitor {
                 self.disk_len = len.min(self.disk_text.len());
             }
         }
+    }
 
-        if self.screen == Screen::Terminal {
-            let mut chunk = [0u8; 256];
+    /// 把清单里第 `index` 台删掉。删掉的要是正看着的那台，板子会自己换一台看，读数下帧就变。
+    fn forget(&mut self, index: usize) {
+        let mut storage = [0u8; HOST_MAX];
+        let host = self.device_host(index);
+        let len = host.len().min(storage.len());
+        storage[..len].copy_from_slice(&host.as_bytes()[..len]);
 
-            if let Some(len) = host::nas_shell_take(&mut chunk) {
-                for byte in &chunk[..len.min(chunk.len())] {
-                    // 满了就丢掉最前面一半：终端里的人要的是最近那几屏。
-                    if self.shell_len == self.shell.len() {
-                        let half = self.shell.len() / 2;
+        let host = core::str::from_utf8(&storage[..len]).unwrap_or("");
+        host::nas_forget(host);
 
-                        self.shell.copy_within(half.., 0);
-                        self.shell_len -= half;
-                    }
+        self.poll();
 
-                    self.shell[self.shell_len] = *byte;
-                    self.shell_len += 1;
+        if self.devices == 0 {
+            self.chosen = 0;
+            self.screen = Screen::List;
+        } else if self.chosen >= self.devices {
+            self.chosen = self.devices - 1;
+        }
+
+        host::nas_refresh();
+    }
+
+    /// 表格上按了「保存」：检查、递过去、收起来。
+    fn save(&mut self) {
+        let mut host = [0u8; HOST_MAX];
+        let mut user = [0u8; USER_MAX];
+        let mut secret = [0u8; SECRET_MAX];
+
+        let (host_len, user_len, secret_len, port, editing) = {
+            let Some(form) = self.form.as_ref() else {
+                return;
+            };
+
+            let (host_len, user_len, secret_len) = (form.host_len, form.user_len, form.secret_len);
+
+            host[..host_len].copy_from_slice(&form.host[..host_len]);
+            user[..user_len].copy_from_slice(&form.user[..user_len]);
+            secret[..secret_len].copy_from_slice(&form.secret[..secret_len]);
+
+            (host_len, user_len, secret_len, form.port(), form.editing)
+        };
+
+        let host = core::str::from_utf8(&host[..host_len]).unwrap_or("");
+        let user = core::str::from_utf8(&user[..user_len]).unwrap_or("");
+        let secret = core::str::from_utf8(&secret[..secret_len]).unwrap_or("");
+
+        // 一条登录得有地址与账号；新的一条还得有密码，而编辑时空密码是「不改原来那个」。
+        if host.is_empty() {
+            return self.fail("地址不能为空");
+        }
+
+        if user.is_empty() {
+            return self.fail("账号不能为空");
+        }
+
+        if editing.is_none() && secret.is_empty() {
+            return self.fail("密码不能为空");
+        }
+
+        if !host::nas_remember(host, port, user, secret) {
+            return self.fail("板子没记住这一台");
+        }
+
+        self.form = None;
+        self.screen = Screen::List;
+        self.notice = None;
+
+        self.poll();
+
+        // 新加的那一台就是刚存进去的那一行，把它选中；改的那一台还在原来那个位置。
+        if editing.is_none() {
+            for index in 0..self.devices {
+                if self.device_host(index) == host {
+                    self.chosen = index;
+                    break;
+                }
+            }
+        }
+
+        host::nas_refresh();
+    }
+
+    fn fail(&mut self, reason: &'static str) {
+        if let Some(form) = self.form.as_mut() {
+            form.error = Some(reason);
+        }
+    }
+
+    /// 表格上按下来的那一下：先看清是哪一格，再由 [`Monitor::apply`] 动手。
+    ///
+    /// 分开是因为两个都要 `self`：看清楚按的是哪一格要读表格，改表格要写它。中间隔一个动作值，
+    /// 借用在按完就结束了。
+    fn form_update(&mut self, context: &mut Context) {
+        let mut action = Action::None;
+        let mut down = None;
+
+        if context.input.pressing(SHEET_CANCEL) {
+            down = Some(SHEET_CANCEL);
+        }
+
+        if context.tapped(SHEET_CANCEL) {
+            action = Action::Cancel;
+        }
+
+        for (index, field) in Field::ALL.iter().enumerate() {
+            let rect = field_rect(index);
+
+            if context.input.pressing(rect) {
+                down = Some(rect);
+            }
+
+            if context.tapped(rect) {
+                action = Action::Focus(*field);
+            }
+        }
+
+        let symbols = self.form.as_ref().is_some_and(|form| form.symbols);
+
+        for row in 0..5 {
+            for slot in 0..10 {
+                let Some((key, units)) = key_at(row, slot, symbols) else {
+                    continue;
+                };
+
+                let rect = key_rect(row, slot, units);
+
+                if context.input.pressing(rect) {
+                    down = Some(rect);
+                }
+
+                if context.tapped(rect) {
+                    action = match key {
+                        Key::Char(character) => Action::Insert(character),
+                        Key::Space => Action::Insert(' '),
+                        Key::Shift => Action::Shift,
+                        Key::Mode => Action::Mode,
+                        Key::Backspace => Action::Erase,
+                        Key::Save => Action::Save,
+                    };
+                }
+            }
+        }
+
+        if let Some(form) = self.form.as_mut() {
+            form.pressed = down;
+        }
+
+        self.apply(action);
+    }
+
+    fn apply(&mut self, action: Action) {
+        match action {
+            Action::None => {}
+            Action::Cancel => self.form = None,
+            Action::Save => self.save(),
+            Action::Shift => {
+                if let Some(form) = self.form.as_mut() {
+                    form.shift = !form.shift;
+                }
+            }
+            Action::Mode => {
+                if let Some(form) = self.form.as_mut() {
+                    form.symbols = !form.symbols;
+                }
+            }
+            Action::Focus(field) => {
+                if let Some(form) = self.form.as_mut() {
+                    form.focus = field;
+                    form.error = None;
+                }
+            }
+            Action::Erase => {
+                if let Some(form) = self.form.as_mut() {
+                    form.erase();
+                    form.error = None;
+                }
+            }
+            Action::Insert(character) => {
+                if let Some(form) = self.form.as_mut() {
+                    form.insert(character);
+                    form.error = None;
                 }
             }
         }
     }
 
-    /// 在选中的那台机器上开一个会话。60×24 是它回来时自愿报的尺寸，而这一页按 60 列画。
-    fn open_shell(&mut self) {
-        let host_name = self.device_host(self.chosen);
-        let mut name = [0u8; 64];
-        let len = host_name.len().min(name.len());
-        name[..len].copy_from_slice(&host_name.as_bytes()[..len]);
+    /// 打开表格改第 `index` 台。地址与账号从板子递来的那行原文里取。
+    fn begin_edit(&mut self, index: usize) {
+        let mut host = [0u8; HOST_MAX];
+        let mut user = [0u8; USER_MAX];
 
-        self.shell_len = 0;
-        self.opened = true;
+        {
+            let text = self.device_host(index);
+            let len = text.len().min(host.len());
+            host[..len].copy_from_slice(&text.as_bytes()[..len]);
 
-        let host_name = core::str::from_utf8(&name[..len]).unwrap_or("");
-
-        host::nas_shell_open(host_name, 60, 24);
-    }
-
-    /// 会话现在什么状态。
-    fn shell_state(&self) -> &'static str {
-        match host::nas_shell_status() {
-            app_abi::nas_shell::OPENING => "正在连接",
-            app_abi::nas_shell::READY => "已连接",
-            app_abi::nas_shell::LOST => "已断开",
-            _ => "没有会话",
+            let text = self.device_user(index);
+            let len = text.len().min(user.len());
+            user[..len].copy_from_slice(&text.as_bytes()[..len]);
         }
+
+        let mut host_len = 0;
+        while host_len < host.len() && host[host_len] != 0 {
+            host_len += 1;
+        }
+
+        let mut user_len = 0;
+        while user_len < user.len() && user[user_len] != 0 {
+            user_len += 1;
+        }
+
+        let host = core::str::from_utf8(&host[..host_len]).unwrap_or("");
+        let user = core::str::from_utf8(&user[..user_len]).unwrap_or("");
+
+        self.form = Some(Form::edit(index, host, user));
     }
 }
 
 impl App for Monitor {
-    fn new(_: &Context) -> Self {
+    fn new(_context: &Context) -> Self {
         Self {
             screen: Screen::List,
             chosen: 0,
@@ -237,10 +709,10 @@ impl App for Monitor {
             device_text: [0; 512],
             device_len: 0,
             status: app_abi::nas::UNCONFIGURED,
-            fault: app_abi::fault::NONE,
+            fault: 0,
             cpu: 0,
             has_cpu: false,
-            temperature: i32::MIN,
+            temperature: 0,
             memory_used_kb: 0,
             memory_total_kb: 0,
             sent: 0,
@@ -250,16 +722,22 @@ impl App for Monitor {
             disks: 0,
             disk_text: [0; 1024],
             disk_len: 0,
-            shell: [0; SHELL],
-            shell_len: 0,
-            opened: false,
-            hint: false,
+            form: None,
+            notice: None,
             pressed: None,
         }
     }
 
     fn update(&mut self, _event: Event, context: &mut Context) {
         self.pressed = None;
+
+        // 表格是盖在页面上的一层：它在的时候，下面那一页一个也不该收到手指。
+        if self.form.is_some() {
+            self.form_update(context);
+            return;
+        }
+
+        self.notice = None;
 
         match self.screen {
             Screen::List => {
@@ -268,19 +746,39 @@ impl App for Monitor {
                 }
 
                 if context.tapped(ADD) {
-                    self.hint = true;
+                    self.form = Some(Form::blank());
+                    return;
                 }
 
-                let shown = self.devices.min(ROWS);
+                for index in 0..self.devices.min(ROWS) {
+                    let row = row_rect(index);
+                    let edit = edit_rect(index);
+                    let forget = forget_rect(index);
 
-                for index in 0..shown {
-                    let rect = device_rect(index);
-
-                    if context.input.pressing(rect) {
-                        self.pressed = Some(rect);
+                    if context.input.pressing(edit) {
+                        self.pressed = Some(edit);
                     }
 
-                    if context.tapped(rect) {
+                    if context.input.pressing(forget) {
+                        self.pressed = Some(forget);
+                    }
+
+                    // 两颗按钮压在行里，所以先问按钮：问过就该走了，不能再当成「点了这一行」。
+                    if context.tapped(edit) {
+                        self.begin_edit(index);
+                        return;
+                    }
+
+                    if context.tapped(forget) {
+                        self.forget(index);
+                        return;
+                    }
+
+                    if context.input.pressing(row) {
+                        self.pressed = Some(row);
+                    }
+
+                    if context.tapped(row) {
                         self.chosen = index;
                         self.screen = Screen::Detail;
                         host::nas_refresh();
@@ -294,60 +792,27 @@ impl App for Monitor {
 
                 if context.tapped(BACK) {
                     self.screen = Screen::List;
+                    return;
                 }
 
                 if context.input.pressing(REFRESH) {
                     self.pressed = Some(REFRESH);
                 }
 
-                if context.tapped(REFRESH) {
-                    host::nas_refresh();
-                }
-
                 if context.input.pressing(TERMINAL_PILL) {
                     self.pressed = Some(TERMINAL_PILL);
                 }
 
+                if context.tapped(REFRESH) {
+                    host::nas_refresh();
+                    return;
+                }
+
                 if context.tapped(TERMINAL_PILL) {
-                    self.screen = Screen::Terminal;
-                    self.open_shell();
-                }
-            }
-            Screen::Terminal => {
-                if context.input.pressing(BACK) {
-                    self.pressed = Some(BACK);
-                }
+                    let opened = host::nas_terminal(self.device_host(self.chosen));
 
-                if context.tapped(BACK) {
-                    self.screen = Screen::Detail;
-                }
-
-                if context.input.pressing(HANG_UP) {
-                    self.pressed = Some(HANG_UP);
-                }
-
-                if context.tapped(HANG_UP) {
-                    host::nas_shell_close();
-                    self.opened = false;
-                    self.screen = Screen::Detail;
-                }
-
-                for (index, command) in COMMANDS.iter().enumerate() {
-                    let rect = command_rect(index);
-
-                    if context.input.pressing(rect) {
-                        self.pressed = Some(rect);
-                    }
-
-                    if context.tapped(rect) {
-                        // `\r`：那是回车。退格与 `^C` 也能从这里出去，而这个包没有键盘。
-                        let mut line = [0u8; 24];
-                        let len = command.len().min(line.len() - 1);
-
-                        line[..len].copy_from_slice(&command.as_bytes()[..len]);
-                        line[len] = b'\r';
-
-                        host::nas_shell_write(&line[..len + 1]);
+                    if !opened {
+                        self.notice = Some("这一台还没存进清单，终端开不了");
                     }
                 }
             }
@@ -361,110 +826,134 @@ impl App for Monitor {
         match self.screen {
             Screen::List => self.list(ui),
             Screen::Detail => self.detail(ui),
-            Screen::Terminal => self.terminal(ui),
+        }
+
+        if let Some(form) = self.form.as_ref() {
+            sheet(ui, form);
         }
     }
 }
 
 impl Monitor {
-    /// 列表：抬头说有几台，一行一台，右上角「添加」。
+    /// 列表：板子记着的机器，一行一台，右边两颗按钮。
     fn list(&mut self, ui: &mut Ui) {
-        let mut head = [0u8; 32];
-        let mut buffer = app_sdk::text::Buf::new(&mut head);
-        let devices = self.devices;
-        let subtitle = if devices == 0 {
-            "还没有服务器"
+        let mut storage = [0u8; 48];
+        let mut buffer = app_sdk::text::Buf::new(&mut storage);
+        let count = self.devices;
+
+        let subtitle = if count == 0 {
+            "还没有机器"
         } else {
-            format_into!(buffer, "{devices} 台服务器")
+            format_into!(buffer, "板子记着 {count} 台")
         };
 
         widgets::page_header(
             ui,
-            Rect::new(18.0, 18.0, 288.0, 44.0),
-            icons::DNS,
+            Rect::new(18.0, 8.0, 292.0, 68.0),
+            icons::DVR,
             ACCENT,
-            "服务器监控",
+            "服务器",
             subtitle,
         );
 
         widgets::pill(ui, ADD, "添加", icons::ADD, ACCENT, self.pressed == Some(ADD));
 
-        if self.devices == 0 {
+        if count == 0 {
             widgets::empty(
                 ui,
-                Rect::new(90.0, 180.0, 340.0, 90.0),
-                icons::DNS,
-                "还没有服务器，点右上角的「添加」",
+                Rect::new(18.0, 120.0, 444.0, 180.0),
+                icons::DVR,
+                "点「添加」填上地址、账号与密码",
                 theme::MUTED,
             );
-
-            if self.hint {
-                widgets::note(
-                    ui,
-                    Rect::new(24.0, 404.0, 432.0, 20.0),
-                    icons::INFO,
-                    "在 设置 → 服务器 里添加一台，填地址、账号与密码",
-                    theme::MUTED,
-                );
+        } else {
+            for index in 0..count.min(ROWS) {
+                self.row(ui, index);
             }
-
-            return;
         }
 
-        let shown = self.devices.min(ROWS);
-
-        for index in 0..shown {
-            let rect = device_rect(index);
-            let host = self.device_host(index);
-            let user = self.device_user(index);
-
-            // 状态只有当前盯着的那一台有：别的机器的读数要一次连接，而列表页不该等六次连接。
-            let online = index == self.chosen && self.status == app_abi::nas::ONLINE;
-
-            let mut storage = [0u8; 48];
-            let mut buffer = app_sdk::text::Buf::new(&mut storage);
-            let line = if online {
-                format_into!(buffer, "{user} · 在线")
-            } else {
-                format_into!(buffer, "{user} · 未读取")
-            };
-
-            widgets::row(
-                ui,
-                rect,
-                if online { icons::DNS } else { icons::DNS },
-                if online { theme::OK } else { ACCENT },
-                host,
-                line,
-                "",
-                self.pressed == Some(rect),
-                if index == self.chosen {
-                    theme::SURFACE_HIGH
-                } else {
-                    theme::SURFACE
-                },
-                if index == self.chosen {
-                    Some(ACCENT)
-                } else {
-                    None
-                },
-            );
-
-            // 状态点在右端：八行里八个点，一眼看出哪几台已经读到过。
-            widgets::dot(
-                ui,
-                (rect.right() - 22.0, rect.y + rect.height / 2.0),
-                5.0,
-                if online { theme::OK } else { theme::DIVIDER },
-            );
-        }
-
-        blocks_note(ui, self.hint);
+        widgets::note(
+            ui,
+            Rect::new(24.0, 424.0, 432.0, 40.0),
+            icons::SETTINGS,
+            "密码留在板子那一份 nas.conf 里，这一页看不到",
+            theme::MUTED,
+        );
     }
 
-    /// 详情：抬头是这一台的地址，右上角「终端」，下面六格。
+    fn row(&self, ui: &mut Ui, index: usize) {
+        let rect = row_rect(index);
+        let chosen = index == self.chosen;
+        let pressed = self.pressed == Some(rect);
+
+        widgets::card_outlined(
+            ui,
+            rect,
+            if pressed {
+                theme::SURFACE_HIGH
+            } else {
+                theme::SURFACE
+            },
+            if chosen { ACCENT } else { theme::DIVIDER },
+        );
+
+        if chosen {
+            ui.rounded_rect(Rect::new(rect.x, rect.y + 18.0, 3.0, rect.height - 36.0), 1.5, ACCENT);
+        }
+
+        ui.circle((rect.x + 22.0, rect.y + 28.0), 3.5, if chosen { ACCENT } else { theme::MUTED });
+
+        // 字只在按钮左边那一截里排：地址长起来的时候，宁可截掉也不要压到「编辑」上。
+        ui.clip(Rect::new(rect.x + 36.0, rect.y, rect.width - 152.0, rect.height));
+        ui.text(rect.x + 36.0, rect.y + 16.0, self.device_host(index), 18.0, theme::TEXT);
+        ui.text(rect.x + 36.0, rect.y + 42.0, self.device_user(index), 13.0, theme::MUTED);
+        ui.clip_end();
+
+        let edit = edit_rect(index);
+        let forget = forget_rect(index);
+
+        widgets::icon_button(
+            ui,
+            edit,
+            icons::EDIT,
+            18.0,
+            if self.pressed == Some(edit) {
+                theme::DIVIDER
+            } else {
+                theme::SURFACE_HIGH
+            },
+            theme::TEXT,
+            self.pressed == Some(edit),
+        );
+
+        widgets::icon_button(
+            ui,
+            forget,
+            icons::DELETE,
+            18.0,
+            if self.pressed == Some(forget) {
+                theme::DANGER
+            } else {
+                theme::SURFACE_HIGH
+            },
+            theme::DANGER,
+            self.pressed == Some(forget),
+        );
+    }
+
+    /// 详情：这一台的六个数字。终端那一颗不在这里开会话，它请外壳翻到终端应用。
     fn detail(&mut self, ui: &mut Ui) {
-        self.crumb(ui, self.chosen);
+        widgets::icon_button(
+            ui,
+            BACK,
+            icons::ARROW_BACK,
+            20.0,
+            theme::SURFACE,
+            theme::TEXT,
+            self.pressed == Some(BACK),
+        );
+
+        ui.text(78.0, 30.0, self.device_host(self.chosen), 20.0, theme::TEXT);
 
         widgets::pill(
             ui,
@@ -475,15 +964,9 @@ impl Monitor {
             self.pressed == Some(TERMINAL_PILL),
         );
 
-        // 状态行：一个点、一句话、右边一颗「重读」。
         let online = self.status == app_abi::nas::ONLINE;
 
-        widgets::dot(
-            ui,
-            (26.0, 90.0),
-            6.0,
-            if online { theme::OK } else { theme::DANGER },
-        );
+        ui.circle((26.0, 92.0), 4.0, if online { theme::OK } else { theme::DANGER });
 
         let mut storage = [0u8; 64];
         let mut buffer = app_sdk::text::Buf::new(&mut storage);
@@ -493,387 +976,440 @@ impl Monitor {
         let line = if online {
             format_into!(buffer, "{state} · {age} 秒前取的读数")
         } else if self.status == app_abi::nas::UNCONFIGURED {
-            "在设置里填一台机器"
+            "板子还没配置这一台"
         } else {
             self.fault()
         };
 
-        ui.text(42.0, 78.0, line, 16.0, if online { theme::MUTED } else { theme::DANGER });
+        ui.text(42.0, 84.0, line, 16.0, if online { theme::MUTED } else { theme::DANGER });
 
         widgets::pill(
             ui,
             REFRESH,
             "重读",
             icons::REFRESH,
-            if online { ACCENT } else { theme::SURFACE_HIGH },
+            theme::SURFACE_HIGH,
             self.pressed == Some(REFRESH),
         );
 
-        if !online {
-            widgets::empty(
+        for index in 0..6 {
+            self.tile(ui, index);
+        }
+
+        if let Some(note) = self.notice {
+            ui.text(24.0, 438.0, note, 13.0, theme::DANGER);
+        } else {
+            widgets::note(
                 ui,
-                Rect::new(110.0, 200.0, 300.0, 90.0),
-                icons::DNS,
-                if self.status == app_abi::nas::UNCONFIGURED {
-                    "还没有配置机器"
-                } else {
-                    self.fault()
-                },
+                Rect::new(24.0, 424.0, 432.0, 40.0),
+                icons::TERMINAL,
+                "「终端」会把整块屏幕交给终端应用",
                 theme::MUTED,
             );
-
-            return;
-        }
-
-        // 六格：CPU 与温度、内存、网络、磁盘读写、存储、磁盘繁忙。内置版就是这六格。
-        let (cpu_percent, temperature) = (self.cpu, self.temperature);
-        let (used, total) = (self.memory_used_kb, self.memory_total_kb);
-        let (received, sent) = (self.received, self.sent);
-        let (read, write) = (self.disk_sum(5), self.disk_sum(6));
-        let (size, disks) = (self.disk_sum(2), self.disks);
-
-        {
-            let mut a = [0u8; 16];
-            let mut b = [0u8; 16];
-            let mut ba = app_sdk::text::Buf::new(&mut a);
-            let mut bb = app_sdk::text::Buf::new(&mut b);
-
-            let cpu = format_into!(ba, "{}%", cpu_percent / 100);
-            let heat = if temperature == i32::MIN {
-                "—"
-            } else {
-                format_into!(bb, "{}°C", temperature / 100)
-            };
-
-            tile(ui, tile_rect(0), icons::DVR, "CPU", cpu, heat, ACCENT);
-        }
-
-        {
-            let mut a = [0u8; 16];
-            let mut b = [0u8; 32];
-            let mut ba = app_sdk::text::Buf::new(&mut a);
-            let mut bb = app_sdk::text::Buf::new(&mut b);
-
-            let percent = if total == 0 {
-                "—"
-            } else {
-                format_into!(ba, "{}%", used as u64 * 100 / total.max(1) as u64)
-            };
-            let detail = format_into!(bb, "{} / {} MB", used / 1024, total / 1024);
-
-            tile(ui, tile_rect(1), icons::MEMORY, "内存", percent, detail, ACCENT);
-        }
-
-        {
-            let mut a = [0u8; 24];
-            let mut b = [0u8; 40];
-            let mut ba = app_sdk::text::Buf::new(&mut a);
-            let mut bb = app_sdk::text::Buf::new(&mut b);
-
-            let down = format_into!(ba, "{} B/s", received);
-            let detail = format_into!(bb, "接收 {} · 发送 {}", received, sent);
-
-            tile(ui, tile_rect(2), icons::SPEED, "网络", down, detail, theme::OK);
-        }
-
-        {
-            let mut a = [0u8; 24];
-            let mut b = [0u8; 40];
-            let mut ba = app_sdk::text::Buf::new(&mut a);
-            let mut bb = app_sdk::text::Buf::new(&mut b);
-
-            let sum = format_into!(ba, "{} B/s", read + write);
-            let detail = format_into!(bb, "读 {} · 写 {}", read, write);
-
-            tile(ui, tile_rect(3), icons::HARD_DRIVE, "磁盘读写", sum, detail, theme::OK);
-        }
-
-        {
-            let mut a = [0u8; 16];
-            let mut b = [0u8; 16];
-            let mut ba = app_sdk::text::Buf::new(&mut a);
-            let mut bb = app_sdk::text::Buf::new(&mut b);
-
-            let bytes = format_into!(ba, "{}", gigabytes(size));
-            let detail = format_into!(bb, "{disks} 块硬盘");
-
-            tile(ui, tile_rect(4), icons::STORAGE, "存储", bytes, detail, ACCENT);
-        }
-
-        {
-            let busy = if disks == 0 {
-                "—"
-            } else {
-                core::str::from_utf8(self.disk_field(0, 4)).unwrap_or("—")
-            };
-
-            let mut a = [0u8; 16];
-            let mut b = [0u8; 32];
-            let mut ba = app_sdk::text::Buf::new(&mut a);
-            let mut bb = app_sdk::text::Buf::new(&mut b);
-
-            let percent = format_into!(ba, "{busy}%");
-            let name = format_into!(bb, "{}", self.disk_name(0));
-
-            tile(ui, tile_rect(5), icons::BAR_CHART, "磁盘繁忙", percent, name, theme::DANGER);
         }
     }
 
-    /// 终端：最后十几行输出，四个命令，一个「断开」。
-    fn terminal(&mut self, ui: &mut Ui) {
-        self.crumb(ui, self.chosen);
+    fn tile(&self, ui: &mut Ui, index: usize) {
+        let rect = tile_rect(index);
+        widgets::card(ui, rect, theme::SURFACE);
 
-        widgets::pill(
+        let mut storage = [0u8; 32];
+        let mut buffer = app_sdk::text::Buf::new(&mut storage);
+
+        let (glyph, caption, value) = match index {
+            0 => {
+                let whole = self.cpu / 100;
+                let frac = self.cpu % 100;
+                let value = if self.has_cpu {
+                    if frac < 10 {
+                        format_into!(buffer, "{whole}.0{frac}%")
+                    } else {
+                        format_into!(buffer, "{whole}.{frac}%")
+                    }
+                } else {
+                    "—"
+                };
+
+                (icons::SPEED, "处理器", value)
+            }
+            1 => {
+                let used = self.memory_used_kb as u64 * 10 / 1_048_576;
+                let total = self.memory_total_kb as u64 * 10 / 1_048_576;
+                let value = format_into!(
+                    buffer,
+                    "{}.{} / {}.{} GB",
+                    used / 10,
+                    used % 10,
+                    total / 10,
+                    total % 10
+                );
+
+                (icons::MEMORY, "内存", value)
+            }
+            2 => {
+                let whole = self.temperature / 100;
+                let frac = (self.temperature % 100).abs();
+                let value = if self.temperature == 0 {
+                    "—"
+                } else if frac < 10 {
+                    format_into!(buffer, "{whole}.0{frac} C")
+                } else {
+                    format_into!(buffer, "{whole}.{frac} C")
+                };
+
+                (icons::THERMOSTAT, "温度", value)
+            }
+            3 => {
+                let down = self.received / 1024;
+                let up = self.sent / 1024;
+                let value = format_into!(buffer, "{down} / {up} K");
+
+                (icons::NETWORK_CHECK, "收发 KB/s", value)
+            }
+            4 => {
+                let days = self.uptime / 86_400;
+                let hours = (self.uptime % 86_400) / 3_600;
+                let value = format_into!(buffer, "{days} 天 {hours} 时");
+
+                (icons::SCHEDULE, "运行", value)
+            }
+            _ => {
+                let total = self.disk_sum(2);
+                let tenths = total / 107_374_182;
+                let value =
+                    format_into!(buffer, "{} 块 · {}.{} TB", self.disks, tenths / 10, tenths % 10);
+
+                // 第一块盘的型号比「磁盘」两个字有用：一块盘时它就是全部，几块盘时它至少说明
+                // 数据在哪一类介质上。
+                let caption = if self.disks > 0 {
+                    self.disk_name(0)
+                } else {
+                    "磁盘"
+                };
+
+                (icons::HARD_DRIVE, caption, value)
+            }
+        };
+
+        ui.icon(rect.x + 14.0, rect.y + 14.0, 18.0, theme::MUTED, glyph);
+        ui.text(rect.x + 40.0, rect.y + 14.0, caption, 12.0, theme::MUTED);
+        ui.text(rect.x + 14.0, rect.y + 62.0, value, 20.0, theme::TEXT);
+    }
+}
+
+/// 一张盖住整页的表格：上面四格，下面一块键盘。
+///
+/// 它是整页，不是浮在中间的一小块：这一块屏幕 480 见方，一半给格子一半给键盘，中间没有地方再
+/// 留一圈背景。画满一页也就不需要「底色压暗」那种半透明 —— 这一套绘制命令里没有 alpha。
+fn sheet(ui: &mut Ui, form: &Form) {
+    ui.clear(theme::BLACK);
+
+    let title = if form.editing.is_some() {
+        "编辑服务器"
+    } else {
+        "添加服务器"
+    };
+
+    ui.text(24.0, 16.0, title, 24.0, theme::TEXT);
+
+    let hint = form.error.unwrap_or("地址、账号与密码都由板子记着");
+    let hint_color = if form.error.is_some() {
+        theme::DANGER
+    } else {
+        theme::MUTED
+    };
+
+    ui.clip(Rect::new(24.0, 44.0, 244.0, 20.0));
+    ui.text(24.0, 44.0, hint, 13.0, hint_color);
+    ui.clip_end();
+
+    widgets::pill(
+        ui,
+        SHEET_CANCEL,
+        "取消",
+        icons::ARROW_BACK,
+        theme::SURFACE_HIGH,
+        form.pressed == Some(SHEET_CANCEL),
+    );
+
+    for (index, field) in Field::ALL.iter().enumerate() {
+        let field = *field;
+        let rect = field_rect(index);
+        let focused = field == form.focus;
+
+        let label = match field {
+            Field::Host => "地址",
+            Field::Port => "端口",
+            Field::User => "账号",
+            Field::Secret => "密码",
+        };
+
+        ui.text(24.0, rect.y + 11.0, label, 15.0, theme::MUTED);
+
+        widgets::card_outlined(
             ui,
-            HANG_UP,
-            "断开",
-            icons::POWER_OFF,
-            theme::SURFACE_HIGH,
-            self.pressed == Some(HANG_UP),
+            rect,
+            theme::SURFACE,
+            if focused { ACCENT } else { theme::DIVIDER },
         );
 
-        let area = Rect::new(18.0, 74.0, 444.0, 300.0);
-        widgets::card(ui, area, theme::SURFACE);
+        let mut stars = [0u8; SECRET_MAX];
+        let masked = field == Field::Secret && form.secret_len > 0;
 
-        if self.shell_len == 0 {
-            widgets::empty(
-                ui,
-                Rect::new(area.x + 80.0, area.y + 100.0, 300.0, 90.0),
-                icons::TERMINAL,
-                if self.opened { "等它回话…" } else { "点「终端」开一个会话" },
-                theme::MUTED,
-            );
+        let text = if masked {
+            form.stars(&mut stars)
         } else {
-            draw_tail(ui, Rect::new(area.x + 12.0, area.y + 10.0, area.width - 24.0, area.height - 20.0), &self.shell[..self.shell_len]);
-        }
-
-        // 状态与四个命令：这一页能做的事就这些，说清楚比让人猜好。
-        let mut storage = [0u8; 48];
-        let mut buffer = app_sdk::text::Buf::new(&mut storage);
-        let state = self.shell_state();
-        let fault = if host::nas_shell_status() == app_abi::nas_shell::LOST {
-            self.fault()
-        } else {
-            ""
+            form.shown(field)
         };
-        let line = format_into!(buffer, "{state} {fault}");
 
-        ui.text(24.0, 384.0, line.trim_end(), 15.0, theme::MUTED);
+        // 空着的那一格写的是提示（灰的），不是字：光标也就不该停在提示后面。
+        let placeholder = !masked && form.len(field) == 0;
+        let color = if placeholder { theme::MUTED } else { theme::TEXT };
 
-        for (index, command) in COMMANDS.iter().enumerate() {
-            let rect = command_rect(index);
+        ui.text(
+            rect.x + 12.0,
+            rect.y + (rect.height - 17.0) / 2.0,
+            text,
+            17.0,
+            color,
+        );
 
-            widgets::button(
-                ui,
-                rect,
-                command,
-                18.0,
-                if host::nas_shell_status() == app_abi::nas_shell::READY {
-                    ACCENT
-                } else {
-                    theme::SURFACE_HIGH
-                },
-                theme::TEXT,
-                self.pressed == Some(rect),
-            );
+        if focused && !placeholder {
+            let caret = rect.x + 14.0 + ui.measure(text, 17.0);
+            ui.rect(Rect::new(caret, rect.y + 9.0, 2.0, rect.height - 18.0), ACCENT);
         }
     }
 
-    /// 两个子页共用的抬头：返回箭头、这一台的地址、下面一条细线。
-    fn crumb(&mut self, ui: &mut Ui, index: usize) {
-        ui.rounded_rect(BACK, 12.0, if self.pressed == Some(BACK) { theme::SURFACE_HIGH } else { theme::SURFACE });
-        ui.icon(BACK.x + 14.0, BACK.y + 12.0, 20.0, theme::TEXT, icons::ARROW_BACK);
+    for row in 0..5 {
+        for slot in 0..10 {
+            let Some((key, units)) = key_at(row, slot, form.symbols) else {
+                continue;
+            };
 
-        let host = self.device_host(index);
+            let rect = key_rect(row, slot, units);
+            let pressed = form.pressed == Some(rect);
 
-        ui.text(78.0, 24.0, host, 22.0, theme::TEXT);
-        ui.text(78.0, 50.0, self.device_user(index), 14.0, theme::MUTED);
-    }
-}
+            if key == Key::Save {
+                ui.rounded_rect(rect, 8.0, ACCENT);
 
-/// 一台机器那一行。
-fn device_rect(index: usize) -> Rect {
-    Rect::new(18.0, 84.0 + index as f32 * ROW, 444.0, 68.0)
-}
+                if pressed {
+                    ui.rounded_stroke(rect, 8.0, 2.0, theme::TEXT);
+                }
 
-/// 六宫格里的第 `index` 格：两列三行。
-fn tile_rect(index: usize) -> Rect {
-    let column = index % 2;
-    let row = index / 2;
+                ui.text_centered(rect, "保存", 16.0, theme::TEXT);
+                continue;
+            }
 
-    Rect::new(
-        18.0 + column as f32 * 230.0,
-        116.0 + row as f32 * 104.0,
-        214.0,
-        96.0,
-    )
-}
+            ui.rounded_rect(
+                rect,
+                8.0,
+                if pressed {
+                    theme::SURFACE_HIGH
+                } else {
+                    theme::SURFACE
+                },
+            );
 
-/// 终端里那四个命令按钮。
-fn command_rect(index: usize) -> Rect {
-    Rect::new(18.0 + index as f32 * 114.0, 410.0, 108.0, 46.0)
-}
+            match key {
+                Key::Backspace => ui.icon(
+                    rect.x + (rect.width - 20.0) / 2.0,
+                    rect.y + (rect.height - 20.0) / 2.0,
+                    20.0,
+                    theme::TEXT,
+                    icons::ARROW_BACK,
+                ),
+                Key::Shift => ui.text_centered(
+                    rect,
+                    if form.shift { "ABC" } else { "abc" },
+                    14.0,
+                    if form.shift { ACCENT } else { theme::TEXT },
+                ),
+                Key::Mode => ui.text_centered(
+                    rect,
+                    if form.symbols { "123" } else { "#+=" },
+                    14.0,
+                    theme::TEXT,
+                ),
+                Key::Space => ui.text_centered(rect, "空格", 14.0, theme::TEXT),
+                Key::Char(character) => {
+                    let character = if form.shift {
+                        character.to_ascii_uppercase()
+                    } else {
+                        character
+                    };
 
-/// 六宫格里的一格：左边一条竖线（颜色是这一格的意思）、一个小标题、一个大数字、一行小字。
-fn tile(ui: &mut Ui, rect: Rect, glyph: char, title: &str, value: &str, note: &str, color: Color) {
-    widgets::card(ui, rect, theme::SURFACE);
+                    let mut bytes = [0u8; 4];
+                    let text = character.encode_utf8(&mut bytes);
 
-    // 竖线：六格里六色，扫一眼就知道哪一格在报警。
-    ui.rounded_rect(Rect::new(rect.x, rect.y + 12.0, 4.0, rect.height - 24.0), 2.0, color);
-
-    ui.icon(rect.x + 18.0, rect.y + 14.0, 18.0, color, glyph);
-    ui.text(rect.x + 44.0, rect.y + 12.0, title, 15.0, theme::MUTED);
-    ui.text(rect.x + 18.0, rect.y + 40.0, value, 30.0, color);
-    ui.text(rect.x + 18.0, rect.y + 72.0, note, 13.0, theme::MUTED);
-}
-
-/// 列表页底部那一句：添加与编辑在哪儿。
-fn blocks_note(ui: &mut Ui, hint: bool) {
-    widgets::note(
-        ui,
-        Rect::new(24.0, 404.0, 432.0, 20.0),
-        icons::INFO,
-        if hint {
-            "在 设置 → 服务器 里添加、编辑或删除"
-        } else {
-            "点一台看它的读数，右上角可以加一台"
-        },
-        theme::MUTED,
-    );
-}
-
-/// 输出区的最后几行：终端总是显示最新的那一行，而不是最早的那一行。
-fn draw_tail(ui: &mut Ui, area: Rect, text: &[u8]) {
-    let rows = (area.height / 20.0) as usize;
-    let mut start = 0;
-    let mut seen = 0;
-
-    // 从尾部往回数 `rows` 个换行，找到要画的第一行。
-    for index in (0..text.len()).rev() {
-        if text[index] == b'\n' {
-            seen += 1;
-
-            if seen > rows {
-                start = index + 1;
-                break;
+                    ui.text_centered(rect, text, 17.0, theme::TEXT);
+                }
+                Key::Save => {}
             }
         }
     }
 
-    let mut line = &text[start..];
-    let mut y = area.y;
+    widgets::note(
+        ui,
+        Rect::new(24.0, 458.0, 432.0, 20.0),
+        icons::EDIT,
+        "改一台机器时，密码留空就是不改它",
+        theme::MUTED,
+    );
+}
 
-    while !line.is_empty() && y + 18.0 <= area.bottom() {
-        let (row, rest) = match line.iter().position(|byte| *byte == b'\n') {
-            Some(at) => (&line[..at], &line[at + 1..]),
-            None => (line, &line[line.len()..]),
-        };
+/// 四格的位置，从上到下。
+fn field_rect(index: usize) -> Rect {
+    Rect::new(
+        FIELD_X,
+        FIELD_TOP + index as f32 * FIELD_STEP,
+        FIELD_W,
+        FIELD_H,
+    )
+}
 
-        // 回车在输出里是常见的（进度条、彩色提示），画之前去掉：一块面板上它只会变成一个方块。
-        let row: &[u8] = match row.iter().position(|byte| *byte == b'\r') {
-            Some(at) => &row[..at],
-            None => row,
-        };
+/// 键盘上第 `row` 排第 `slot` 格上的键，以及它占几格。宽键（空格、保存）之后的那几格是空的。
+fn key_at(row: usize, slot: usize, symbols: bool) -> Option<(Key, u8)> {
+    let digits = if symbols { ROW_SYMBOLS } else { ROW_DIGITS };
 
-        ui.text(area.x, y, core::str::from_utf8(row).unwrap_or(""), 14.0, theme::TEXT);
-
-        y += 18.0;
-        line = rest;
+    match row {
+        0 => digits.get(slot).map(|&key| (key, 1)),
+        1 => ROW_TOP.get(slot).map(|&key| (key, 1)),
+        2 => ROW_HOME.get(slot).map(|&key| (key, 1)),
+        3 => match slot {
+            0 => Some((Key::Shift, 1)),
+            1..=7 => ROW_LETTERS.get(slot - 1).map(|&key| (key, 1)),
+            8 => Some((Key::Char('.'), 1)),
+            9 => Some((Key::Backspace, 1)),
+            _ => None,
+        },
+        4 => match slot {
+            0 => Some((Key::Mode, 1)),
+            1 => Some((Key::Char('_'), 1)),
+            2 => Some((Key::Char('@'), 1)),
+            3 => Some((Key::Char('/'), 1)),
+            4 => Some((Key::Space, 4)),
+            8 => Some((Key::Save, 2)),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
-/// 一份「一行一条、字段用 `\t` 分开」的文本里，第 `index` 行的第 `field` 个字段。
-fn field<'a>(text: &'a [u8], index: usize, field: usize) -> &'a [u8] {
-    let mut line = text;
+fn key_rect(row: usize, slot: usize, units: u8) -> Rect {
+    let units = units.max(1) as f32;
 
-    for _ in 0..index {
-        let Some(end) = line.iter().position(|byte| *byte == b'\n') else {
-            return b"";
-        };
+    Rect::new(
+        KEY_X + slot as f32 * (KEY_W + KEY_GAP),
+        KEY_TOP + row as f32 * (KEY_H + KEY_GAP),
+        units * KEY_W + (units - 1.0) * KEY_GAP,
+        KEY_H,
+    )
+}
 
-        line = &line[end + 1..];
+fn row_rect(index: usize) -> Rect {
+    Rect::new(18.0, 96.0 + index as f32 * ROW, 444.0, 68.0)
+}
+
+/// 行右边那颗「编辑」。
+fn edit_rect(index: usize) -> Rect {
+    let row = row_rect(index);
+
+    Rect::new(row.right() - 100.0, row.y + 14.0, 40.0, 40.0)
+}
+
+/// 行右边那颗「删除」，压在「编辑」外面一格。
+fn forget_rect(index: usize) -> Rect {
+    let row = row_rect(index);
+
+    Rect::new(row.right() - 52.0, row.y + 14.0, 40.0, 40.0)
+}
+
+/// 详情页的六宫格：三列两行。
+fn tile_rect(index: usize) -> Rect {
+    const W: f32 = 140.0;
+    const H: f32 = 128.0;
+    const GAP: f32 = 12.0;
+
+    let column = index % 3;
+    let row = index / 3;
+
+    Rect::new(18.0 + column as f32 * (W + GAP), 116.0 + row as f32 * (H + GAP), W, H)
+}
+
+/// 一份「一行一条」的文本里，第 `index` 行的第 `slot` 个字段。
+fn field<'a>(text: &'a [u8], index: usize, slot: usize) -> &'a [u8] {
+    let mut line = 0usize;
+    let mut start = 0usize;
+
+    for (at, byte) in text.iter().enumerate() {
+        if *byte != b'\n' {
+            continue;
+        }
+
+        if line == index {
+            return nth(&text[start..at], slot);
+        }
+
+        line += 1;
+        start = at + 1;
     }
 
-    let line = match line.iter().position(|byte| *byte == b'\n') {
-        Some(end) => &line[..end],
-        None => line,
-    };
-
-    let mut rest = line;
-
-    for _ in 0..field {
-        let Some(end) = rest.iter().position(|byte| *byte == b'\t') else {
-            return b"";
-        };
-
-        rest = &rest[end + 1..];
-    }
-
-    match rest.iter().position(|byte| *byte == b'\t') {
-        Some(end) => &rest[..end],
-        None => rest,
+    if line == index {
+        nth(&text[start..], slot)
+    } else {
+        &[]
     }
 }
 
-/// 有几行（末尾没有换行也算一行）。
+fn nth(line: &[u8], slot: usize) -> &[u8] {
+    let mut field = 0usize;
+    let mut start = 0usize;
+
+    for (at, byte) in line.iter().enumerate() {
+        if *byte != b'\t' {
+            continue;
+        }
+
+        if field == slot {
+            return &line[start..at];
+        }
+
+        field += 1;
+        start = at + 1;
+    }
+
+    if field == slot {
+        &line[start..]
+    } else {
+        &[]
+    }
+}
+
+/// 一份「一行一条」的文本里有几行。
 fn lines(text: &[u8]) -> usize {
-    if text.is_empty() {
-        return 0;
-    }
-
     let mut count = text.iter().filter(|byte| **byte == b'\n').count();
 
-    if text.last() != Some(&b'\n') {
+    if !text.is_empty() && !text.ends_with(b"\n") {
         count += 1;
     }
 
     count
 }
 
-/// 一段十进制数字。读不出来的当 0：一块说不上来自己多大的盘不该让整页显示不出来。
-fn decimal(bytes: &[u8]) -> u64 {
+/// 一串十进制数字。空串与半截数字都算它已经读到的那部分。
+fn decimal(text: &[u8]) -> u64 {
     let mut value = 0u64;
 
-    for byte in bytes {
-        match byte {
-            b'0'..=b'9' => value = value.saturating_mul(10).saturating_add((byte - b'0') as u64),
-            _ => break,
+    for byte in text {
+        if !byte.is_ascii_digit() {
+            break;
         }
+
+        value = value.saturating_mul(10).saturating_add(u64::from(byte - b'0'));
     }
 
     value
 }
 
-/// 字节换成 `58G` 这样的一行，带一位小数：存储这一格说的是「大概多大」，不是「多少字节」。
-fn gigabytes(bytes: u64) -> Gauge {
-    Gauge(bytes)
-}
-
-/// `gigabytes` 的返回值：自己实现 `Display`，因为 `format_into!` 要的是一个能印的东西，而这个
-/// 包没有浮点格式化（`core::fmt` 里没有 `{:.1}` 之外的浮点支持，手算更快也更小）。
-struct Gauge(u64);
-
-impl core::fmt::Display for Gauge {
-    fn fmt(&self, out: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let bytes = self.0;
-
-        if bytes == 0 {
-            return out.write_str("—");
-        }
-
-        // TB 与 GB 都只保留一位小数：`58.2G`、`1.8T`。
-        let (value, unit) = if bytes >= 1_000_000_000_000 {
-            (bytes * 10 / 1_000_000_000_000, "T")
-        } else if bytes >= 1_000_000_000 {
-            (bytes * 10 / 1_000_000_000, "G")
-        } else if bytes >= 1_000_000 {
-            (bytes * 10 / 1_000_000, "M")
-        } else {
-            (bytes / 1_000, "K")
-        };
-
-        write!(out, "{}.{}{}", value / 10, value % 10, unit)
-    }
-}
-
 app!(Monitor);
+

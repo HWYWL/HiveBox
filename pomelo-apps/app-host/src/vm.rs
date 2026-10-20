@@ -993,6 +993,76 @@ fn bind(linker: &mut Linker<HostState>) -> Result<(), VmError> {
 
     link(linker.func_wrap(
         host::MODULE,
+        host::NAS_REMEMBER,
+        |mut caller: Caller<'_, HostState>,
+         host_ptr: u32,
+         host_len: u32,
+         port: u32,
+         user_ptr: u32,
+         user_len: u32,
+         secret_ptr: u32,
+         secret_len: u32|
+         -> i32 {
+            if !granted(&caller, perm::NAS) {
+                return code::DENIED;
+            }
+
+            let memory = memory_of(&caller);
+            let Some(host) = read_string(&caller, memory, host_ptr, host_len.min(128)) else {
+                return code::INVALID;
+            };
+            let Some(user) = read_string(&caller, memory, user_ptr, user_len.min(64)) else {
+                return code::INVALID;
+            };
+            let Some(secret) = read_string(&caller, memory, secret_ptr, secret_len.min(256)) else {
+                return code::INVALID;
+            };
+
+            caller.data_mut().services.nas_remember(
+                &host,
+                port.min(u16::MAX as u32) as u16,
+                &user,
+                &secret,
+            )
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::NAS_FORGET,
+        |mut caller: Caller<'_, HostState>, host_ptr: u32, host_len: u32| -> i32 {
+            if !granted(&caller, perm::NAS) {
+                return code::DENIED;
+            }
+
+            let memory = memory_of(&caller);
+            let Some(host) = read_string(&caller, memory, host_ptr, host_len.min(128)) else {
+                return code::INVALID;
+            };
+
+            caller.data_mut().services.nas_forget(&host)
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
+        host::NAS_TERMINAL,
+        |mut caller: Caller<'_, HostState>, host_ptr: u32, host_len: u32| -> i32 {
+            if !granted(&caller, perm::NAS) {
+                return code::DENIED;
+            }
+
+            let memory = memory_of(&caller);
+            let Some(host) = read_string(&caller, memory, host_ptr, host_len.min(128)) else {
+                return code::INVALID;
+            };
+
+            caller.data_mut().services.nas_terminal(&host)
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
         host::NAS_SHELL_OPEN,
         |mut caller: Caller<'_, HostState>,
          host_ptr: u32,
@@ -1570,6 +1640,27 @@ mod tests {
             (host::SYSTEM, perm::SYSTEM, "(param i32 i32)", "i32.const 0 i32.const 0", code::DENIED as u32),
             (host::AUDIO_STATE, perm::AUDIO, "(param i32 i32)", "i32.const 0 i32.const 0", code::DENIED as u32),
             (host::NAS_SHELL_STATUS, perm::NAS, "", "", nas_shell::DENIED),
+            (
+                host::NAS_REMEMBER,
+                perm::NAS,
+                "(param i32 i32 i32 i32 i32 i32 i32)",
+                "i32.const 0 i32.const 0 i32.const 22 i32.const 0 i32.const 0 i32.const 0 i32.const 0",
+                code::DENIED as u32,
+            ),
+            (
+                host::NAS_FORGET,
+                perm::NAS,
+                "(param i32 i32)",
+                "i32.const 0 i32.const 0",
+                code::DENIED as u32,
+            ),
+            (
+                host::NAS_TERMINAL,
+                perm::NAS,
+                "(param i32 i32)",
+                "i32.const 0 i32.const 0",
+                code::DENIED as u32,
+            ),
             (host::CLOUD_STATE, perm::CLOUD, "", "", state::DENIED),
         ];
 
@@ -1594,14 +1685,17 @@ mod tests {
     /// refused with the word it reported rather than by a linker error naming an import.
     #[test]
     fn a_package_from_a_newer_minor_is_refused_before_it_is_instantiated() {
-        let wasm = wat::parse_str(
+        // 比这一份宿主新的那一版：写死一个数字，这一份 ABI 每加一条服务就得跟着改测试。
+        let newer = app_abi::version_word(app_abi::ABI_MAJOR, app_abi::ABI_MINOR + 1);
+
+        let wasm = wat::parse_str(&format!(
             r#"
             (module
               (memory (export "memory") 1)
-              (func (export "hb_abi_version") (result i32) i32.const 0x00010004)
+              (func (export "hb_abi_version") (result i32) i32.const {newer})
             )
-            "#,
-        )
+            "#
+        ))
         .expect("a module this test wrote");
 
         assert_eq!(
@@ -1612,7 +1706,7 @@ mod tests {
                 app_abi::perm::ALL,
             )
             .err(),
-            Some(VmError::Abi(app_abi::version_word(1, 4)))
+            Some(VmError::Abi(newer))
         );
     }
 

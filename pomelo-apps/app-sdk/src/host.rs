@@ -290,6 +290,34 @@ pub fn nas_devices(out: &mut [u8]) -> Option<usize> {
     (written >= 0).then_some(written as usize)
 }
 
+/// 把一台机器记下来（同一个地址再存一次就是改正它），并开始盯着它。
+///
+/// `secret` 为空表示密码不改 —— 编辑一台机器时表单里不显示密码，也就不该要求人再输一遍。写的是
+/// 板子自己的 `nas.conf`，所以别的应用与设置页下一次读到的就是这一条。
+pub fn nas_remember(host: &str, port: u16, user: &str, secret: &str) -> bool {
+    imp::nas_remember(
+        host.as_ptr() as u32,
+        host.len() as u32,
+        u32::from(port),
+        user.as_ptr() as u32,
+        user.len() as u32,
+        secret.as_ptr() as u32,
+        secret.len() as u32,
+    ) == code::OK
+}
+
+/// 把一台机器从清单里删掉。清单里没有它也算成功。
+pub fn nas_forget(host: &str) -> bool {
+    imp::nas_forget(host.as_ptr() as u32, host.len() as u32) == code::OK
+}
+
+/// 请外壳把**终端应用**打开在这台机器上：整块屏幕交给它，键盘与回滚都在那边。
+///
+/// 与 [`nas_shell_open`] 不是一件事：那个是应用自己的一页 shell。要求 `host` 在清单里。
+pub fn nas_terminal(host: &str) -> bool {
+    imp::nas_terminal(host.as_ptr() as u32, host.len() as u32) == code::OK
+}
+
 pub fn nas_shell_open(host: &str, columns: u16, rows: u16) -> bool {
     imp::nas_shell_open(
         host.as_ptr() as u32,
@@ -485,6 +513,20 @@ mod imp {
         fn raw_nas_refresh() -> i32;
         #[link_name = "hb_nas_devices"]
         fn raw_nas_devices(out_ptr: u32, out_len: u32) -> i32;
+        #[link_name = "hb_nas_remember"]
+        fn raw_nas_remember(
+            host_ptr: u32,
+            host_len: u32,
+            port: u32,
+            user_ptr: u32,
+            user_len: u32,
+            secret_ptr: u32,
+            secret_len: u32,
+        ) -> i32;
+        #[link_name = "hb_nas_forget"]
+        fn raw_nas_forget(host_ptr: u32, host_len: u32) -> i32;
+        #[link_name = "hb_nas_terminal"]
+        fn raw_nas_terminal(host_ptr: u32, host_len: u32) -> i32;
         #[link_name = "hb_nas_shell_open"]
         fn raw_nas_shell_open(
             host_ptr: u32,
@@ -658,6 +700,36 @@ mod imp {
 
     pub fn nas_devices(out_ptr: u32, out_len: u32) -> i32 {
         unsafe { raw_nas_devices(out_ptr, out_len) }
+    }
+
+    pub fn nas_remember(
+        host_ptr: u32,
+        host_len: u32,
+        port: u32,
+        user_ptr: u32,
+        user_len: u32,
+        secret_ptr: u32,
+        secret_len: u32,
+    ) -> i32 {
+        unsafe {
+            raw_nas_remember(
+                host_ptr,
+                host_len,
+                port,
+                user_ptr,
+                user_len,
+                secret_ptr,
+                secret_len,
+            )
+        }
+    }
+
+    pub fn nas_forget(host_ptr: u32, host_len: u32) -> i32 {
+        unsafe { raw_nas_forget(host_ptr, host_len) }
+    }
+
+    pub fn nas_terminal(host_ptr: u32, host_len: u32) -> i32 {
+        unsafe { raw_nas_terminal(host_ptr, host_len) }
     }
 
     pub fn nas_shell_open(host_ptr: u32, host_len: u32, columns: u32, rows: u32) -> i32 {
@@ -840,6 +912,23 @@ mod imp {
     }
 
     pub fn nas_devices(_out_ptr: u32, _out_len: u32) -> i32 {
+        app_abi::code::UNSUPPORTED
+    }
+    pub fn nas_remember(
+        _host_ptr: u32,
+        _host_len: u32,
+        _port: u32,
+        _user_ptr: u32,
+        _user_len: u32,
+        _secret_ptr: u32,
+        _secret_len: u32,
+    ) -> i32 {
+        app_abi::code::UNSUPPORTED
+    }
+    pub fn nas_forget(_host_ptr: u32, _host_len: u32) -> i32 {
+        app_abi::code::UNSUPPORTED
+    }
+    pub fn nas_terminal(_host_ptr: u32, _host_len: u32) -> i32 {
         app_abi::code::UNSUPPORTED
     }
     pub fn nas_shell_open(_host_ptr: u32, _host_len: u32, _columns: u32, _rows: u32) -> i32 {

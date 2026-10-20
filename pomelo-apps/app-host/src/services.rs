@@ -215,6 +215,28 @@ pub trait Services {
         Vec::new()
     }
 
+    /// 把一台机器记下来，或改正已经在清单里的那一条；`secret` 为空是「密码不改」。见
+    /// [`app_abi::host::NAS_REMEMBER`]。
+    fn nas_remember(&mut self, _host: &str, _port: u16, _user: &str, _secret: &str) -> i32 {
+        code::UNSUPPORTED
+    }
+
+    /// 把一台机器从清单里删掉。见 [`app_abi::host::NAS_FORGET`]。
+    fn nas_forget(&mut self, _host: &str) -> i32 {
+        code::UNSUPPORTED
+    }
+
+    /// 请外壳把终端应用打开在这台机器上：这一条只是把请求记下来，看得到外壳的那一层才动手
+    /// —— 见 [`Services::take_terminal`]。
+    fn nas_terminal(&mut self, _host: &str) -> i32 {
+        code::UNSUPPORTED
+    }
+
+    /// 取走应用刚才递出去的那个「开终端」的请求，一台机器一次。默认没有：桌面宿主没有外壳。
+    fn take_terminal(&mut self) -> Option<String> {
+        None
+    }
+
     fn nas_shell_open(&mut self, _host: &str, _columns: u16, _rows: u16) -> i32 {
         code::UNSUPPORTED
     }

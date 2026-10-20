@@ -38,7 +38,7 @@ ABI_MAJOR = 1
 # The highest service ABI the SDK in this tree speaks. Kept in step with `app-abi`'s `ABI_MINOR`:
 # the header says what the package was built against, and the runtime refuses a package whose minor
 # is newer than its own.
-ABI_MINOR = 3
+ABI_MINOR = 6
 HEADER_LEN = 32
 MAX_PACKAGE = 2 * 1024 * 1024
 
@@ -359,7 +359,7 @@ CATALOGUE = [
         crate_name="nas-monitor-wasm",
         name="Server",
         name_zh="服务器",
-        version="v0.2.1",
+        version="v0.2.2",
         accent="#705CF0",
         description="CPU、温度、内存、网络与磁盘，读数来自固件",
         memory_kb=256,

@@ -179,6 +179,16 @@ impl HostedApp {
             .unwrap_or(false)
     }
 
+    /// 应用请外壳把终端打开在某台机器上，如果它刚这么说过。取走，所以只回来一次。
+    ///
+    /// 走服务而不是走一条新消息，是因为它是**请求**不是事件：外壳在画完这一帧之后看它一眼，看
+    /// 到了就把屏幕交给终端；看不到，应用那一页什么也没变。
+    pub fn take_terminal(&mut self) -> Option<String> {
+        self.vm
+            .as_mut()
+            .and_then(|vm| vm.services_mut().take_terminal())
+    }
+
     /// How much linear memory the application is holding, for the store's and the settings' readings.
     pub fn memory_bytes(&self) -> u64 {
         self.vm.as_ref().map(|vm| vm.memory_bytes()).unwrap_or(0)

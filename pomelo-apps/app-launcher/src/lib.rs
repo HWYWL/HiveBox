@@ -683,7 +683,7 @@ impl Launcher {
 
         let now = self.now_ms();
 
-        let (failed, exited) = {
+        let (failed, exited, terminal) = {
             let Some(hosted) = self.hosted.get_mut(at) else {
                 return;
             };
@@ -696,7 +696,7 @@ impl Launcher {
                 None => app.error().map(str::to_string),
             };
 
-            (failed, app.exited())
+            (failed, app.exited(), app.take_terminal())
         };
 
         if let Some(error) = failed {
@@ -710,7 +710,36 @@ impl Launcher {
             if self.screen == Screen::App(index) {
                 self.screen = Screen::Grid;
             }
+        } else if let Some(host) = terminal {
+            self.open_terminal_on(&host);
         }
+    }
+
+    /// 把整块屏幕交给终端应用，并在 `host` 上开一个会话。
+    ///
+    /// 这是「服务器应用里点终端」的另一半：应用只递出一句「开在哪台机器上」，切页、给终端它的
+    /// 板子、以及那台机器的密码都留在这里 —— 密码从板子读过的那份清单里取，不经过应用的边界，
+    /// 这也是应用只拿得到 `host` 与 `user` 的原因。
+    fn open_terminal_on(&mut self, host: &str) {
+        let Some(device) = self
+            .board
+            .nas()
+            .devices()
+            .into_iter()
+            .find(|device| device.host == host)
+        else {
+            return;
+        };
+
+        self.screen = Screen::App(TERMINAL);
+        self.running_apps.retain(|&running| running != TERMINAL);
+        self.running_apps.push(TERMINAL);
+
+        // 先把终端叫起来、再告诉它屏幕多大：会话的列数是从那块尺寸算出来的，而一个还没被建立
+        // 的应用收不到尺寸。
+        self.get_or_create_terminal();
+        self.hand_over_size();
+        self.get_or_create_terminal().connect(&device);
     }
 
     ///

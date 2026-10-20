@@ -67,25 +67,15 @@ version = "0.1.0"
 dependencies = [
  "app-abi",
  "app-host",
- "cloud-monitor",
- "files",
- "games",
  "iced",
  "image",
- "music-player",
- "nas-monitor",
  "pomelo-hal",
  "pomelo-material-symbols",
  "pomelo-widgets",
- "power-log",
  "settings",
  "store",
- "task-viewer",
  "terminal",
  "updater",
- "weather",
- "web-manager",
- "wifi-map",
 ]
 
 [[package]]
@@ -286,16 +276,6 @@ dependencies = [
  "crypto-common 0.2.2",
  "inout 0.2.2",
  "zeroize",
-]
-
-[[package]]
-name = "cloud-monitor"
-version = "0.1.0"
-dependencies = [
- "iced",
- "pomelo-hal",
- "pomelo-material-symbols",
- "pomelo-widgets",
 ]
 
 [[package]]
@@ -719,16 +699,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
 
 [[package]]
-name = "files"
-version = "0.1.0"
-dependencies = [
- "iced",
- "pomelo-hal",
- "pomelo-material-symbols",
- "pomelo-widgets",
-]
-
-[[package]]
 name = "find-msvc-tools"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -883,16 +853,6 @@ dependencies = [
  "memchr",
  "pin-project-lite",
  "slab",
-]
-
-[[package]]
-name = "games"
-version = "0.1.0"
-dependencies = [
- "iced",
- "pomelo-hal",
- "pomelo-material-symbols",
- "pomelo-widgets",
 ]
 
 [[package]]
@@ -1511,16 +1471,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
-name = "music-player"
-version = "0.1.0"
-dependencies = [
- "iced",
- "pomelo-hal",
- "pomelo-material-symbols",
- "pomelo-widgets",
-]
-
-[[package]]
 name = "naga"
 version = "27.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1543,16 +1493,6 @@ dependencies = [
  "rustc-hash 1.1.0",
  "thiserror 2.0.21",
  "unicode-ident",
-]
-
-[[package]]
-name = "nas-monitor"
-version = "0.1.0"
-dependencies = [
- "iced",
- "pomelo-hal",
- "pomelo-material-symbols",
- "pomelo-widgets",
 ]
 
 [[package]]
@@ -1848,16 +1788,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10ab3eb7f3becc3a1cbc4f2c6f20267996cfc1a6467a873763411b136a122715"
 dependencies = [
  "portable-atomic",
-]
-
-[[package]]
-name = "power-log"
-version = "0.1.0"
-dependencies = [
- "iced",
- "pomelo-hal",
- "pomelo-material-symbols",
- "pomelo-widgets",
 ]
 
 [[package]]
@@ -2549,16 +2479,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "task-viewer"
-version = "0.1.0"
-dependencies = [
- "iced",
- "pomelo-hal",
- "pomelo-material-symbols",
- "pomelo-widgets",
-]
-
-[[package]]
 name = "terminal"
 version = "0.1.0"
 dependencies = [
@@ -2991,26 +2911,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "weather"
-version = "0.1.0"
-dependencies = [
- "iced",
- "pomelo-hal",
- "pomelo-material-symbols",
- "pomelo-widgets",
-]
-
-[[package]]
-name = "web-manager"
-version = "0.1.0"
-dependencies = [
- "iced",
- "pomelo-hal",
- "pomelo-material-symbols",
- "pomelo-widgets",
-]
-
-[[package]]
 name = "web-sys"
 version = "0.3.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3124,16 +3024,6 @@ dependencies = [
  "log",
  "thiserror 2.0.21",
  "web-sys",
-]
-
-[[package]]
-name = "wifi-map"
-version = "0.1.0"
-dependencies = [
- "iced",
- "pomelo-hal",
- "pomelo-material-symbols",
- "pomelo-widgets",
 ]
 
 [[package]]

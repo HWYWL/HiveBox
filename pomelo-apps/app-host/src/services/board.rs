@@ -30,8 +30,8 @@ use app_abi::{
 };
 use pomelo_hal::{
     AudioMeta, Board, CloudAction, CloudAnswer, CloudFault, CloudInstanceState, CloudProvider,
-    CloudState, CloudTarget, CloudVendor, HalError, HttpFault, HttpProgress, HttpState, NasFault,
-    NasShellStatus, NasStatus, ScanState, WebStatus, WifiState,
+    CloudState, CloudTarget, CloudVendor, HalError, HttpFault, HttpProgress, HttpState,
+    NasCredentials, NasFault, NasShellStatus, NasStatus, ScanState, WebStatus, WifiState,
 };
 
 use super::{safe_component, CloudKey, NasDisk, Services, WifiAp};
@@ -65,6 +65,10 @@ pub struct BoardServices {
     /// Set by the application and read by the launcher.
     pub invalidated: bool,
     pub exited: bool,
+    /// 应用请外壳打开终端的那台机器。服务只把它记下来：切换到终端页、并把会话开到这台机器上
+    /// 的，是看得见屏幕的那一层（`app-launcher`），而这一层只在 [`Services::take_terminal`]
+    /// 里把它交出去一次。
+    terminal: Option<String>,
 }
 
 /// One line of a listing, held between [`Services::dir_open`] and [`Services::dir_next`].
@@ -91,6 +95,7 @@ impl BoardServices {
             listing_at: 0,
             invalidated: false,
             exited: false,
+            terminal: None,
         }
     }
 
@@ -590,6 +595,70 @@ impl Services for BoardServices {
             .into_iter()
             .map(|device| (device.host, device.user))
             .collect()
+    }
+
+    fn nas_remember(&mut self, host: &str, port: u16, user: &str, secret: &str) -> i32 {
+        // 地址与账号是这台机器的身份，缺一个就不是一条登录：拒绝，而不是写一条永远连不上的。
+        if host.trim().is_empty() || user.trim().is_empty() {
+            return code::INVALID;
+        }
+
+        // 原来那条要先读出来：它带着密码、间隔，还有第一次看时记下的主机密钥。同一个地址再存一次
+        // 是「改正这一台」，把密钥丢掉等于把一台验过的机器退回「它说我像不像」。
+        let held = self
+            .board
+            .nas()
+            .devices()
+            .into_iter()
+            .find(|device| device.host == host);
+
+        // 空密码是「不改」：编辑一台机器时，表单里不显示密码，也就不该要求人再输一遍。
+        let password = match (secret.is_empty(), &held) {
+            (true, Some(device)) => device.password.clone(),
+            (_, _) => secret.to_string(),
+        };
+
+        let credentials = NasCredentials {
+            host: host.to_string(),
+            port: if port == 0 { 22 } else { port },
+            user: user.to_string(),
+            password,
+            interval_secs: held.as_ref().map_or(5, |device| device.interval_secs),
+            host_key: held.and_then(|device| device.host_key),
+        };
+
+        match self.board.nas().remember(&credentials) {
+            Ok(()) => code::OK,
+            Err(error) => hal_code(error),
+        }
+    }
+
+    fn nas_forget(&mut self, host: &str) -> i32 {
+        match self.board.nas().forget(host) {
+            Ok(()) => code::OK,
+            Err(error) => hal_code(error),
+        }
+    }
+
+    fn nas_terminal(&mut self, host: &str) -> i32 {
+        // 只有清单里的机器才有终端可开：一个不在文件里的地址是调用方的笔误，而外壳照着它去连
+        // 只会得到一次必然失败的登录。
+        if !self
+            .board
+            .nas()
+            .devices()
+            .iter()
+            .any(|device| device.host == host)
+        {
+            return code::INVALID;
+        }
+
+        self.terminal = Some(host.to_string());
+        code::OK
+    }
+
+    fn take_terminal(&mut self) -> Option<String> {
+        self.terminal.take()
     }
 
     fn nas_shell_open(&mut self, host: &str, columns: u16, rows: u16) -> i32 {

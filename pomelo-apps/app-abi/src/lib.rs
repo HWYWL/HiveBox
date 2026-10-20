@@ -43,11 +43,14 @@ pub const ABI_MAJOR: u16 = 1;
 /// * `2` added the radio.
 /// * `3` added the machines beside the box and the ones in an account.
 /// * `4` added the two volumes' file listings and the board's web server.
+/// * `5` added the list of machines this board has been told about.
+/// * `6` added remembering and forgetting one of them, and handing the whole screen to the terminal
+///   app: a page with a list had no way to change it, and the shell it could open was its own.
 ///
 /// An application built against `1.0` still runs on this host: every addition is an import it never
 /// calls. An application built against `1.3` on a `1.0` host fails at instantiation, which is the
 /// answer the store draws as "needs a newer system".
-pub const ABI_MINOR: u16 = 5;
+pub const ABI_MINOR: u16 = 6;
 
 /// Packs a major and a minor into the word [`export::ABI_VERSION`] returns.
 pub const fn version_word(major: u16, minor: u16) -> u32 {
@@ -212,6 +215,20 @@ pub mod host {
     pub const NAS_SHELL_TAKE: &str = "hb_nas_shell_take";
     /// `() -> i32`: hangs the session up.
     pub const NAS_SHELL_CLOSE: &str = "hb_nas_shell_close";
+    /// `(host_ptr, host_len, port: u32, user_ptr, user_len, secret_ptr, secret_len) -> i32`: 把一台
+    /// 机器记下来（同一个地址再存一次就是改正它），并开始盯着它。`secret` 为空表示沿用原来那条的
+    /// 密码 —— 编辑一台机器时不必重新输一遍。Requires [`super::perm::NAS`].
+    ///
+    /// 写的是板子自己的 `/internal/AppData/NAS/nas.conf`，因为读那份文件的也是板子：应用只把
+    /// 「哪台、什么账号、什么密码」递过去，文件与正在看的机器由板子接住。
+    pub const NAS_REMEMBER: &str = "hb_nas_remember";
+    /// `(host_ptr, host_len) -> i32`: 把一台机器从清单里删掉。清单里没有它也是 `OK`。
+    pub const NAS_FORGET: &str = "hb_nas_forget";
+    /// `(host_ptr, host_len) -> i32`: 请外壳把**终端应用**打开在这台机器上。
+    ///
+    /// 这一条与 [`NAS_SHELL_OPEN`] 不是一件事：那个是应用自己的一页 shell，这个是整块屏幕交给
+    /// 终端应用 —— 键盘、回滚、`^C` 都在那边，而应用退到它后面去。要求 `host` 在清单里。
+    pub const NAS_TERMINAL: &str = "hb_nas_terminal";
     /// `(vendor: u32, out_ptr, out_len) -> i32`: writes `masked\tregion` for one vendor
     /// ([`super::vendor`]). Requires [`super::perm::CLOUD`].
     pub const CLOUD_KEY: &str = "hb_cloud_key";
