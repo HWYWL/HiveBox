@@ -24,8 +24,18 @@ members = [
     "store",
     # The applications that are packages rather than crates in the firmware. Their build target is
     # `wasm32-unknown-unknown`; they are members so that one `cargo test` still covers the whole tree.
+    # The pairs below (a `wasm-apps/<id>` and the crate of the same name still in the image) are the
+    # migration as it stands: a package is published, then the crate it replaces is taken out — see
+    # `tools/build_apps.py`, whose catalogue is the one list of what is published.
     "wasm-apps/calculator",
     "wasm-apps/clock",
+    "wasm-apps/cloud-monitor",
+    "wasm-apps/games",
+    "wasm-apps/nas-monitor",
+    "wasm-apps/power-log",
+    "wasm-apps/task-viewer",
+    "wasm-apps/weather",
+    "wasm-apps/wifi-map",
     "task-viewer",
     "app-launcher",
     "cloud-monitor",
