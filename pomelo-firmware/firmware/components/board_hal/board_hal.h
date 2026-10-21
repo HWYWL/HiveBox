@@ -1279,6 +1279,17 @@ size_t hal_workbuddy_login_message(char *out, size_t capacity);
 /** @brief Abandon a sign-in that is waiting. */
 void hal_workbuddy_login_cancel(void);
 
+/** @brief The account's own words for one of the three calls, unparsed.
+ *
+ * Not for a page to draw: for checking what the account actually said, because two of these
+ * documents are written down from somebody else's client and a field name that is wrong looks
+ * exactly like an account with nothing in it.
+ *
+ * @param which 0 the check-in status, 1 the credit summary, 2 the usage document.
+ * @return ESP_OK, ESP_ERR_INVALID_ARG, ESP_ERR_NOT_FOUND (no token), or ESP_FAIL.
+ */
+esp_err_t hal_workbuddy_probe(int32_t which, char *out, size_t capacity, size_t *out_length);
+
 /* ---------------------------------------------------------------------------
  * Log ring.
  *

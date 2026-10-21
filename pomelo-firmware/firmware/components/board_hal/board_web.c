@@ -2709,6 +2709,65 @@ static esp_err_t run_login_job(int32_t kind)
     return s_login_job.done ? s_login_job.result : ESP_ERR_TIMEOUT;
 }
 
+/* 一句「接口到底说了什么」，原样。两个文档的字段名是照着别人的客户端抄的，抄错一个字母看起来
+ * 就像「这个账号什么都没有」，所以这里留一个能看见原话的口子。一样走 worker：TLS 握手。 */
+#define WEB_WORKBUDDY_RAW_MAX 8192
+
+static char s_raw_body[WEB_WORKBUDDY_RAW_MAX];
+static volatile bool s_raw_done = false;
+static int32_t s_raw_which = 0;
+
+static void wb_raw_task(void *arg)
+{
+    (void)arg;
+
+    hal_workbuddy_probe(s_raw_which, s_raw_body, sizeof s_raw_body, NULL);
+    s_raw_done = true;
+
+    vTaskDelete(NULL);
+}
+
+static esp_err_t handle_workbuddy_raw(httpd_req_t *req)
+{
+    char which[16];
+    if (!query_string(req, "which", which, sizeof which)) {
+        snprintf(which, sizeof which, "status");
+    }
+
+    if (strcmp(which, "credits") == 0) {
+        s_raw_which = 1;
+    } else if (strcmp(which, "usage") == 0) {
+        s_raw_which = 2;
+    } else {
+        s_raw_which = 0;
+    }
+
+    s_raw_body[0] = '\0';
+    s_raw_done = false;
+
+    if (xTaskCreate(wb_raw_task, "wb_raw", 8192, NULL, 4, NULL) != pdPASS) {
+        return send_busy(req);
+    }
+
+    const int64_t deadline = esp_timer_get_time() + 25000 * 1000;
+    while (!s_raw_done && esp_timer_get_time() < deadline) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
+    if (!s_raw_done) {
+        return httpd_resp_sendstr(req, "(no answer)");
+    }
+
+    if (s_raw_body[0] == '\0') {
+        return httpd_resp_sendstr(req, "(empty)");
+    }
+
+    return httpd_resp_send(req, s_raw_body, (ssize_t)strlen(s_raw_body));
+}
+
 /**
  * The two halves of a sign-in, in one route: `action=start` hands back the link, `action=poll`
  * asks whether it has been authorised yet. A page does start, then polls once a second or two --
@@ -2890,6 +2949,7 @@ static const web_route_t s_routes[] = {
     { "/api/workbuddy/forget", HTTP_POST, handle_workbuddy_forget },
     { "/api/workbuddy/start",  HTTP_POST, handle_workbuddy_start },
     { "/api/workbuddy/login",  HTTP_POST, handle_workbuddy_login },
+    { "/api/workbuddy/raw",    HTTP_GET,  handle_workbuddy_raw },
     { "/api/workbuddy/answer", HTTP_GET,  handle_workbuddy_answer },
     { "/api/wifi/disconnect", HTTP_POST, handle_wifi_disconnect },
     { "/api/wifi/forget",     HTTP_POST, handle_wifi_forget },

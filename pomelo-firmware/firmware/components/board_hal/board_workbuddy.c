@@ -368,6 +368,62 @@ static bool json_string(const char *value, char *out, size_t capacity)
 }
 
 /**
+ * The characters of a name this panel has a glyph for, and nothing else.
+ *
+ * The baked table holds Latin and the CJK block; an activity's name arrives with an emoji in it
+ * ("Buddy🎁签到有礼" is the kind of thing these are called), and a character with no glyph is drawn
+ * as a box. A box is not the name, so the box is dropped: what is left is the part somebody can
+ * read, which is better than a row of squares in the middle of it.
+ *
+ * Kept: ASCII, the CJK unified block, CJK punctuation, and the fullwidth forms that go with them.
+ * Dropped: everything else, including the four-byte ones.
+ */
+static void keep_drawable(char *text)
+{
+    char *write = text;
+    const unsigned char *at = (const unsigned char *)text;
+
+    while (*at != 0) {
+        unsigned int code;
+        size_t width;
+
+        if (*at < 0x80) {
+            code = *at;
+            width = 1;
+        } else if ((*at & 0xE0) == 0xC0) {
+            code = (unsigned int)(*at & 0x1F);
+            width = 2;
+        } else if ((*at & 0xF0) == 0xE0) {
+            code = (unsigned int)(*at & 0x0F);
+            width = 3;
+        } else if ((*at & 0xF8) == 0xF0) {
+            code = (unsigned int)(*at & 0x07);
+            width = 4;
+        } else {
+            at++;
+            continue;
+        }
+
+        for (size_t i = 1; i < width; i++) {
+            code = (code << 6) | (unsigned int)(at[i] & 0x3F);
+        }
+
+        const bool drawable = (code < 0x80) || (code >= 0x3000 && code <= 0x303F) ||
+                              (code >= 0x4E00 && code <= 0x9FFF) || (code >= 0xFF00 && code <= 0xFFEF);
+
+        if (drawable) {
+            for (size_t i = 0; i < width; i++) {
+                *write++ = (char)at[i];
+            }
+        }
+
+        at += width;
+    }
+
+    *write = '\0';
+}
+
+/**
  * Whether a run of bytes is UTF-8 this panel can draw.
  *
  * The check is the shape of the encoding and not a table of characters: overlong forms, a lead byte
@@ -447,6 +503,78 @@ static bool json_number(const char *value, long long *out)
 
     char *end = NULL;
     const long long number = strtoll(value, &end, 10);
+    if (end == value) {
+        return false;
+    }
+
+    *out = number;
+    return true;
+}
+
+/**
+ * Where an array ends: one past its matching `]`, or NULL.
+ *
+ * The credit document says the same thing twice -- `Packages` one entry per package, and
+ * `CreditGroups` the same amounts split by kind -- and a scan that runs past the end of `Packages`
+ * adds both, which doubles every number on the tile. Walking to the end is what stops it at the
+ * boundary the account drew.
+ */
+static const char *array_end(const char *at)
+{
+    if (at == NULL || *at != '[') {
+        return NULL;
+    }
+
+    int depth = 0;
+    bool in_string = false;
+
+    for (const char *p = at; *p != '\0'; p++) {
+        if (in_string) {
+            if (*p == '\\' && p[1] != '\0') {
+                p++;
+                continue;
+            }
+            if (*p == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if (*p == '"') {
+            in_string = true;
+        } else if (*p == '[' || *p == '{') {
+            depth++;
+        } else if (*p == ']' || *p == '}') {
+            depth--;
+            if (depth == 0) {
+                return p + 1;
+            }
+        }
+    }
+
+    return NULL;
+}
+
+/**
+ * A number that may arrive as a number or as a quoted string.
+ *
+ * The billing document writes its capacities as strings -- `"CycleRemainCapacity":"2200"` -- and a
+ * `strtod` on one of those reads the quote, not the number, and answers zero. Which is what this
+ * file did, and what drew a true account as "0.0 / 0.0".
+ */
+static bool json_decimal(const char *value, double *out)
+{
+    if (value == NULL) {
+        return false;
+    }
+
+    if (*value == '"') {
+        value++;
+    }
+
+    char *end = NULL;
+    const double number = strtod(value, &end);
+
     if (end == value) {
         return false;
     }
@@ -1030,27 +1158,47 @@ static bool fetch_credits(double *out_remaining, double *out_total)
 
     const char *scope = account_scope(s_response);
     const char *packages = json_value(scope, "Packages");
+    const char *end = array_end(packages);
 
-    if (packages == NULL || *packages != '[') {
+    if (end == NULL) {
+        ESP_LOGW(TAG, "the credit summary has no packages");
         return false;
     }
 
+    /* 剩余就看 `TotalCredits`：接口自己把它算好了，重算一遍只是给自己多一个出错的机会。 */
     double remaining = 0.0;
+
+    if (!json_decimal(json_value(scope, "TotalCredits"), &remaining)) {
+        ESP_LOGW(TAG, "the credit summary has no TotalCredits");
+        return false;
+    }
+
+    /* 总额是这个数组里各套餐的容量之和；数组之外还有一份同样的数额（`CreditGroups`，
+     * 按种类拆开写），所以这里必须停在 `]` 上，否则每个数都会翻倍。 */
     double total = 0.0;
+    int seen = 0;
     const char *at = packages;
 
-    /* Every `CycleRemainCapacity` in the array, added up. The array is walked rather than the object
-     * parsed: this is one array of flat objects, and a parser for it would be a second JSON reader
-     * in a file that already has one that is a few hundred lines shorter. */
-    while ((at = json_value(at, "CycleRemainCapacity")) != NULL) {
-        remaining += strtod(at, NULL);
-
+    while (at < end) {
         const char *whole = json_value(at, "CycleTotalCapacity");
-        if (whole != NULL) {
-            total += strtod(whole, NULL);
+
+        if (whole == NULL || whole >= end) {
+            break;
         }
 
-        at++;
+        double given = 0.0;
+
+        if (json_decimal(whole, &given)) {
+            total += given;
+            seen++;
+        }
+
+        at = whole + 1;
+    }
+
+    if (seen == 0) {
+        ESP_LOGW(TAG, "the credit summary has no capacity this file can read");
+        return false;
     }
 
     *out_remaining = remaining;
@@ -1134,6 +1282,9 @@ static void render_status(void)
         ESP_LOGW(TAG, "the activity's name is not UTF-8 and is dropped");
         activity[0] = '\0';
     }
+
+    /* 字体里没有的字画出来是方框，不是名字：留下画得出的那部分。 */
+    keep_drawable(activity);
 
     const long long access_days  = days_until(jwt_expires_at(s_account.token));
     const long long refresh_days = s_account.refresh[0] != '\0'
@@ -1621,6 +1772,67 @@ size_t hal_workbuddy_login_message(char *out, size_t capacity)
 void hal_workbuddy_login_cancel(void)
 {
     login_reset(HAL_WORKBUDDY_LOGIN_IDLE, "");
+}
+
+// =============================================================================
+// What the account actually said
+// =============================================================================
+// One function, and it exists for the two fields this file had to guess at: the credit summary and
+// the usage document are written down from somebody else's client, and a field name that is wrong
+// looks exactly like an account with nothing in it. `hal_workbuddy_probe` answers the raw body so
+// the guess can be checked instead of believed.
+// =============================================================================
+
+esp_err_t hal_workbuddy_probe(int32_t which, char *out, size_t capacity, size_t *out_length)
+{
+    if (out == NULL || capacity == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    out[0] = '\0';
+
+    if (out_length != NULL) {
+        *out_length = 0;
+    }
+
+    if (hal_workbuddy_init() != ESP_OK) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    const char *path = NULL;
+    switch (which) {
+    case 0: path = WB_STATUS_PATH; break;
+    case 1: path = WB_SUMMARY_PATH; break;
+    case 2: path = WB_USAGE_PATH; break;
+    default: return ESP_ERR_INVALID_ARG;
+    }
+
+    lock();
+    const bool have_token = s_account.used && s_account.token[0] != '\0';
+    unlock();
+
+    if (!have_token) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    int status = 0;
+    const int32_t fault = wb_fetch_retrying(path, s_account.token, &status);
+
+    if (fault != HAL_WORKBUDDY_FAULT_NONE) {
+        return ESP_FAIL;
+    }
+
+    const size_t length = strlen(s_response);
+    const size_t take = (length < capacity - 1) ? length : capacity - 1;
+
+    memcpy(out, s_response, take);
+    out[take] = '\0';
+
+    if (out_length != NULL) {
+        *out_length = take;
+    }
+
+    return ESP_OK;
 }
 
 // =============================================================================
