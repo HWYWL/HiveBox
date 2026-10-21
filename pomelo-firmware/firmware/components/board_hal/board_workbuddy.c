@@ -1072,6 +1072,13 @@ esp_err_t hal_workbuddy_init(void)
         if (s_answer == NULL) {
             s_answer = (char *)malloc(WB_ANSWER_MAX);
         }
+
+        /* Cleared once, on the allocation: every later call here is a request that happens to run
+         * before something else, and a blanket clear would wipe the answer the *other* caller is
+         * about to take -- `hal_workbuddy_take_answer` calls this too. */
+        if (s_answer != NULL) {
+            s_answer[0] = '\0';
+        }
     }
 
     if (s_response == NULL) {
@@ -1079,15 +1086,16 @@ esp_err_t hal_workbuddy_init(void)
         if (s_response == NULL) {
             s_response = (char *)malloc(WB_RESPONSE_MAX);
         }
+
+        if (s_response != NULL) {
+            s_response[0] = '\0';
+        }
     }
 
     if (s_answer == NULL || s_response == NULL) {
         ESP_LOGE(TAG, "no room for the answer buffers");
         return ESP_ERR_NO_MEM;
     }
-
-    s_answer[0] = '\0';
-    s_response[0] = '\0';
 
     wb_ensure_loaded();
 
