@@ -1656,3 +1656,170 @@ impl CloudAnswer {
 }
 
 
+// -------------------------------------------------------------------------------------------
+// WorkBuddy: an account this board watches on somebody's behalf.
+// -------------------------------------------------------------------------------------------
+
+/// What a WorkBuddy request asks.
+///
+/// Two, and both are about the same account: there is no machine to name and no page beyond this
+/// one. [`WorkBuddyAction::Checkin`] is idempotent — the account answers that today's is already
+/// done rather than taking another one, and that is
+/// [`WorkBuddyReport::already_checked_in`][crate::types::WorkBuddyReport::already_checked_in]
+/// rather than a failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkBuddyAction {
+    /// What the activity looks like: today's check-in, the streak, and the token's lifetime.
+    Status,
+    /// Check in for today.
+    Checkin,
+}
+
+/// Where a WorkBuddy request is.
+///
+/// The same four states as [`CloudState`], and the same reason: the answer comes over the network
+/// on a thread that is not this one, and a page draws whatever the last look came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorkBuddyState {
+    /// Nothing has been asked for, or the answer has been taken.
+    #[default]
+    Idle,
+    /// A request is in flight.
+    Running,
+    /// An answer is waiting for [`WorkBuddyBackend::take_answer`][crate::traits::WorkBuddyBackend::take_answer].
+    Done,
+    /// The request failed, and why is in [`WorkBuddyState::Failed`]'s fault.
+    Failed(WorkBuddyFault),
+}
+
+/// Why a WorkBuddy request did not produce a report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkBuddyFault {
+    /// It failed with nothing more specific to say.
+    Failed,
+    /// The request named an action this board does not have.
+    Args,
+    /// No token is saved. Not a failure of the request — it never left — and the screen that says
+    /// "paste one on the management page".
+    NoToken,
+    /// The board is not on a network.
+    NoNetwork,
+    /// Nothing answered: the name did not resolve, the connection was refused, or the route is gone.
+    Unreachable,
+    /// TLS did not complete: a certificate that does not check out, or two ends with no protocol in
+    /// common.
+    Tls,
+    /// The account answered with a status this side cannot use, and no reason in the body.
+    Http,
+    /// The account refused the token: expired, revoked, or never one of its own. The one fault a
+    /// person can fix, and the sentence that says how.
+    Auth,
+    /// The account answered and refused the call, with its own reason in the answer.
+    Api,
+    /// The answer did not fit, or the token file could not be read or written.
+    Storage,
+}
+
+impl WorkBuddyFault {
+    /// All ten, in the C side's order.
+    pub const ALL: [WorkBuddyFault; 10] = [
+        WorkBuddyFault::Failed,
+        WorkBuddyFault::Args,
+        WorkBuddyFault::NoToken,
+        WorkBuddyFault::NoNetwork,
+        WorkBuddyFault::Unreachable,
+        WorkBuddyFault::Tls,
+        WorkBuddyFault::Http,
+        WorkBuddyFault::Auth,
+        WorkBuddyFault::Api,
+        WorkBuddyFault::Storage,
+    ];
+
+    /// The name this fault goes by on the wire — `error=workbuddy_auth` and its siblings.
+    pub fn code(self) -> &'static str {
+        match self {
+            WorkBuddyFault::Failed => "workbuddy_failed",
+            WorkBuddyFault::Args => "workbuddy_args",
+            WorkBuddyFault::NoToken => "workbuddy_creds",
+            WorkBuddyFault::NoNetwork => "workbuddy_network",
+            WorkBuddyFault::Unreachable => "workbuddy_unreachable",
+            WorkBuddyFault::Tls => "workbuddy_tls",
+            WorkBuddyFault::Http => "workbuddy_http",
+            WorkBuddyFault::Auth => "workbuddy_auth",
+            WorkBuddyFault::Api => "workbuddy_api",
+            WorkBuddyFault::Storage => "workbuddy_storage",
+        }
+    }
+
+    /// The fault a `workbuddy_*` name stands for, or [`WorkBuddyFault::Failed`] for a word this
+    /// build does not know.
+    pub fn from_code(code: &str) -> WorkBuddyFault {
+        WorkBuddyFault::ALL
+            .into_iter()
+            .find(|fault| fault.code() == code)
+            .unwrap_or(WorkBuddyFault::Failed)
+    }
+}
+
+/// The token this board holds, as much of it as a page gets to see.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkBuddyAccount {
+    /// The last four characters of the token — `…a1b2` — which is enough to tell which one is on
+    /// file and deliberately not enough to use. Empty when nothing is saved.
+    pub masked: String,
+    /// The host the token was issued for.
+    pub host: String,
+}
+
+impl WorkBuddyAccount {
+    /// Whether a token is saved at all.
+    pub fn configured(&self) -> bool {
+        !self.masked.is_empty()
+    }
+}
+
+/// What one look at the account found.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkBuddyReport {
+    /// Whether today's check-in has happened already.
+    pub checked_in_today: bool,
+    /// How many days in a row the account has checked in.
+    pub streak_days: u32,
+    /// What today's check-in is worth, in credits.
+    pub daily_credit: u32,
+    /// What the check-in activity has given this account so far. Not a balance: it is the activity's
+    /// own running total.
+    pub activity_credits: u32,
+    /// The activity's name, in the account's own words.
+    pub activity: String,
+    /// Whole days until the access token expires. `None` when the board could not read it — a token
+    /// that is not a JWT, or a clock that has never been set.
+    pub access_days_left: Option<i64>,
+    /// The same for the token that renews it, when one is saved.
+    pub refresh_days_left: Option<i64>,
+    /// What is left of the account's credits.
+    ///
+    /// `None` until the balance endpoint is known: the activity's *running total* is not it, and a
+    /// number invented from it would be worse than a dash.
+    pub credit_remaining: Option<u32>,
+    /// The account's own total for the same period. See [`WorkBuddyReport::credit_remaining`].
+    pub credit_total: Option<u32>,
+    /// What a check-in just gave, when the answer came from one.
+    pub credited: Option<u32>,
+    /// The check-in had already happened today — the API's `10001`, which is not a failure.
+    pub already_checked_in: bool,
+}
+
+/// What a WorkBuddy request came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkBuddyAnswer {
+    /// The account answered, and this is what it said.
+    Report(WorkBuddyReport),
+    /// It did not answer, and this is why.
+    Refused {
+        /// The reason, as the closed list the page draws.
+        fault: WorkBuddyFault,
+        /// The account's own sentence when it wrote one — `code` when it did not.
+        message: String,
+    },
+}

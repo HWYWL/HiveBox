@@ -69,6 +69,7 @@ dependencies = [
  "weather",
  "web-manager",
  "wifi-map",
+ "workbuddy-monitor",
 ]
 
 [[package]]
@@ -3104,6 +3105,16 @@ dependencies = [
  "group",
  "hybrid-array",
  "primefield",
+]
+
+[[package]]
+name = "workbuddy-monitor"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "pomelo-hal",
+ "pomelo-material-symbols",
+ "pomelo-widgets",
 ]
 
 [[package]]

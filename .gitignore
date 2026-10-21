@@ -26,3 +26,6 @@ build/
 
 
 .venv/
+
+# IDE workspace data, not part of the project.
+.codebuddy/

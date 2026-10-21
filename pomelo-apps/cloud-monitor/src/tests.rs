@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use iced::Size;
 use iced_test::Simulator;
 
-use pomelo_hal::sim::SimCloud;
+use pomelo_hal::sim::{SimCloud, SimWorkBuddy};
 use pomelo_hal::{
     Board, CloudAction, CloudFault, CloudInstanceState, CloudKey, CloudProvider, CloudState,
 };
@@ -59,7 +59,8 @@ fn board_of(cloud: SimCloud) -> Arc<Board> {
         Box::new(SimNas::new()),
         Box::new(SimHttp::new()),
         Box::new(cloud),
-    ))
+            Box::new(SimWorkBuddy::new()),
+))
 }
 
 /// A board with an account on it: both products set up, three machines between them.

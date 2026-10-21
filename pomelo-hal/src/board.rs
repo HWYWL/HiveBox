@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use crate::traits::{
     AudioBackend, CloudBackend, HttpBackend, ImuBackend, InputBackend, MicBackend, NasBackend,
-    PowerBackend, StorageBackend, SystemBackend, WebBackend, WifiBackend,
+    PowerBackend, StorageBackend, SystemBackend, WebBackend, WifiBackend, WorkBuddyBackend,
 };
 use crate::types::{SystemEvent, WifiStatus};
 
@@ -47,6 +47,7 @@ pub struct Board {
     nas: Mutex<Box<dyn NasBackend>>,
     http: Mutex<Box<dyn HttpBackend>>,
     cloud: Mutex<Box<dyn CloudBackend>>,
+    workbuddy: Mutex<Box<dyn WorkBuddyBackend>>,
     listeners: Mutex<Vec<EventListener>>,
     events: Mutex<VecDeque<SystemEvent>>,
     event_condvar: Condvar,
@@ -58,7 +59,7 @@ impl Board {
     /// Assemble a board from one backend per subsystem.
     ///
     /// The order is `power`, `wifi`, `audio`, `mic`, `imu`, `input`, `storage`, `web`, `system`, `nas`,
-    /// `http`, `cloud` — the same order the accessors appear in. It takes boxes rather than generics so
+    /// `http`, `cloud`, `workbuddy` — the same order the accessors appear in. It takes boxes rather than generics so
     /// the caller can mix concrete types and, in a test, its own fakes.
     ///
     /// New backends go on the *end* of both lists, even when a place in the middle would read better:
@@ -77,6 +78,7 @@ impl Board {
         nas: Box<dyn NasBackend>,
         http: Box<dyn HttpBackend>,
         cloud: Box<dyn CloudBackend>,
+        workbuddy: Box<dyn WorkBuddyBackend>,
     ) -> Self {
         Self {
             power: Mutex::new(power),
@@ -91,6 +93,7 @@ impl Board {
             nas: Mutex::new(nas),
             http: Mutex::new(http),
             cloud: Mutex::new(cloud),
+            workbuddy: Mutex::new(workbuddy),
             listeners: Mutex::new(Vec::new()),
             events: Mutex::new(VecDeque::with_capacity(MAX_EVENT_QUEUE_SIZE)),
             event_condvar: Condvar::new(),
@@ -103,7 +106,7 @@ impl Board {
     pub fn simulated() -> Self {
         use crate::sim::{
             SimAudio, SimCloud, SimHttp, SimImu, SimInput, SimMic, SimNas, SimPower, SimStorage,
-            SimSystem, SimWeb, SimWifi,
+            SimSystem, SimWeb, SimWifi, SimWorkBuddy,
         };
         Self::from_backends(
             Box::new(SimPower::new()),
@@ -118,6 +121,7 @@ impl Board {
             Box::new(SimNas::new()),
             Box::new(SimHttp::new()),
             Box::new(SimCloud::new()),
+            Box::new(SimWorkBuddy::new()),
         )
     }
 
@@ -287,6 +291,14 @@ impl Board {
         lock(&self.cloud)
     }
 
+    /// Lock the WorkBuddy backend.
+    ///
+    /// Last for the same reason as the ones above: it is a page's, not a service that runs by itself,
+    /// and nothing in [`Board::init`] brings it up.
+    pub fn workbuddy(&self) -> MutexGuard<'_, Box<dyn WorkBuddyBackend>> {
+        lock(&self.workbuddy)
+    }
+
     /// Advance every time-driven subsystem (Wi-Fi scan progress, audio EOF detection, input
     /// debouncing, a simulated request's progress). Call periodically or once per UI frame.
     ///
@@ -298,6 +310,7 @@ impl Board {
         self.input().tick();
         self.http().tick();
         self.cloud().tick();
+        self.workbuddy().tick();
 
         #[cfg(not(target_os = "espidf"))]
         {

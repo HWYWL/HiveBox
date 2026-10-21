@@ -47,6 +47,7 @@ mod storage;
 mod system;
 mod web;
 mod wifi;
+mod workbuddy;
 mod event;
 
 use std::sync::Arc;
@@ -65,6 +66,7 @@ pub use storage::EspStorage;
 pub use system::EspSystem;
 pub use web::EspWeb;
 pub use wifi::EspWifi;
+pub use workbuddy::EspWorkBuddy;
 
 /// Assemble this board's backends into the shared handle the apps take.
 ///
@@ -85,6 +87,7 @@ pub fn board() -> Arc<Board> {
         Box::new(nas::EspNas::new()),
         Box::new(http::EspHttp::new()),
         Box::new(cloud::EspCloud::new()),
+        Box::new(workbuddy::EspWorkBuddy::new()),
     ));
     event::start_event_pump(Arc::clone(&board));
     board

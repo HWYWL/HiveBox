@@ -17,7 +17,7 @@ use std::time::{Duration, SystemTime};
 use iced::time::Instant;
 use iced::Size;
 use iced_test::Simulator;
-use pomelo_hal::sim::SimSystem;
+use pomelo_hal::sim::{SimSystem, SimWorkBuddy};
 use pomelo_hal::{
     ApInfo, Board, ChipInfo, FirmwareInfo, HalError, MemoryInfo, ScanState, SystemBackend,
     TaskReading, WifiState, WifiStatus,
@@ -296,7 +296,8 @@ fn board_that_counts_restarts(restarts: Arc<AtomicUsize>) -> Arc<Board> {
         Box::new(SimNas::new()),
         Box::new(SimHttp::new()),
         Box::new(SimCloud::new()),
-    ))
+            Box::new(SimWorkBuddy::new()),
+))
 }
 
 /// The restart row asks before it acts, and only the tick acts.
@@ -631,7 +632,8 @@ fn board_with_slot(card: bool) -> Arc<Board> {
         Box::new(SimNas::new()),
         Box::new(SimHttp::new()),
         Box::new(SimCloud::new()),
-    ))
+            Box::new(SimWorkBuddy::new()),
+))
 }
 
 /// The app on a board whose slot holds what the caller says it does, in English.
@@ -1407,7 +1409,8 @@ fn board_that_counts_reads(reads: Arc<AtomicUsize>) -> Arc<Board> {
         Box::new(SimNas::new()),
         Box::new(SimHttp::new()),
         Box::new(SimCloud::new()),
-    ))
+            Box::new(SimWorkBuddy::new()),
+))
 }
 
 /// The readout says what the board says: three named gauges, and two cards off the chip and the

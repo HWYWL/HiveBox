@@ -205,4 +205,17 @@ pub const CATALOGUE: &[Entry] = &[
         // three blues are told apart by saturation rather than by a person reading the labels.
         accent: (91, 143, 176),
     },
+    // Page 2, after the cloud: the same kind of page about something that is not the box.
+    Entry {
+        name: "WorkBuddy",
+        // Four characters, because the label is one line of a tile and the product's own name is
+        // two characters too long for it: what the tile says in Chinese is what the page is about.
+        name_zh: "工作助手",
+        // A circle with a tick in it: what the page is about is whether today has been checked in.
+        // The page's own header wears it too, so the tile and the page are one subject.
+        icon: AppIcon::glyph(Icon::CHECK_CIRCLE),
+        // A green of its own, and the only green on the grid: the check-in is the one tile here
+        // that is about a thing going *well*.
+        accent: (66, 165, 110),
+    },
 ];

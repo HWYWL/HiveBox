@@ -1113,6 +1113,128 @@ esp_err_t hal_cloud_credentials_set(int32_t provider, const char *region, const 
 esp_err_t hal_cloud_credentials_forget(int32_t provider);
 
 /* ---------------------------------------------------------------------------
+ * WorkBuddy account status
+ *
+ * One token, two questions: what the daily check-in activity looks like, and to
+ * check in. The answer is a short line-based document (see `board_workbuddy.c`),
+ * taken rather than read twice -- the same start-then-poll shape as the cloud
+ * client beside it.
+ *
+ * The token is a bearer token from the WorkBuddy desktop client (the auth file's
+ * `auth.accessToken`). It is nearly two kilobytes, so it arrives through the web
+ * page or a file on the card rather than through a keyboard on the panel.
+ * ------------------------------------------------------------------------- */
+
+#define HAL_WORKBUDDY_ACTION_STATUS    0
+#define HAL_WORKBUDDY_ACTION_CHECKIN   1
+
+#define HAL_WORKBUDDY_IDLE     0
+#define HAL_WORKBUDDY_RUNNING  1
+#define HAL_WORKBUDDY_DONE     2
+#define HAL_WORKBUDDY_FAILED   (-1)
+
+#define HAL_WORKBUDDY_FAULT_NONE         0
+#define HAL_WORKBUDDY_FAULT_ARGS         1   /** 不是这两个动作之一 */
+#define HAL_WORKBUDDY_FAULT_NO_CREDS     2   /** 还没有 token */
+#define HAL_WORKBUDDY_FAULT_NO_NETWORK   3
+#define HAL_WORKBUDDY_FAULT_UNREACHABLE  4   /** DNS/连接/读失败 */
+#define HAL_WORKBUDDY_FAULT_TLS          5
+#define HAL_WORKBUDDY_FAULT_HTTP         6   /** 非 2xx 且不是 401/403 */
+#define HAL_WORKBUDDY_FAULT_AUTH         7   /** 401/403：token 过期或不对 */
+#define HAL_WORKBUDDY_FAULT_API          8   /** 接口拒绝，message 在答案里 */
+#define HAL_WORKBUDDY_FAULT_STORAGE      9   /** 答案放不下 / token 文件读写失败 */
+
+/** A JWT from WorkBuddy, and the one beside it that renews it. Both are under 2 KB. */
+#define HAL_WORKBUDDY_TOKEN_MAX    2048
+#define HAL_WORKBUDDY_REFRESH_MAX  2048
+/** `www.workbuddy.cn` and whatever it is called next. */
+#define HAL_WORKBUDDY_HOST_MAX     64
+/** An activity's name, in bytes of UTF-8. */
+#define HAL_WORKBUDDY_ACTIVITY_MAX 96
+/** The token file: three lines, two of them long. */
+#define HAL_WORKBUDDY_CONF_MAX     4608
+
+/** @brief Allocate what this needs and read the token. Idempotent; called by everything below.
+ *
+ * Called at the first request rather than at boot: the filesystem the token is on is not
+ * up when the board boots and there is no reason to have this wait for it.
+ *
+ * @return ESP_OK, or ESP_ERR_NO_MEM when the answer buffers could not be allocated.
+ */
+esp_err_t hal_workbuddy_init(void);
+
+/** @brief Begin a request. Non-blocking.
+ *
+ * @param action `HAL_WORKBUDDY_ACTION_STATUS` or `HAL_WORKBUDDY_ACTION_CHECKIN`.
+ *
+ * Requesting one while another is in flight is ESP_ERR_INVALID_STATE and changes nothing. A
+ * request that cannot be sent -- no token, no network -- is ESP_OK with the state failed, and
+ * the reason in the answer: it is a request the caller asked for and the page has to draw.
+ *
+ * @return ESP_OK, ESP_ERR_INVALID_ARG, ESP_ERR_INVALID_STATE, or ESP_ERR_NO_MEM.
+ */
+esp_err_t hal_workbuddy_start(int32_t action);
+
+/** @brief Where the request is: `HAL_WORKBUDDY_IDLE`, `RUNNING`, `DONE` or `FAILED`. */
+int32_t hal_workbuddy_state(void);
+
+/** @brief Why it failed, as one of `HAL_WORKBUDDY_FAULT_*`. Meaningful while `FAILED`. */
+int32_t hal_workbuddy_fault(void);
+
+/** @brief The answer, or NULL while there is not one yet.
+ *
+ * Line-based and private to this tree:
+ *
+ *     ok=1
+ *     checked_in=1
+ *     streak=3
+ *     daily=10
+ *     activity_total=42
+ *     activity=签到有礼
+ *     access_days=27
+ *     refresh_days=29
+ *     credit_remaining=
+ *     credit_total=
+ *
+ * A failure is `error=workbuddy_auth` (or one of its siblings), with `message=` when the
+ * API gave one. `credit_remaining` and `credit_total` are empty until the balance endpoint
+ * is known: an empty field is a dash, and a zero would be a number somebody believes.
+ *
+ * Valid until `hal_workbuddy_take`, and not for the life of the board.
+ */
+const char *hal_workbuddy_answer(size_t *out_length);
+
+/** @brief Release the answer and the slot, so the next request may start. */
+void hal_workbuddy_take(void);
+
+/** @brief The answer copied into the caller's buffer and the slot released, in one step. */
+size_t hal_workbuddy_take_answer(char *out, size_t capacity);
+
+/** @brief Let go of a request in flight. */
+void hal_workbuddy_cancel(void);
+
+/** @brief Whether a token is saved, with a mask of its last four characters and the host.
+ *
+ * @return ESP_OK, ESP_ERR_NOT_FOUND when there is no token, or ESP_ERR_INVALID_ARG.
+ */
+esp_err_t hal_workbuddy_credentials_get(char *out_masked, size_t capacity, char *out_host,
+                                        size_t host_capacity);
+
+/** @brief Save a token, written to flash.
+ *
+ * The token must be printable ASCII without quotes, backslashes or spaces: a JWT is. Refusing
+ * the rest here is what keeps a pasted newline out of the file this layer both writes and reads.
+ * `refresh` may be NULL/"" and `host` may be NULL/"" for the default.
+ *
+ * @return ESP_OK, ESP_ERR_INVALID_ARG, ESP_ERR_INVALID_STATE while a request is in flight,
+ *         or what the filesystem said.
+ */
+esp_err_t hal_workbuddy_credentials_set(const char *token, const char *refresh, const char *host);
+
+/** @brief Forget the token. ESP_ERR_NOT_FOUND when there was none. */
+esp_err_t hal_workbuddy_credentials_forget(void);
+
+/* ---------------------------------------------------------------------------
  * Log ring.
  *
  * The last `HAL_LOG_LINES` lines every `ESP_LOGx` wrote, kept in a ring so the page can show them.

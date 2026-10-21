@@ -21,6 +21,7 @@ mod storage;
 mod system;
 mod web;
 mod wifi;
+mod workbuddy;
 
 pub use audio::SimAudio;
 pub use cloud::SimCloud;
@@ -34,3 +35,4 @@ pub use storage::SimStorage;
 pub use system::SimSystem;
 pub use web::SimWeb;
 pub use wifi::SimWifi;
+pub use workbuddy::SimWorkBuddy;

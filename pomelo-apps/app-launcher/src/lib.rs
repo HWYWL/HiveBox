@@ -129,6 +129,7 @@ use iced::{
 use calculator::Calculator;
 use clock::Clock;
 use cloud_monitor::CloudMonitor;
+use workbuddy_monitor::WorkBuddy;
 use files::Files;
 use games::Games;
 use music_player::Player;
@@ -203,6 +204,8 @@ pub const POWER_LOG: usize = 11;
 pub const CALCULATOR: usize = 12;
 pub const WIFI_MAP: usize = 13;
 pub const CLOUD: usize = 14;
+/// The WorkBuddy page: the fourth of the ones that look at something that is not the box.
+pub const WORKBUDDY: usize = 15;
 
 /// What the launcher reacts to.
 ///
@@ -300,6 +303,8 @@ pub enum Message {
     Games(games::Message),
     /// The cloud page's own: the frame that reads an answer, a chip or a row picked, or a power button.
     Cloud(cloud_monitor::Message),
+    /// The WorkBuddy page: a frame, a re-read, or a check-in.
+    Workbuddy(workbuddy_monitor::Message),
 }
 
 /// The layer over the desktop that is moving, and which way it is going.
@@ -394,6 +399,8 @@ pub struct Launcher {
     games: Option<Games>,
     /// The cloud page. Plain `cloud` and not `cloud_app`, for the games app's reason.
     cloud: Option<CloudMonitor>,
+    /// The WorkBuddy page. Plain `workbuddy`, for the cloud page's reason.
+    workbuddy: Option<WorkBuddy>,
     /// Apps currently running in memory (foreground or background).
     running_apps: Vec<usize>,
     board: Arc<Board>,
@@ -461,6 +468,7 @@ impl Launcher {
             weather: None,
             games: None,
             cloud: None,
+            workbuddy: None,
             clock,
             battery,
             charging,
@@ -797,6 +805,19 @@ impl Launcher {
         self.cloud.as_mut().unwrap()
     }
 
+    /// The WorkBuddy page, which is handed the board and reads one backend through it: the account.
+    ///
+    /// It asks for a status on the way in, for the cloud page's reason, and it is the one app here
+    /// that reads a *masked* token: [`WorkBuddy`] is told whether one is saved and never what it is.
+    pub fn get_or_create_workbuddy(&mut self) -> &mut WorkBuddy {
+        if self.workbuddy.is_none() {
+            let mut app = WorkBuddy::new(Arc::clone(&self.board));
+            app.set_preferences(self.preferences);
+            self.workbuddy = Some(app);
+        }
+        self.workbuddy.as_mut().unwrap()
+    }
+
     /// The hosted apps, for the host and the tests.
     pub fn calculator(&mut self) -> &Calculator {
         self.get_or_create_calculator()
@@ -861,6 +882,11 @@ impl Launcher {
         self.get_or_create_cloud()
     }
 
+    /// The WorkBuddy page.
+    pub fn workbuddy(&mut self) -> &WorkBuddy {
+        self.get_or_create_workbuddy()
+    }
+
     /// Sets what the status bar shows.
     ///
     /// The platform owns these, and pushes them — rather than iced pulling them from a timer,
@@ -916,6 +942,7 @@ impl Launcher {
             WEATHER => self.weather = None,
             GAMES => self.games = None,
             CLOUD => self.cloud = None,
+            WORKBUDDY => self.workbuddy = None,
             _ => {}
         }
 
@@ -1156,6 +1183,15 @@ impl Launcher {
     fn cloud_screen(&self) -> Element<'_, Message> {
         if let Some(app) = &self.cloud {
             app.view().map(Message::Cloud)
+        } else {
+            Space::new().into()
+        }
+    }
+
+    /// The WorkBuddy page. One page and no tabs, so the launcher's own back gesture is the way out.
+    fn workbuddy_screen(&self) -> Element<'_, Message> {
+        if let Some(app) = &self.workbuddy {
+            app.view().map(Message::Workbuddy)
         } else {
             Space::new().into()
         }
@@ -1406,6 +1442,12 @@ impl Launcher {
             subs.push(app.subscription().map(Message::Cloud));
         }
 
+        // The WorkBuddy page asks for frames the same way and for the same reason: a request that is
+        // still out is the only thing on it that moves.
+        if let (Screen::App(WORKBUDDY), Some(app)) = (self.screen, &self.workbuddy) {
+            subs.push(app.subscription().map(Message::Workbuddy));
+        }
+
         Subscription::batch(subs)
     }
 
@@ -1499,6 +1541,9 @@ impl Launcher {
                     }
                     CLOUD => {
                         self.get_or_create_cloud();
+                    }
+                    WORKBUDDY => {
+                        self.get_or_create_workbuddy();
                     }
                     _ => {}
                 }
@@ -1641,6 +1686,11 @@ impl Launcher {
                 if let (Screen::App(CLOUD), Some(app)) = (self.screen, &mut self.cloud) {
                     app.update(cloud_monitor::Message::Tick(Instant::now()));
                 }
+
+                // And the WorkBuddy page, which is the same kind of page: its clock is the pump's too.
+                if let (Screen::App(WORKBUDDY), Some(app)) = (self.screen, &mut self.workbuddy) {
+                    app.update(workbuddy_monitor::Message::Tick(Instant::now()));
+                }
             }
             Message::Resized(size) => {
                 self.size = size;
@@ -1670,6 +1720,7 @@ impl Launcher {
             Message::Weather(message) => self.get_or_create_weather().update(message),
             Message::Games(message) => self.get_or_create_games().update(message),
             Message::Cloud(message) => self.get_or_create_cloud().update(message),
+            Message::Workbuddy(message) => self.get_or_create_workbuddy().update(message),
             Message::Updater(message) => self.get_or_create_updater().update(message),
             Message::Settings(settings::Message::Back) => return self.go_back(),
             Message::Settings(message) => {
@@ -2138,6 +2189,7 @@ impl Launcher {
             WEATHER => self.weather_screen(),
             GAMES => self.games_screen(),
             CLOUD => self.cloud_screen(),
+            WORKBUDDY => self.workbuddy_screen(),
             _ => self.launcher(),
         }
     }
@@ -2616,14 +2668,15 @@ mod tests {
                 "Power Log",
                 "Calculator",
                 "Wi-Fi Map",
-                "Cloud"
+                "Cloud",
+                "WorkBuddy"
             ]
         );
-        assert_eq!(CATALOGUE.len(), 15, "and the fifteen are all the tiles there are");
+        assert_eq!(CATALOGUE.len(), 16, "and the sixteen are all the tiles there are");
         assert_eq!(
             Launcher::new(Arc::new(Board::simulated())).pages(),
             2,
-            "eight and seven"
+            "eight and eight"
         );
     }
 

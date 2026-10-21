@@ -650,6 +650,7 @@ textarea.code.wrap { white-space: pre-wrap; word-break: break-word; }
       <button data-view="control">控制</button>
       <button data-view="servers">服务器</button>
       <button data-view="cloud">云服务</button>
+<button data-view="workbuddy">WorkBuddy</button>
       <button data-view="logs">日志</button>
       <button data-view="system">设备</button>
     </nav>
@@ -784,6 +785,53 @@ textarea.code.wrap { white-space: pre-wrap; word-break: break-word; }
       <div class="card" id="cloudList"></div>
       <div class="bar-actions" style="padding-top:12px">
         <button class="btn tinted" id="cloudScan"><svg class="ic sm"><use href="#i-refresh"/></svg>读取实例列表</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="view-workbuddy" hidden>
+    <div class="group">
+      <div class="group-title">令牌</div>
+      <div class="card" style="padding:14px">
+        <div id="wbSavedView" hidden>
+          <div class="row" style="padding:0">
+            <svg class="ic sm" style="color:var(--green)"><use href="#i-check"/></svg>
+            <div class="row-main">
+              <div class="row-name" id="wbSaved">—</div>
+              <div class="row-meta">访问令牌只写在设备里，读不回来</div>
+            </div>
+          </div>
+          <div class="bar-actions" style="padding:12px 0 0;margin:0">
+            <button class="btn" id="wbRead">读取状态</button>
+            <button class="btn danger" id="wbForget">删除令牌</button>
+          </div>
+        </div>
+        <div id="wbForm">
+          <label class="field" style="align-items:flex-start">
+            <textarea id="wbToken" rows="4" placeholder="粘贴 accessToken（以 eyJ 开头的长串）" spellcheck="false"
+                      style="width:100%;background:transparent;border:0;color:inherit;font:inherit;resize:vertical"></textarea>
+          </label>
+          <label class="field" style="margin-top:10px">
+            <svg class="ic sm"><use href="#i-lock"/></svg>
+            <input id="wbRefresh" placeholder="refreshToken（可以留空）" autocomplete="off" spellcheck="false">
+          </label>
+          <label class="field" style="margin-top:10px">
+            <svg class="ic sm"><use href="#i-cloud"/></svg>
+            <input id="wbHost" placeholder="主机，默认 www.workbuddy.cn" autocomplete="off" spellcheck="false">
+          </label>
+          <div class="bar-actions" style="padding:12px 0 0;margin:0">
+            <button class="btn primary" id="wbSave">保存令牌</button>
+          </div>
+        </div>
+        <div class="pv-note" style="padding:10px 0 0;text-align:left" id="wbOut">
+          令牌和 Wi-Fi 密码一样写在这台设备的文件里。面板上的「工作助手」用的是同一份。
+        </div>
+      </div>
+    </div>
+    <div class="group">
+      <div class="group-title">今天</div>
+      <div class="card" style="padding:14px">
+        <pre id="wbAnswer" style="margin:0;white-space:pre-wrap;font:inherit;color:var(--muted)">还没读过</pre>
       </div>
     </div>
   </section>
@@ -2835,7 +2883,7 @@ async function cloudPower(action, id, name, kind, region) {
 /* --- the seven views ------------------------------------------------------- */
 function setView(view) {
   state.view = view;
-  for (const name of ["files", "wifi", "control", "servers", "cloud", "logs", "system"]) {
+  for (const name of ["files", "wifi", "control", "servers", "cloud", "workbuddy", "logs", "system"]) {
     $("view-" + name).hidden = name !== view;
   }
 
@@ -2865,6 +2913,7 @@ function setView(view) {
      signed call to Tencent, and somebody who opened this page to look at their files should not spend
      one. What it does ask is what is saved, which is a read of the board's own file. */
   if (view === "cloud") { renderCloud(); loadCloud(true); }
+  if (view === "workbuddy") loadWorkbuddy();
 
   /* The stream is opened when the log is being looked at and closed when it is not: a connection to
      the box is one of four, and one left open behind another tab is one a person cannot use. */
@@ -3936,6 +3985,63 @@ $("logClear").onclick = () => {
      still has a sequence number greater than the last one cleared. */
   state.logs.lines = [];
   renderLog();
+};
+
+/* The WorkBuddy view: paste a token, read the activity, check in. The token arrives as a *body*
+   rather than a query string, because it is nearly two kilobytes and a URL is not the place for it. */
+async function loadWorkbuddy() {
+  try {
+    const data = await api("/api/workbuddy/status");
+    $("wbSavedView").hidden = !data.saved;
+    $("wbForm").hidden = !!data.saved;
+    if (data.saved) $("wbSaved").textContent = data.host + " · " + data.token;
+  } catch (error) {
+    $("wbOut").textContent = error.message;
+  }
+}
+
+$("wbSave").onclick = async () => {
+  const token = $("wbToken").value.trim();
+  if (!token) { toast("先粘贴令牌", "bad"); return; }
+  try {
+    const response = await fetch("/api/workbuddy/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        token,
+        refresh: $("wbRefresh").value.trim(),
+        host: $("wbHost").value.trim()
+      }).toString()
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.error) throw new Error(ERRORS[data.error] || "设备没有保存这个令牌");
+    $("wbToken").value = "";
+    $("wbRefresh").value = "";
+    toast("令牌已保存", "ok");
+    loadWorkbuddy();
+  } catch (error) {
+    $("wbOut").textContent = error.message;
+  }
+};
+
+$("wbForget").onclick = async () => {
+  try {
+    await fetch("/api/workbuddy/forget", { method: "POST" });
+    toast("令牌已删除", "ok");
+    loadWorkbuddy();
+  } catch (error) {
+    $("wbOut").textContent = error.message;
+  }
+};
+
+$("wbRead").onclick = async () => {
+  $("wbAnswer").textContent = "正在读…";
+  try {
+    const response = await fetch("/api/workbuddy/start?action=status", { method: "POST" });
+    $("wbAnswer").textContent = await response.text();
+  } catch (error) {
+    $("wbAnswer").textContent = error.message;
+  }
 };
 
 /* --- the editor ------------------------------------------------------------ */

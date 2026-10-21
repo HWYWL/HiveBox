@@ -2450,6 +2450,255 @@ static esp_err_t handle_cloud_power(httpd_req_t *req)
     return cloud_await(req, hal_cloud_start(provider, action, region, instance));
 }
 
+
+/* ---------------------------------------------------------------------------
+ * WorkBuddy
+ *
+ * Four calls and no more: where the token stands, save one, forget it, and ask the
+ * account something. The token is nearly two kilobytes -- not a query string -- so it
+ * arrives as a form body. Nothing here percent-decodes it: what a JWT contains is
+ * base64url and dots, with no `&`, no `=` and no spaces, and a decoder that is only
+ * ever handed those is a decoder nobody can get wrong.
+ * ------------------------------------------------------------------------- */
+
+/** How much of a form body this will read: two tokens, a host, and room. */
+#define WEB_WORKBUDDY_BODY_MAX (HAL_WORKBUDDY_CONF_MAX + 128)
+
+/** How long `/api/workbuddy/start` waits for the account before giving up on it. */
+#define WEB_WORKBUDDY_WAIT_MS 20000
+
+/** `key=value` out of a form body, with `&` as the separator. No decoding; see above.
+ *
+ * The value is handed back *inside* the body it came from, cut at the `&` -- the body is the
+ * caller's buffer and the caller is done with the rest of it once it has the two tokens. That
+ * is what keeps a four-kilobyte token off a handler's stack.
+ */
+static bool form_field(char *body, const char *key, char **out)
+{
+    const size_t width = strlen(key);
+    char *at = body;
+
+    while (at != NULL && *at != '\0') {
+        if (strncmp(at, key, width) == 0 && at[width] == '=') {
+            char *value = at + width + 1;
+            char *end = strchr(value, '&');
+
+            if (end != NULL) {
+                *end = '\0';
+            }
+
+            *out = value;
+            return true;
+        }
+
+        at = strchr(at, '&');
+        if (at != NULL) {
+            at++;
+        }
+    }
+
+    return false;
+}
+
+/** The body of a POST, or NULL when there is none this will read. The caller frees it. */
+static char *read_form_body(httpd_req_t *req, size_t limit)
+{
+    if (req->content_len <= 0 || (size_t)req->content_len > limit) {
+        return NULL;
+    }
+
+    char *body = heap_caps_malloc((size_t)req->content_len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (body == NULL) {
+        body = malloc((size_t)req->content_len + 1);
+    }
+    if (body == NULL) {
+        return NULL;
+    }
+
+    int received = 0;
+    int timeouts = 0;
+
+    while (received < req->content_len) {
+        const int read = httpd_req_recv(req, body + received, req->content_len - received);
+
+        if (read == HTTPD_SOCK_ERR_TIMEOUT) {
+            if (++timeouts > 3) {
+                break;
+            }
+            continue;
+        }
+
+        if (read <= 0) {
+            break;
+        }
+
+        timeouts = 0;
+        received += read;
+    }
+
+    body[received] = '\0';
+
+    if (received != req->content_len) {
+        free(body);
+        return NULL;
+    }
+
+    return body;
+}
+
+static esp_err_t handle_workbuddy_status(httpd_req_t *req)
+{
+    char masked[16];
+    char host[HAL_WORKBUDDY_HOST_MAX];
+
+    const bool saved =
+        hal_workbuddy_credentials_get(masked, sizeof masked, host, sizeof host) == ESP_OK;
+
+    web_buf_t buf;
+    buf_init(&buf, 256);
+    buf_printf(&buf,
+               "{\"saved\":%s,\"token\":\"%s\",\"host\":\"%s\",\"state\":%d,\"fault\":%d}",
+               saved ? "true" : "false", masked, host, (int)hal_workbuddy_state(),
+               (int)hal_workbuddy_fault());
+
+    if (buf.full) {
+        buf_free(&buf);
+        return send_busy(req);
+    }
+
+    const esp_err_t ret = send_json(req, buf.data);
+    buf_free(&buf);
+
+    return ret;
+}
+
+/* Saves the token. The page pastes it; nothing on this board can type two kilobytes. */
+static esp_err_t handle_workbuddy_token(httpd_req_t *req)
+{
+    char *body = read_form_body(req, WEB_WORKBUDDY_BODY_MAX);
+    if (body == NULL) {
+        return send_blocked(req, "the token has to arrive in the body");
+    }
+
+    char *token = NULL;
+    char *refresh = NULL;
+    char *host = NULL;
+
+    if (!form_field(body, "token", &token) || token[0] == '\0') {
+        free(body);
+        return send_blocked(req, "token is required");
+    }
+
+    const bool have_refresh = form_field(body, "refresh", &refresh);
+    const bool have_host = form_field(body, "host", &host);
+
+    /* The three point into `body`, which stays alive until the call has copied them. */
+    const esp_err_t err = hal_workbuddy_credentials_set(token, have_refresh ? refresh : NULL,
+                                                        have_host ? host : NULL);
+    free(body);
+
+    if (err == ESP_ERR_INVALID_ARG) {
+        return send_blocked(req, "the token must be printable ASCII with no quotes or spaces");
+    }
+    if (err == ESP_ERR_INVALID_STATE) {
+        return send_error(req, "409 Conflict", "workbuddy_busy",
+                          "a request is in flight; try again in a moment");
+    }
+    if (err != ESP_OK) {
+        return send_error(req, "500 Internal Server Error", "workbuddy_storage",
+                          esp_err_to_name(err));
+    }
+
+    return send_json(req, "{\"ok\":true}");
+}
+
+static esp_err_t handle_workbuddy_forget(httpd_req_t *req)
+{
+    const esp_err_t err = hal_workbuddy_credentials_forget();
+
+    if (err == ESP_ERR_NOT_FOUND) {
+        return send_json(req, "{\"ok\":true,\"forgotten\":false}");
+    }
+    if (err != ESP_OK) {
+        return send_error(req, "500 Internal Server Error", "workbuddy_storage",
+                          esp_err_to_name(err));
+    }
+
+    return send_json(req, "{\"ok\":true,\"forgotten\":true}");
+}
+
+/** The answer as it is, without waiting: `text/plain`, one `key=value` a line. */
+static esp_err_t handle_workbuddy_answer(httpd_req_t *req)
+{
+    char *answer = heap_caps_malloc(WEB_CLOUD_ANSWER_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (answer == NULL) {
+        answer = malloc(WEB_CLOUD_ANSWER_MAX);
+    }
+    if (answer == NULL) {
+        return send_busy(req);
+    }
+
+    const size_t length = hal_workbuddy_take_answer(answer, WEB_CLOUD_ANSWER_MAX);
+
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
+    if (length == 0) {
+        free(answer);
+        return httpd_resp_sendstr(req, "error=workbuddy_empty\n");
+    }
+
+    const esp_err_t ret = httpd_resp_send(req, answer, (ssize_t)length);
+    free(answer);
+
+    return ret;
+}
+
+/* Asks the account something and waits for it, because a page that shows the answer has
+ * nowhere to put a request still in flight. The wait is bounded, and letting go of a
+ * request that outlived it is `hal_workbuddy_cancel`. */
+static esp_err_t handle_workbuddy_start(httpd_req_t *req)
+{
+    char action[16];
+    if (!query_string(req, "action", action, sizeof action)) {
+        snprintf(action, sizeof action, "status");
+    }
+
+    int32_t which;
+    if (strcmp(action, "checkin") == 0) {
+        which = HAL_WORKBUDDY_ACTION_CHECKIN;
+    } else if (strcmp(action, "status") == 0) {
+        which = HAL_WORKBUDDY_ACTION_STATUS;
+    } else {
+        return send_blocked(req, "action must be status or checkin");
+    }
+
+    const esp_err_t started = hal_workbuddy_start(which);
+
+    if (started == ESP_ERR_INVALID_STATE) {
+        return send_error(req, "409 Conflict", "workbuddy_busy",
+                          "another WorkBuddy request is already in flight");
+    }
+    if (started != ESP_OK) {
+        return send_error(req, "400 Bad Request", "workbuddy_args",
+                          "the request named no action");
+    }
+
+    const int64_t deadline = esp_timer_get_time() + (int64_t)WEB_WORKBUDDY_WAIT_MS * 1000;
+
+    while (hal_workbuddy_state() == HAL_WORKBUDDY_RUNNING && esp_timer_get_time() < deadline) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    if (hal_workbuddy_state() == HAL_WORKBUDDY_RUNNING) {
+        hal_workbuddy_cancel();
+        return send_error(req, "504 Gateway Timeout", "workbuddy_timeout",
+                          "the account did not answer in time");
+    }
+
+    return handle_workbuddy_answer(req);
+}
+
 /* ---------------------------------------------------------------------------
  * The server itself
  * ------------------------------------------------------------------------- */
@@ -2506,6 +2755,12 @@ static const web_route_t s_routes[] = {
     { "/api/cloud/forget",     HTTP_POST, handle_cloud_forget },
     { "/api/cloud/list",       HTTP_GET,  handle_cloud_list },
     { "/api/cloud/power",      HTTP_POST, handle_cloud_power },
+
+    { "/api/workbuddy/status", HTTP_GET,  handle_workbuddy_status },
+    { "/api/workbuddy/token",  HTTP_POST, handle_workbuddy_token },
+    { "/api/workbuddy/forget", HTTP_POST, handle_workbuddy_forget },
+    { "/api/workbuddy/start",  HTTP_POST, handle_workbuddy_start },
+    { "/api/workbuddy/answer", HTTP_GET,  handle_workbuddy_answer },
     { "/api/wifi/disconnect", HTTP_POST, handle_wifi_disconnect },
     { "/api/wifi/forget",     HTTP_POST, handle_wifi_forget },
     { "/api/restart",         HTTP_POST, handle_restart },

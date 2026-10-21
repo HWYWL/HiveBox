@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use pomelo_hal::sim::{SimHttp, SimPower};
+use pomelo_hal::sim::{SimHttp, SimPower, SimWorkBuddy};
 use pomelo_hal::{Board, HalError, PowerBackend};
 use pomelo_widgets::preferences::Language;
 
@@ -321,7 +321,8 @@ fn board_with_slot(card: bool) -> Arc<Board> {
         Box::new(SimNas::new()),
         Box::new(SimHttp::new()),
         Box::new(SimCloud::new()),
-    ))
+            Box::new(SimWorkBuddy::new()),
+))
 }
 
 /// The glyph table's press asks the slot, and the image's does not.

@@ -30,6 +30,7 @@ members = [
     "weather",
     "web-manager",
     "wifi-map",
+    "workbuddy-monitor",
 ]
 
 [patch."https://github.com/pomelos-on-sale/pomelo-widgets.git"]

@@ -2225,7 +2225,7 @@ impl Words {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pomelo_hal::sim::SimNas;
+    use pomelo_hal::sim::{SimNas, SimWorkBuddy};
     use pomelo_hal::traits::NasBackend;
 
     /// One machine, as the form would have written it.
@@ -2276,7 +2276,8 @@ mod tests {
             Box::new(nas),
             Box::new(SimHttp::new()),
             Box::new(SimCloud::new()),
-        ));
+                    Box::new(SimWorkBuddy::new()),
+));
 
         NasMonitor::new(board)
     }
@@ -2760,7 +2761,8 @@ mod tests {
             Box::new(Refusing),
             Box::new(SimHttp::new()),
             Box::new(SimCloud::new()),
-        ));
+                    Box::new(SimWorkBuddy::new()),
+));
 
         let monitor = NasMonitor::new(board);
 

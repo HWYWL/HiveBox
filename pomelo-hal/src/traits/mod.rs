@@ -22,6 +22,7 @@ mod storage;
 mod system;
 mod web;
 mod wifi;
+mod workbuddy;
 
 pub use audio::AudioBackend;
 pub use cloud::CloudBackend;
@@ -35,3 +36,4 @@ pub use storage::StorageBackend;
 pub use system::SystemBackend;
 pub use web::WebBackend;
 pub use wifi::WifiBackend;
+pub use workbuddy::WorkBuddyBackend;

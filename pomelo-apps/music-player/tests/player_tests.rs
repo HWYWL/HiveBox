@@ -30,10 +30,7 @@ fn board() -> Arc<Board> {
 /// The same board with the card taken out of the slot — the state a person meets, and the one the
 /// player has to speak about rather than report as a missing file.
 fn board_without_card() -> Arc<Board> {
-    use pomelo_hal::sim::{
-        SimAudio, SimCloud, SimHttp, SimImu, SimInput, SimMic, SimNas, SimPower, SimStorage,
-        SimSystem, SimWeb, SimWifi,
-    };
+    use pomelo_hal::sim::{SimAudio, SimCloud, SimHttp, SimImu, SimInput, SimMic, SimNas, SimPower, SimStorage, SimSystem, SimWeb, SimWifi, SimWorkBuddy};
 
     Arc::new(Board::from_backends(
         Box::new(SimPower::new()),
@@ -48,7 +45,8 @@ fn board_without_card() -> Arc<Board> {
         Box::new(SimNas::new()),
         Box::new(SimHttp::new()),
         Box::new(SimCloud::new()),
-    ))
+            Box::new(SimWorkBuddy::new()),
+))
 }
 
 /// A player with a scratch directory of its own.
