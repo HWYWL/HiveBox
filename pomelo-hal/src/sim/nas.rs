@@ -280,6 +280,21 @@ impl NasBackend for SimNas {
         Ok(())
     }
 
+    fn point_at(&mut self, host: &str) -> Result<(), HalError> {
+        let Some(device) = self
+            .devices
+            .iter()
+            .find(|device| device.host == host)
+            .cloned()
+        else {
+            return Err(HalError::InvalidArg);
+        };
+
+        self.watch(Some(device));
+
+        Ok(())
+    }
+
     fn forget(&mut self, host: &str) -> Result<(), HalError> {
         self.devices.retain(|device| device.host != host);
 
@@ -461,6 +476,40 @@ mod tests {
 
         assert_eq!(nas.reading().status, NasStatus::Unconfigured);
         assert!(nas.reading().disks.is_empty());
+    }
+
+    /// 点一行就换一眼：换到清单里那台，看的是它；换到清单里没有的那台，什么也不换。
+    ///
+    /// 后一种是过时的一行，不是一台机器 —— 页面该接着画原来那台，而不是画一片空白。
+    #[test]
+    fn pointing_at_a_listed_machine_moves_the_look() {
+        let mut nas = watching();
+
+        let mut second = credentials("hunter2");
+        second.host = String::from("192.168.1.11");
+        nas.remember(&second).unwrap();
+
+        assert_eq!(
+            nas.watching().map(|held| held.host),
+            Some(String::from("192.168.1.11")),
+            "remembering a machine already points at it"
+        );
+
+        nas.point_at("192.168.1.10").unwrap();
+
+        assert_eq!(nas.watching().map(|held| held.host), Some(String::from("192.168.1.10")));
+        assert_eq!(
+            nas.reading().status,
+            NasStatus::Connecting,
+            "a machine just picked has not answered yet"
+        );
+
+        assert_eq!(nas.point_at("192.168.1.99"), Err(HalError::InvalidArg));
+        assert_eq!(
+            nas.watching().map(|held| held.host),
+            Some(String::from("192.168.1.10")),
+            "and the look stays where it was"
+        );
     }
 
     /// Between the watch and the first answer the state is *connecting*, which is the state a page has

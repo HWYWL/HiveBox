@@ -313,6 +313,11 @@ pub trait Services {
         code::UNSUPPORTED
     }
 
+    /// 让板子改看清单里的这一台。See [`app_abi::host::NAS_WATCH`].
+    fn nas_watch(&mut self, _host: &str) -> i32 {
+        code::UNSUPPORTED
+    }
+
     /// 取走应用刚才递出去的那个「开终端」的请求，一台机器一次。默认没有：桌面宿主没有外壳。
     fn take_terminal(&mut self) -> Option<String> {
         None

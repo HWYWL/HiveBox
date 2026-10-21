@@ -1733,6 +1733,20 @@ impl NasBackend for EspNas {
         Ok(())
     }
 
+    fn point_at(&mut self, host: &str) -> Result<(), HalError> {
+        // 只是换一眼看哪一台：清单不动，所以读一次就够，写下去不是这一下的事。
+        let Some(credentials) = read_devices()
+            .into_iter()
+            .find(|device| device.host == host)
+        else {
+            return Err(HalError::InvalidArg);
+        };
+
+        self.select(&credentials);
+
+        Ok(())
+    }
+
     fn forget(&mut self, host: &str) -> Result<(), HalError> {
         let mut devices = read_devices();
         devices.retain(|device| device.host != host);

@@ -78,6 +78,15 @@ pub trait NasBackend: Send + Sync {
     /// watched nothing until then is what the start-and-poll note above describes anyway.
     fn watching(&self) -> Option<NasCredentials>;
 
+    /// 把这一眼挪到 `host` 上 —— [`NasBackend::devices`] 里的一个 —— 什么也不写下来。
+    ///
+    /// 人点一行就是这件事：[`NasBackend::remember`] 也是同一个开关，只是它顺带把这一台记进
+    /// 文件。机器已经在清单里了，点它一下不是再写一遍的理由。清单里没有 `host` 是
+    /// [`HalError::InvalidArg`]，并且什么也不换：换到一台不存在的机器上，等于板子盯着一片空。
+    ///
+    /// [`HalError::InvalidArg`]: crate::error::HalError::InvalidArg
+    fn point_at(&mut self, host: &str) -> Result<(), HalError>;
+
     /// Adds a machine to the list, or updates the one already there, and watches it.
     ///
     /// "Updates the one already there" is by host: saving the same address twice is one device whose

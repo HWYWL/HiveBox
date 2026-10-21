@@ -48,11 +48,13 @@ pub const ABI_MAJOR: u16 = 1;
 ///   app: a page with a list had no way to change it, and the shell it could open was its own.
 /// * `7` added the shell's own keyboard: a package that has a field to fill asks for it instead of
 ///   drawing a smaller one of its own — the keys the terminal and the settings type on.
+/// * `8` added picking which of the remembered machines the board looks at: a list of machines that
+///   all answered with the same numbers was a list nobody could look at one machine at a time.
 ///
 /// An application built against `1.0` still runs on this host: every addition is an import it never
 /// calls. An application built against `1.3` on a `1.0` host fails at instantiation, which is the
 /// answer the store draws as "needs a newer system".
-pub const ABI_MINOR: u16 = 7;
+pub const ABI_MINOR: u16 = 8;
 
 /// Packs a major and a minor into the word [`export::ABI_VERSION`] returns.
 pub const fn version_word(major: u16, minor: u16) -> u32 {
@@ -226,6 +228,13 @@ pub mod host {
     pub const NAS_REMEMBER: &str = "hb_nas_remember";
     /// `(host_ptr, host_len) -> i32`: 把一台机器从清单里删掉。清单里没有它也是 `OK`。
     pub const NAS_FORGET: &str = "hb_nas_forget";
+    /// `(host_ptr, host_len) -> i32`: 让板子改看清单里的这一台。
+    ///
+    /// 清单不动，只是「正在看哪一台」换了 —— 板子记着好几台机器的时候，看哪一台是页面上的
+    /// 选择，不是文件里的那一行。清单里没有 `host` 是 [`code::INVALID`]：换到一台不存在的
+    /// 机器上，等于板子盯着一片空。刚换过去的那一台第一次读数要等一个来回，这中间
+    /// [`super::host::NAS_SNAPSHOT`] 说的是上一次的机器还是空的，看 `age` 与 `status`。
+    pub const NAS_WATCH: &str = "hb_nas_watch";
     /// `(host_ptr, host_len) -> i32`: 请外壳把**终端应用**打开在这台机器上。
     ///
     /// 这一条与 [`NAS_SHELL_OPEN`] 不是一件事：那个是应用自己的一页 shell，这个是整块屏幕交给

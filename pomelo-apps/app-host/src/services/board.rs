@@ -643,6 +643,14 @@ impl Services for BoardServices {
         }
     }
 
+    fn nas_watch(&mut self, host: &str) -> i32 {
+        // 只换一眼看哪一台：清单不动，也不问密码 —— 密码在板子那份文件里。
+        match self.board.nas().point_at(host) {
+            Ok(()) => code::OK,
+            Err(error) => hal_code(error),
+        }
+    }
+
     fn nas_terminal(&mut self, host: &str) -> i32 {
         // 只有清单里的机器才有终端可开：一个不在文件里的地址是调用方的笔误，而外壳照着它去连
         // 只会得到一次必然失败的登录。

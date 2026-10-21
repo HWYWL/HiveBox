@@ -1051,6 +1051,23 @@ fn bind(linker: &mut Linker<HostState>) -> Result<(), VmError> {
 
     link(linker.func_wrap(
         host::MODULE,
+        host::NAS_WATCH,
+        |mut caller: Caller<'_, HostState>, host_ptr: u32, host_len: u32| -> i32 {
+            if !granted(&caller, perm::NAS) {
+                return code::DENIED;
+            }
+
+            let memory = memory_of(&caller);
+            let Some(host) = read_string(&caller, memory, host_ptr, host_len.min(128)) else {
+                return code::INVALID;
+            };
+
+            caller.data_mut().services.nas_watch(&host)
+        },
+    ))?;
+
+    link(linker.func_wrap(
+        host::MODULE,
         host::NAS_TERMINAL,
         |mut caller: Caller<'_, HostState>, host_ptr: u32, host_len: u32| -> i32 {
             if !granted(&caller, perm::NAS) {

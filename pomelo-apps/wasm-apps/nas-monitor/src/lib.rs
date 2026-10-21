@@ -698,9 +698,24 @@ impl App for Monitor {
                     }
 
                     if context.tapped(row) {
+                        // 板子只盯一台：点哪一行，就要它改看哪一台 —— 不然这一页画的永远是
+                        // 板子原来那台的数，几台机器看着一模一样。
+                        //
+                        // 地址先抄进一份自己的缓冲：`device_host` 借的是这台机器，而下面要改它。
+                        let mut storage = [0u8; HOST_MAX];
+                        let len = self.device_host(index).len().min(storage.len());
+                        storage[..len].copy_from_slice(&self.device_host(index).as_bytes()[..len]);
+                        let watched =
+                            core::str::from_utf8(&storage[..len]).is_ok_and(host::nas_watch);
+
                         self.chosen = index;
                         self.screen = Screen::Detail;
-                        host::nas_refresh();
+
+                        if watched {
+                            host::nas_refresh();
+                        } else {
+                            self.notice = Some("这台机器已经不在清单里了");
+                        }
                     }
                 }
             }
@@ -1000,10 +1015,22 @@ impl Monitor {
                 (icons::SCHEDULE, "运行", value)
             }
             _ => {
+                // 单位按这几块盘加起来的大小挑，不按别的：一块 32 GB 的盘写成「32.0 TB」是错的，
+                // 而一块 4 TB 的盘写成「4096.0 GB」也好不到哪去 —— 两个都见过，就是没挑对过。
                 let total = self.disk_sum(2);
-                let tenths = total / 107_374_182;
-                let value =
-                    format_into!(buffer, "{} 块 · {}.{} TB", self.disks, tenths / 10, tenths % 10);
+
+                let value = if self.disks == 0 || total == 0 {
+                    "—"
+                } else if total >= 1_099_511_627_776 {
+                    let tenths = total / 109_951_162_777;
+                    format_into!(buffer, "{} 块 · {}.{} TB", self.disks, tenths / 10, tenths % 10)
+                } else if total >= 1_073_741_824 {
+                    let tenths = total / 107_374_182;
+                    format_into!(buffer, "{} 块 · {}.{} GB", self.disks, tenths / 10, tenths % 10)
+                } else {
+                    let mb = total / 1_048_576;
+                    format_into!(buffer, "{} 块 · {} MB", self.disks, mb)
+                };
 
                 // 第一块盘的型号比「磁盘」两个字有用：一块盘时它就是全部，几块盘时它至少说明
                 // 数据在哪一类介质上。

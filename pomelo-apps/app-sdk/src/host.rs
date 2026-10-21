@@ -311,6 +311,14 @@ pub fn nas_forget(host: &str) -> bool {
     imp::nas_forget(host.as_ptr() as u32, host.len() as u32) == code::OK
 }
 
+/// 让板子改看清单里的这一台。清单不动，也不问密码 —— 密码在板子那份文件里。
+///
+/// 换过去之后第一次读数要等一个来回：这中间的 [`nas_snapshot`] 还是上一台机器留下的，看
+/// `age` 与 `status` 分辨。
+pub fn nas_watch(host: &str) -> bool {
+    imp::nas_watch(host.as_ptr() as u32, host.len() as u32) == code::OK
+}
+
 /// 请外壳把**终端应用**打开在这台机器上：整块屏幕交给它，键盘与回滚都在那边。
 ///
 /// 与 [`nas_shell_open`] 不是一件事：那个是应用自己的一页 shell。要求 `host` 在清单里。
@@ -562,6 +570,8 @@ mod imp {
             secret_ptr: u32,
             secret_len: u32,
         ) -> i32;
+        #[link_name = "hb_nas_watch"]
+        fn raw_nas_watch(host_ptr: u32, host_len: u32) -> i32;
         #[link_name = "hb_nas_forget"]
         fn raw_nas_forget(host_ptr: u32, host_len: u32) -> i32;
         #[link_name = "hb_nas_terminal"]
@@ -779,6 +789,10 @@ mod imp {
 
     pub fn nas_forget(host_ptr: u32, host_len: u32) -> i32 {
         unsafe { raw_nas_forget(host_ptr, host_len) }
+    }
+
+    pub fn nas_watch(host_ptr: u32, host_len: u32) -> i32 {
+        unsafe { raw_nas_watch(host_ptr, host_len) }
     }
 
     pub fn nas_terminal(host_ptr: u32, host_len: u32) -> i32 {
@@ -1000,6 +1014,10 @@ mod imp {
     ) -> i32 {
         app_abi::code::UNSUPPORTED
     }
+    pub fn nas_watch(_host_ptr: u32, _host_len: u32) -> i32 {
+        app_abi::code::UNSUPPORTED
+    }
+
     pub fn nas_forget(_host_ptr: u32, _host_len: u32) -> i32 {
         app_abi::code::UNSUPPORTED
     }
