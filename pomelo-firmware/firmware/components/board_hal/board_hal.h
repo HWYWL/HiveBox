@@ -1405,6 +1405,91 @@ esp_err_t hal_rtc_get_epoch(time_t *out_epoch);
 esp_err_t hal_rtc_set_epoch(time_t epoch);
 
 
+/* -------------------------------------------------------------------------
+ * DeepSeek account
+ *
+ * 两个文档，两种凭据：`api.deepseek.com/user/balance` 认 API Key，只说余额；
+ * `platform.deepseek.com/api/v0/...` 认控制台的 userToken，说当天的用量。见的越多越不可靠，
+ * 所以没有 userToken 是一件事，不是一次失败。
+ *
+ * 答案是一段 `key=value` 的文本，跟 WorkBuddy 那边同一个道理：要的东西全是数字，一行一个。
+ * ------------------------------------------------------------------------- */
+
+#define HAL_DEEPSEEK_IDLE     0
+#define HAL_DEEPSEEK_RUNNING  1
+#define HAL_DEEPSEEK_DONE     2
+#define HAL_DEEPSEEK_FAILED   (-1)
+
+#define HAL_DEEPSEEK_FAULT_NONE         0
+#define HAL_DEEPSEEK_FAULT_FAILED       1   /** 失败，没有更具体的说法 */
+#define HAL_DEEPSEEK_FAULT_ARGS         2   /** 动作不认识 */
+#define HAL_DEEPSEEK_FAULT_NO_CREDS     3   /** 还没存 API Key */
+#define HAL_DEEPSEEK_FAULT_NO_NETWORK   4
+#define HAL_DEEPSEEK_FAULT_UNREACHABLE  5   /** DNS / 连接 / 读失败 */
+#define HAL_DEEPSEEK_FAULT_TLS          6
+#define HAL_DEEPSEEK_FAULT_HTTP         7   /** 非 2xx，且不是 401/403 */
+#define HAL_DEEPSEEK_FAULT_AUTH         8   /** 401/403：Key 不对或 userToken 过期 */
+#define HAL_DEEPSEEK_FAULT_API          9   /** 账号答了，但拒绝了这次调用 */
+#define HAL_DEEPSEEK_FAULT_STORAGE      10  /** 答案放不下 / 凭据文件读写失败 */
+
+/** @brief 分配缓冲、读回凭据。可重复调用，其余每个函数都会先叫它。 */
+esp_err_t hal_deepseek_init(void);
+
+/** @brief 存下 API Key 与（可选的）控制台 userToken。
+ *
+ * @param key         `sk-` 开头的那枚；必须有。
+ * @param user_token  控制台的登录态；传 NULL 表示清掉它。
+ *
+ * @return ESP_OK，或者 ESP_ERR_INVALID_ARG / ESP_ERR_INVALID_STATE / ESP_FAIL。
+ */
+esp_err_t hal_deepseek_credentials_set(const char *key, const char *user_token);
+
+/** @brief 两个都删掉。本来就没有是 ESP_OK。 */
+esp_err_t hal_deepseek_credentials_forget(void);
+
+/** @brief 单独扔掉哪一枚。 */
+#define HAL_DEEPSEEK_CRED_ALL  0  /**< 两枚都清，文件也删掉 */
+#define HAL_DEEPSEEK_CRED_KEY  1  /**< 只清 API Key */
+#define HAL_DEEPSEEK_CRED_USER 2  /**< 只清 userToken */
+
+/**
+ * @brief 扔掉一枚或两枚凭据，并立刻落盘。
+ *
+ * 一枚都不剩时把文件也删掉 —— 留一个空壳文件只会让「有没有存」多一种要判断的状态。
+ */
+esp_err_t hal_deepseek_forget(int32_t which);
+
+/**
+ * @brief userToken 的掩码（后四位），没有就是空字符串。
+ *
+ * 页面要能显示「存了哪一枚、是哪一枚」，但完整的那段永远不出设备。
+ */
+void hal_deepseek_user_mask(char *masked, size_t capacity);
+
+/** @brief 现在存的是什么：Key 的掩码，和有没有 userToken。 */
+void hal_deepseek_credentials(char *masked, size_t capacity, bool *has_user_token);
+
+/** @brief 发起一次读取，立刻返回。 */
+esp_err_t hal_deepseek_start(void);
+
+/** @brief 这次读到哪了：`HAL_DEEPSEEK_IDLE` / `RUNNING` / `DONE` / `FAILED`。 */
+int32_t hal_deepseek_state(void);
+
+/** @brief 为什么失败，`HAL_DEEPSEEK_FAULT_*` 之一。 */
+int32_t hal_deepseek_fault(void);
+
+/** @brief 取走答案并清掉它。没读完是 ESP_ERR_INVALID_STATE。 */
+esp_err_t hal_deepseek_take_answer(char *out, size_t capacity);
+
+/** @brief 放弃在飞的那次。 */
+esp_err_t hal_deepseek_cancel(void);
+
+/** @brief 真板子上没有事可做（网络事件驱动）。 */
+void hal_deepseek_tick(void);
+
+/** @brief 故障码的名字，`deepseek_auth` 这样。 */
+const char *hal_deepseek_fault_code(int32_t fault);
+
 #ifdef __cplusplus
 }
 #endif

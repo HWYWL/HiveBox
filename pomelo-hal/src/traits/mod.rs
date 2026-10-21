@@ -23,6 +23,7 @@ mod system;
 mod web;
 mod wifi;
 mod workbuddy;
+mod deepseek;
 
 pub use audio::AudioBackend;
 pub use cloud::CloudBackend;
@@ -37,3 +38,6 @@ pub use system::SystemBackend;
 pub use web::WebBackend;
 pub use wifi::WifiBackend;
 pub use workbuddy::WorkBuddyBackend;
+
+/// 一个「这块板子没有它」的 DeepSeek 后端。
+pub use deepseek::{DeepSeekBackend, NoDeepSeek};

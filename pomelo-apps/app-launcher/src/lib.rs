@@ -130,6 +130,7 @@ use calculator::Calculator;
 use clock::Clock;
 use cloud_monitor::CloudMonitor;
 use workbuddy_monitor::WorkBuddy;
+use deepseek_monitor::DeepSeek;
 use files::Files;
 use games::Games;
 use music_player::Player;
@@ -201,11 +202,13 @@ pub const TERMINAL: usize = 8;
 pub const TASK_VIEWER: usize = 9;
 pub const CLOCK: usize = 10;
 pub const POWER_LOG: usize = 11;
-pub const CALCULATOR: usize = 12;
-pub const WIFI_MAP: usize = 13;
-pub const CLOUD: usize = 14;
+pub const CALCULATOR: usize = 16;
+pub const WIFI_MAP: usize = 12;
+pub const CLOUD: usize = 13;
 /// The WorkBuddy page: the fourth of the ones that look at something that is not the box.
-pub const WORKBUDDY: usize = 15;
+pub const WORKBUDDY: usize = 14;
+    /// DeepSeek 接在 WorkBuddy 后面，计算器因此让出这一页。
+    const DEEPSEEK: usize = 15;
 
 /// What the launcher reacts to.
 ///
@@ -305,6 +308,8 @@ pub enum Message {
     Cloud(cloud_monitor::Message),
     /// The WorkBuddy page: a frame, a re-read, or a check-in.
     Workbuddy(workbuddy_monitor::Message),
+    /// Something the DeepSeek page wants.
+    Deepseek(deepseek_monitor::Message),
 }
 
 /// The layer over the desktop that is moving, and which way it is going.
@@ -401,6 +406,8 @@ pub struct Launcher {
     cloud: Option<CloudMonitor>,
     /// The WorkBuddy page. Plain `workbuddy`, for the cloud page's reason.
     workbuddy: Option<WorkBuddy>,
+    /// The DeepSeek page. Plain `deepseek`, for the cloud page's reason.
+    deepseek: Option<DeepSeek>,
     /// Apps currently running in memory (foreground or background).
     running_apps: Vec<usize>,
     board: Arc<Board>,
@@ -469,6 +476,7 @@ impl Launcher {
             games: None,
             cloud: None,
             workbuddy: None,
+        deepseek: None,
             clock,
             battery,
             charging,
@@ -818,6 +826,19 @@ impl Launcher {
         self.workbuddy.as_mut().unwrap()
     }
 
+    /// The DeepSeek page, which is handed the board and reads one backend through it: the account.
+    ///
+    /// It reads on the way in, for the WorkBuddy page's reason, and like it, it is only ever told a
+    /// *masked* key.
+    pub fn get_or_create_deepseek(&mut self) -> &mut DeepSeek {
+        if self.deepseek.is_none() {
+            let mut app = DeepSeek::new(Arc::clone(&self.board));
+            app.set_preferences(self.preferences);
+            self.deepseek = Some(app);
+        }
+        self.deepseek.as_mut().unwrap()
+    }
+
     /// The hosted apps, for the host and the tests.
     pub fn calculator(&mut self) -> &Calculator {
         self.get_or_create_calculator()
@@ -887,6 +908,10 @@ impl Launcher {
         self.get_or_create_workbuddy()
     }
 
+    pub fn deepseek(&mut self) -> &DeepSeek {
+        self.get_or_create_deepseek()
+    }
+
     /// Sets what the status bar shows.
     ///
     /// The platform owns these, and pushes them — rather than iced pulling them from a timer,
@@ -943,6 +968,7 @@ impl Launcher {
             GAMES => self.games = None,
             CLOUD => self.cloud = None,
             WORKBUDDY => self.workbuddy = None,
+            DEEPSEEK => self.deepseek = None,
             _ => {}
         }
 
@@ -1192,6 +1218,15 @@ impl Launcher {
     fn workbuddy_screen(&self) -> Element<'_, Message> {
         if let Some(app) = &self.workbuddy {
             app.view().map(Message::Workbuddy)
+        } else {
+            Space::new().into()
+        }
+    }
+
+    /// The DeepSeek page. One page and no tabs, so the launcher's own back gesture is the way out.
+    fn deepseek_screen(&self) -> Element<'_, Message> {
+        if let Some(app) = &self.deepseek {
+            app.view().map(Message::Deepseek)
         } else {
             Space::new().into()
         }
@@ -1456,6 +1491,10 @@ impl Launcher {
 
         // The WorkBuddy page asks for frames the same way and for the same reason: a request that is
         // still out is the only thing on it that moves.
+        if let (Screen::App(DEEPSEEK), Some(app)) = (self.screen, &self.deepseek) {
+            subs.push(app.subscription().map(Message::Deepseek));
+        }
+
         if let (Screen::App(WORKBUDDY), Some(app)) = (self.screen, &self.workbuddy) {
             subs.push(app.subscription().map(Message::Workbuddy));
         }
@@ -1556,6 +1595,9 @@ impl Launcher {
                     }
                     WORKBUDDY => {
                         self.get_or_create_workbuddy();
+                    }
+                    DEEPSEEK => {
+                        self.get_or_create_deepseek();
                     }
                     _ => {}
                 }
@@ -1700,6 +1742,10 @@ impl Launcher {
                 }
 
                 // And the WorkBuddy page, which is the same kind of page: its clock is the pump's too.
+                if let (Screen::App(DEEPSEEK), Some(app)) = (self.screen, &mut self.deepseek) {
+                    app.update(deepseek_monitor::Message::Tick(Instant::now()));
+                }
+
                 if let (Screen::App(WORKBUDDY), Some(app)) = (self.screen, &mut self.workbuddy) {
                     app.update(workbuddy_monitor::Message::Tick(Instant::now()));
                 }
@@ -1733,6 +1779,7 @@ impl Launcher {
             Message::Games(message) => self.get_or_create_games().update(message),
             Message::Cloud(message) => self.get_or_create_cloud().update(message),
             Message::Workbuddy(message) => self.get_or_create_workbuddy().update(message),
+            Message::Deepseek(message) => self.get_or_create_deepseek().update(message),
             Message::Updater(message) => self.get_or_create_updater().update(message),
             Message::Settings(settings::Message::Back) => return self.go_back(),
             Message::Settings(message) => {
@@ -2202,6 +2249,7 @@ impl Launcher {
             GAMES => self.games_screen(),
             CLOUD => self.cloud_screen(),
             WORKBUDDY => self.workbuddy_screen(),
+            DEEPSEEK => self.deepseek_screen(),
             _ => self.launcher(),
         }
     }
@@ -2605,7 +2653,7 @@ mod tests {
 
     /// A product's own name -- "WorkBuddy" -- is the same string in both languages on purpose: it is
     /// not a word this catalogue translates, and a translation of it is a name nobody says.
-    const UNTRANSLATED: &[&str] = &["WorkBuddy"];
+    const UNTRANSLATED: &[&str] = &["WorkBuddy", "DeepSeek"];
 
     #[test]
     fn catalogue_entries_are_localized_in_both_languages() {
@@ -2673,7 +2721,7 @@ mod tests {
     /// four to a row and two rows is what the first page holds, and what falls past the eighth tile
     /// opens the second — which is where the two rows of the second page are the two rows of it.
     #[test]
-    fn the_catalogue_is_two_pages_in_the_order_the_grid_shows_them() {
+    fn the_catalogue_is_pages_in_the_order_the_grid_shows_them() {
         let names: Vec<&str> = CATALOGUE.iter().map(|entry| entry.name).collect();
 
         assert_eq!(
@@ -2691,17 +2739,20 @@ mod tests {
                 "Tasks",
                 "Clock",
                 "Power Log",
-                "Calculator",
                 "Wi-Fi Map",
                 "Cloud",
-                "WorkBuddy"
+                "WorkBuddy",
+                "DeepSeek",
+                "Calculator"
             ]
         );
-        assert_eq!(CATALOGUE.len(), 16, "and the sixteen are all the tiles there are");
+        assert_eq!(CATALOGUE.len(), 17, "and the seventeen are all the tiles there are");
+        /* 现在是三页：前两页还是八格，第三页只有计算器 —— 第二页最后那一格给了 DeepSeek，
+         * 它要接在 WorkBuddy 后面，而不是等下一格空出来。 */
         assert_eq!(
             Launcher::new(Arc::new(Board::simulated())).pages(),
-            2,
-            "eight and eight"
+            3,
+            "eight, eight, and the calculator"
         );
     }
 

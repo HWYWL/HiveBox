@@ -176,12 +176,6 @@ pub const CATALOGUE: &[Entry] = &[
         accent: (170, 96, 214),
     },
     Entry {
-        name: "Calculator",
-        name_zh: "计算器",
-        icon: AppIcon::glyph(Icon::CALCULATE),
-        accent: (246, 158, 34),
-    },
-    Entry {
         name: "Wi-Fi Map",
         name_zh: "信道地图",
         // A radio being searched rather than a network being joined: this app is about the air, not about
@@ -219,5 +213,24 @@ pub const CATALOGUE: &[Entry] = &[
         icon: AppIcon::Bitmap(baked::WORKBUDDY_ICON),
         // The green of the mark itself, so the tile and the picture are the same colour.
         accent: (36, 190, 143),
+    },
+    Entry {
+        // A product's own name in both languages, for WorkBuddy's reason: DeepSeek is what it is
+        // called, and a translation of a name is a name nobody says.
+        name: "DeepSeek",
+        name_zh: "DeepSeek",
+        // The whale, baked from the mark: no Material glyph can stand in for a logo, and this is
+        // what a person recognises before they read the label. See `assets/app-icons/`.
+        icon: AppIcon::Bitmap(baked::DEEPSEEK_ICON),
+        // The brand's own blue, so the tile and the mark are the same colour.
+        accent: (77, 107, 254),
+    },
+    // Page 3, alone for now: page 2 was full, and DeepSeek took the last seat on it -- after
+    // WorkBuddy, where it belongs, rather than wherever there was room.
+    Entry {
+        name: "Calculator",
+        name_zh: "计算器",
+        icon: AppIcon::glyph(Icon::CALCULATE),
+        accent: (246, 158, 34),
     },
 ];

@@ -12,8 +12,9 @@ use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
 use crate::traits::{
-    AudioBackend, CloudBackend, HttpBackend, ImuBackend, InputBackend, MicBackend, NasBackend,
-    PowerBackend, StorageBackend, SystemBackend, WebBackend, WifiBackend, WorkBuddyBackend,
+    AudioBackend, CloudBackend, DeepSeekBackend, HttpBackend, ImuBackend, InputBackend, MicBackend,
+    NasBackend, NoDeepSeek, PowerBackend, StorageBackend, SystemBackend, WebBackend, WifiBackend,
+    WorkBuddyBackend,
 };
 use crate::types::{SystemEvent, WifiStatus};
 
@@ -48,6 +49,7 @@ pub struct Board {
     http: Mutex<Box<dyn HttpBackend>>,
     cloud: Mutex<Box<dyn CloudBackend>>,
     workbuddy: Mutex<Box<dyn WorkBuddyBackend>>,
+    deepseek: Mutex<Box<dyn DeepSeekBackend>>,
     listeners: Mutex<Vec<EventListener>>,
     events: Mutex<VecDeque<SystemEvent>>,
     event_condvar: Condvar,
@@ -94,6 +96,7 @@ impl Board {
             http: Mutex::new(http),
             cloud: Mutex::new(cloud),
             workbuddy: Mutex::new(workbuddy),
+            deepseek: Mutex::new(Box::new(NoDeepSeek)),
             listeners: Mutex::new(Vec::new()),
             events: Mutex::new(VecDeque::with_capacity(MAX_EVENT_QUEUE_SIZE)),
             event_condvar: Condvar::new(),
@@ -108,7 +111,7 @@ impl Board {
             SimAudio, SimCloud, SimHttp, SimImu, SimInput, SimMic, SimNas, SimPower, SimStorage,
             SimSystem, SimWeb, SimWifi, SimWorkBuddy,
         };
-        Self::from_backends(
+        let board = Self::from_backends(
             Box::new(SimPower::new()),
             Box::new(SimWifi::new()),
             Box::new(SimAudio::new()),
@@ -122,7 +125,11 @@ impl Board {
             Box::new(SimHttp::new()),
             Box::new(SimCloud::new()),
             Box::new(SimWorkBuddy::new()),
-        )
+        );
+
+        board.set_deepseek(Box::new(crate::sim::SimDeepSeek::new()));
+
+        board
     }
 
     /// The same board with a different HTTP client in it.
@@ -297,6 +304,22 @@ impl Board {
     /// and nothing in [`Board::init`] brings it up.
     pub fn workbuddy(&self) -> MutexGuard<'_, Box<dyn WorkBuddyBackend>> {
         lock(&self.workbuddy)
+    }
+
+    /// Lock the DeepSeek backend.
+    ///
+    /// 它默认是 [`NoDeepSeek`]：这块板子有没有这张卡，只有装配它的人知道。固件在 `Board::init`
+    /// 之后把真的换进来（[`Board::set_deepseek`]）；桌面上的模拟板子用它自己的实现。
+    pub fn deepseek(&self) -> MutexGuard<'_, Box<dyn DeepSeekBackend>> {
+        lock(&self.deepseek)
+    }
+
+    /// Put a DeepSeek backend in this board.
+    ///
+    /// 一个 setter 而不是第十四个构造参数：`from_backends` 有七个调用点，而它们全都与 DeepSeek
+    /// 无关 —— 一个「没有它」的默认值让那些地方一个字都不用改。
+    pub fn set_deepseek(&self, backend: Box<dyn DeepSeekBackend>) {
+        *lock(&self.deepseek) = backend;
     }
 
     /// Advance every time-driven subsystem (Wi-Fi scan progress, audio EOF detection, input

@@ -35,6 +35,7 @@ calculator = { path = "../calculator", default-features = false }
 clock = { path = "../clock", default-features = false }
 cloud-monitor = { path = "../cloud-monitor", default-features = false }
 workbuddy-monitor = { path = "../workbuddy-monitor", default-features = false }
+deepseek-monitor = { path = "../deepseek-monitor", default-features = false }
 files = { path = "../files", default-features = false }
 games = { path = "../games", default-features = false }
 music-player = { path = "../music-player", default-features = false }

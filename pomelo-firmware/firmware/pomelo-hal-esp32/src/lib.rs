@@ -48,6 +48,7 @@ mod system;
 mod web;
 mod wifi;
 mod workbuddy;
+mod deepseek;
 mod event;
 
 use std::sync::Arc;
@@ -67,6 +68,7 @@ pub use system::EspSystem;
 pub use web::EspWeb;
 pub use wifi::EspWifi;
 pub use workbuddy::EspWorkBuddy;
+pub use deepseek::EspDeepSeek;
 
 /// Assemble this board's backends into the shared handle the apps take.
 ///
@@ -89,6 +91,10 @@ pub fn board() -> Arc<Board> {
         Box::new(cloud::EspCloud::new()),
         Box::new(workbuddy::EspWorkBuddy::new()),
     ));
+
+    /* 第十四个后端不在 `from_backends` 里：那七个调用点全都与 DeepSeek 无关，一个默认的
+     * 「没有它」让它们一个字都不用改。装配的时候把真的换进来。 */
+    board.set_deepseek(Box::new(deepseek::EspDeepSeek::new()));
     event::start_event_pump(Arc::clone(&board));
     board
 }

@@ -20,6 +20,8 @@
 //! 和云服务那张页一样：`start` 立刻返回，页面每帧看 `state`，不 `Running` 的那一帧把答案取走。
 //! 一次往返是一次 TLS 握手加一个 POST，等它就是一页停在那儿不画。
 
+mod logo;
+
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -288,7 +290,9 @@ impl WorkBuddy {
 
         let title = text("WorkBuddy").size(FONT_BASE * 1.15);
 
-        let mut head = row![title].spacing(8).align_y(iced::Alignment::Center);
+        let mut head = row![logo::logo(FONT_BASE * 1.25), title]
+            .spacing(8)
+            .align_y(iced::Alignment::Center);
         head = head.push(Space::new().width(Length::Fill));
         head = head.push(
             text(if self.busy() { "读取中…" } else { "" })

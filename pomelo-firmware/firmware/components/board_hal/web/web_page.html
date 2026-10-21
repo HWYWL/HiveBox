@@ -651,6 +651,7 @@ textarea.code.wrap { white-space: pre-wrap; word-break: break-word; }
       <button data-view="servers">服务器</button>
       <button data-view="cloud">云服务</button>
 <button data-view="workbuddy">WorkBuddy</button>
+        <button data-view="deepseek">DeepSeek</button>
       <button data-view="logs">日志</button>
       <button data-view="system">设备</button>
     </nav>
@@ -894,6 +895,80 @@ textarea.code.wrap { white-space: pre-wrap; word-break: break-word; }
     <div class="group">
       <div class="group-title">时间</div>
       <div class="card" id="rtcCard"></div>
+    </div>
+  </section>
+
+  <section id="view-deepseek" hidden>
+    <div class="group">
+      <div class="group-title">已保存</div>
+      <div class="card" style="padding:8px 14px">
+        <div class="row" style="padding:10px 0">
+          <svg class="ic sm"><use href="#i-lock"/></svg>
+          <div class="row-main">
+            <div class="row-name">API Key</div>
+            <div class="row-meta" id="dsKeyMask">还没有存</div>
+          </div>
+          <button class="btn" id="dsEditKey" style="padding:5px 12px;font-size:13px">编辑</button>
+          <button class="btn danger" id="dsDelKey" style="padding:5px 12px;font-size:13px;margin-left:6px">删除</button>
+        </div>
+        <div class="row" style="padding:10px 0;border-top:1px solid rgba(127,127,127,.15)">
+          <svg class="ic sm"><use href="#i-lock"/></svg>
+          <div class="row-main">
+            <div class="row-name">userToken</div>
+            <div class="row-meta" id="dsUserMask">还没有存</div>
+          </div>
+          <button class="btn" id="dsEditUser" style="padding:5px 12px;font-size:13px">编辑</button>
+          <button class="btn danger" id="dsDelUser" style="padding:5px 12px;font-size:13px;margin-left:6px">删除</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="group">
+      <div class="group-title">填入或替换</div>
+      <div class="card" style="padding:14px">
+        <label class="field">
+          <svg class="ic sm"><use href="#i-lock"/></svg>
+          <input id="dsKey" placeholder="sk-… 官方 API Key" autocomplete="off" spellcheck="false">
+        </label>
+        <div class="pv-note" style="padding:6px 0 0;text-align:left;white-space:normal;overflow:visible;text-overflow:clip;">
+          在 platform.deepseek.com 的「API keys」页建一枚。它只够读余额（总/充值/赠送）。
+        </div>
+
+        <label class="field" style="margin-top:14px">
+          <svg class="ic sm"><use href="#i-lock"/></svg>
+          <input id="dsUser" placeholder="userToken（可选，读今天的用量）" autocomplete="off" spellcheck="false">
+        </label>
+        <div class="pv-note" style="padding:6px 0 0;text-align:left;white-space:normal;overflow:visible;text-overflow:clip;">
+          留空就是「这枚不改」：只换 Key 的时候不会把用量那半关掉。
+        </div>
+
+        <div class="bar-actions" style="padding:12px 0 0;margin:0">
+          <button class="btn primary" id="dsSave">保存并读取</button>
+        </div>
+
+        <div id="dsVerdict" style="margin-top:12px;text-align:left;line-height:1.6;white-space:normal;overflow:visible;text-overflow:clip;"></div>
+      </div>
+    </div>
+
+    <div class="group">
+      <div class="group-title">怎么拿 userToken</div>
+      <div class="card" style="padding:14px">
+        <div class="row-meta" style="text-align:left;line-height:1.9;white-space:normal;overflow:visible;text-overflow:clip;">
+          用量（今日消费、请求次数、tokens、累计消费）在开放平台的<b>私有</b>接口里，认的不是 API Key，
+          而是浏览器登录控制台时的那枚 <code>userToken</code>。<br>
+          <b>1.</b> 用电脑浏览器打开
+          <a href="https://platform.deepseek.com/usage" target="_blank" rel="noopener"
+             style="color:var(--blue)">platform.deepseek.com</a> 并登录；<br>
+          <b>2.</b> 按 <b>F12</b> 打开开发者工具，切到 <b>Application（应用）</b> → 左侧
+          <b>Local Storage</b> → <code>https://platform.deepseek.com</code>；<br>
+          <b>3.</b> 在表里找到 <code>userToken</code>，双击它的 <b>Value</b>，全选复制；<br>
+          <b>4.</b> 粘到上面第二个框，按「保存并读取」。<br>
+          <span style="opacity:.7">
+            找不到 userToken 就刷新一次控制台页面再登录一次。它等同于你的登录态：别发到群里或截图里；
+            用完可以在控制台点「退出登录」让它立刻失效，这里再删掉一次。
+          </span>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -2904,7 +2979,7 @@ async function cloudPower(action, id, name, kind, region) {
 /* --- the seven views ------------------------------------------------------- */
 function setView(view) {
   state.view = view;
-  for (const name of ["files", "wifi", "control", "servers", "cloud", "workbuddy", "logs", "system"]) {
+  for (const name of ["files", "wifi", "control", "servers", "cloud", "workbuddy", "deepseek", "logs", "system"]) {
     $("view-" + name).hidden = name !== view;
   }
 
@@ -2912,9 +2987,12 @@ function setView(view) {
   for (const button of buttons) button.classList.toggle("on", button.dataset.view === view);
 
   const active = buttons.find((button) => button.dataset.view === view);
-  const thumb = $("segThumb");
-  thumb.style.width = active.offsetWidth + "px";
-  thumb.style.transform = "translateX(" + active.offsetLeft + "px)";
+
+  if (active) {
+    const thumb = $("segThumb");
+    thumb.style.width = active.offsetWidth + "px";
+    thumb.style.transform = "translateX(" + active.offsetLeft + "px)";
+  }
 
   try { localStorage.setItem("hivebox.view", view); } catch (error) { /* private mode */ }
 
@@ -2935,6 +3013,9 @@ function setView(view) {
      one. What it does ask is what is saved, which is a read of the board's own file. */
   if (view === "cloud") { renderCloud(); loadCloud(true); }
   if (view === "workbuddy") loadWorkbuddy();
+
+  /* DeepSeek 页打开只问板子自己存了什么，不打网络：一次读取可能要十几秒，那该是按钮的事。 */
+  if (view === "deepseek" && typeof loadDeepseek === "function") loadDeepseek();
 
   /* The stream is opened when the log is being looked at and closed when it is not: a connection to
      the box is one of four, and one left open behind another tab is one a person cannot use. */
@@ -4186,7 +4267,13 @@ function start() {
 
   let view = "files";
   try { view = localStorage.getItem("hivebox.view") || "files"; } catch (error) { /* private mode */ }
-  if (["files", "wifi", "control", "servers", "cloud", "logs", "system"].indexOf(view) < 0) view = "files";
+
+  /* 认哪一页，看页面本身在不在，不看一份写死的名单 —— 那份名单已经漏过一次：
+   * 在 WorkBuddy 页刷新一下会跳回「文件」，因为 "workbuddy" 不在里面。 */
+  const asked = (location.hash || "").slice(1);
+  if (asked && document.getElementById("view-" + asked)) view = asked;
+  if (!document.getElementById("view-" + view)) view = "files";
+
   setView(view);
 
   refreshSystem(true);
@@ -4213,6 +4300,187 @@ start();
 
 
 
+
+/* ---- DeepSeek 页：两枚凭据的查看、替换、删除 ---------------------------- */
+(function () {
+  const $ = (id) => document.getElementById(id);
+
+  const key = $("dsKey");
+  const user = $("dsUser");
+  const keyMask = $("dsKeyMask");
+  const userMask = $("dsUserMask");
+  const verdict = $("dsVerdict");
+  const save = $("dsSave");
+
+  if (!key || !save) return;
+
+  /* 板子只肯说掩码：前三位…后四位。完整的那段永远不出设备，编辑也就是「粘一枚新的」。 */
+  function paint(saved, mask, has, target) {
+    if (has) {
+      target.textContent = mask + " · 已保存";
+      target.style.color = "var(--green)";
+    } else {
+      target.textContent = "还没有存";
+      target.style.color = "";
+    }
+  }
+
+  function line(ok, text) {
+    const row = document.createElement("div");
+    row.style.marginTop = "4px";
+    row.style.color = ok ? "var(--green)" : "var(--orange, #e6a23c)";
+    row.textContent = text;
+    return row;
+  }
+
+  function parse(text) {
+    const out = {};
+    text.split("\n").forEach(function (row) {
+      const at = row.indexOf("=");
+      if (at > 0) out[row.slice(0, at)] = row.slice(at + 1);
+    });
+    return out;
+  }
+
+  async function refresh() {
+    try {
+      const r = await fetch("/api/deepseek/status", { cache: "no-store" });
+      const d = await r.json();
+
+      paint(d.saved, d.key || "", d.saved, keyMask);
+      paint(d.user, d.user_mask || "", d.user, userMask);
+
+      $("dsDelKey").disabled = !d.saved;
+      $("dsDelUser").disabled = !d.user;
+      $("dsEditKey").disabled = false;
+      $("dsEditUser").disabled = false;
+    } catch (error) {
+      keyMask.textContent = "读不到状态：板子没联网？";
+    }
+  }
+
+  async function readOnce() {
+    verdict.textContent = "读…";
+
+    try {
+      const r = await fetch("/api/deepseek/start", { method: "POST" });
+      return parse(await r.text());
+    } catch (error) {
+      return { error: "offline", message: "板子没答上来" };
+    }
+  }
+
+  function render(result) {
+    verdict.textContent = "";
+
+    if (result.error) {
+      verdict.appendChild(line(false, "读失败：" + (result.error === "offline"
+        ? "板子没联网"
+        : (result.error + " " + (result.message || "")))));
+      return;
+    }
+
+    verdict.appendChild(line(result.available === "1",
+      "API Key 可用 · 余额 " + (result.total || "—") + " " + (result.currency || "")));
+
+    if (result.topped !== undefined) {
+      verdict.appendChild(line(true, "充值 " + result.topped + " · 赠送 " + result.granted));
+    }
+
+    if (result.total_cost) {
+      verdict.appendChild(line(true, "累计消费 " + result.total_cost));
+    }
+
+    if (result.user_token === "ok") {
+      verdict.appendChild(line(true,
+        "userToken 可用 · 今日 " + (result.today_requests || "0") + " 次 · "
+        + (result.today_cost || "0") + " · " + (result.today_tokens || "0") + " tokens"));
+    } else if (result.user_token === "bad") {
+      verdict.appendChild(line(false,
+        "userToken 不作数了（过期或不是这一枚）：按下面「怎么拿 userToken」重新拿一次"));
+    } else if (result.user_token === "fail") {
+      verdict.appendChild(line(false, "用量这次没读上来，过一会儿再按一次"));
+    } else {
+      verdict.appendChild(line(false, "没有 userToken：用量那半读不到，下面有拿法"));
+    }
+  }
+
+  /* 从控制台「Local Storage」整行复制出来的东西长这样：
+   *     {"value":"I47…fMz","__version":"0"}
+   * 存进去的必须只有里面那一串。同理，带引号粘进来的也削掉引号。 */
+  function clean(text) {
+    let value = (text || "").trim();
+
+    const wrapped = value.match(/"value"\s*:\s*"([^"]*)"/);
+    if (wrapped) value = wrapped[1];
+
+    return value.trim().replace(/^["']+/, "").replace(/["']+$/, "").trim();
+  }
+
+  save.onclick = async function () {
+    const key_text = clean(key.value);
+    const user_text = clean(user.value);
+
+    if (!key_text && !user_text) {
+      keyMask.textContent = "至少填一枚";
+      return;
+    }
+
+    save.disabled = true;
+
+    try {
+      const form = new URLSearchParams();
+      form.append("key", key_text);
+      form.append("user", user_text);
+
+      const r = await fetch("/api/deepseek/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: form,
+      });
+
+      if (!r.ok) {
+        keyMask.textContent = "没存上：只能有可见字符，不能有空格或引号";
+        return;
+      }
+
+      key.value = "";
+      user.value = "";
+      await refresh();
+      render(await readOnce());
+    } finally {
+      save.disabled = false;
+    }
+  };
+
+  /* 编辑 = 给那一格聚焦，等你粘一枚新的：板子不会把旧的交出来。 */
+  function edit(input, note) {
+    input.value = "";
+    input.placeholder = note;
+    input.focus();
+    input.scrollIntoView({ block: "center", behavior: "smooth" });
+  }
+
+  $("dsEditKey").onclick = () => edit(key, "粘一枚新的 API Key，保存后覆盖旧的");
+  $("dsEditUser").onclick = () => edit(user, "粘一枚新的 userToken，保存后覆盖旧的");
+
+  async function drop(which, what) {
+    if (!confirm("删掉这枚" + what + "？删了就得重新填一次。")) {
+      return;
+    }
+
+    await fetch("/api/deepseek/forget?which=" + which, { method: "POST" });
+    verdict.textContent = "";
+    await refresh();
+  }
+
+  $("dsDelKey").onclick = () => drop("key", " API Key");
+  $("dsDelUser").onclick = () => drop("user", " userToken");
+
+  window.loadDeepseek = refresh;
+
+  refresh();
+})();
 </script>
 </body>
 </html>

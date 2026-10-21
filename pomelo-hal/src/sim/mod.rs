@@ -22,6 +22,7 @@ mod system;
 mod web;
 mod wifi;
 mod workbuddy;
+mod deepseek;
 
 pub use audio::SimAudio;
 pub use cloud::SimCloud;
@@ -36,3 +37,4 @@ pub use system::SimSystem;
 pub use web::SimWeb;
 pub use wifi::SimWifi;
 pub use workbuddy::SimWorkBuddy;
+pub use deepseek::SimDeepSeek;

@@ -93,6 +93,7 @@ dependencies = [
  "calculator",
  "clock",
  "cloud-monitor",
+ "deepseek-monitor",
  "files",
  "games",
  "iced",
@@ -660,6 +661,18 @@ name = "cursor-icon"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
+
+[[package]]
+name = "deepseek-monitor"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "iced_test",
+ "image",
+ "pomelo-hal",
+ "pomelo-material-symbols",
+ "pomelo-widgets",
+]
 
 [[package]]
 name = "digest"
@@ -4118,6 +4131,7 @@ version = "0.1.0"
 dependencies = [
  "iced",
  "iced_test",
+ "image",
  "pomelo-hal",
  "pomelo-material-symbols",
  "pomelo-widgets",

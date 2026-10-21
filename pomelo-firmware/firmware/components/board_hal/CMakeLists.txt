@@ -32,6 +32,9 @@ idf_component_register(
         # internet, POST-shaped and signed, and the reason it is not `board_http.c` is
         # written at the top of it.
         "board_cloud.c"
+        # The DeepSeek reader (`board_deepseek.c`): two of somebody else's billing
+        # documents, one behind an API key and one behind a console token.
+        "board_deepseek.c"
         # WorkBuddy's account status (`board_workbuddy.c`): the third, POST-shaped with a
         # bearer token instead of a signature. Same shape as the cloud client; the reason
         # it is a file of its own is at the top of it.

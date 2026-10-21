@@ -52,6 +52,7 @@ dependencies = [
  "calculator",
  "clock",
  "cloud-monitor",
+ "deepseek-monitor",
  "files",
  "games",
  "iced",
@@ -500,6 +501,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "deepseek-monitor"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "image",
+ "pomelo-hal",
+ "pomelo-material-symbols",
+ "pomelo-widgets",
 ]
 
 [[package]]
@@ -3112,6 +3124,7 @@ name = "workbuddy-monitor"
 version = "0.1.0"
 dependencies = [
  "iced",
+ "image",
  "pomelo-hal",
  "pomelo-material-symbols",
  "pomelo-widgets",

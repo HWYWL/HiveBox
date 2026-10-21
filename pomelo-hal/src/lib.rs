@@ -38,6 +38,7 @@ pub mod types;
 pub mod wav;
 pub mod wifi_credentials;
 pub mod workbuddy_answer;
+pub mod deepseek_answer;
 
 /// MP3 and FLAC decoding — behind a feature, because it is the only dependency in the crate that
 /// exists for the device's sake rather than the simulator's.

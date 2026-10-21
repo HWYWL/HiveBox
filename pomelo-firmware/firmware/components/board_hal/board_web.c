@@ -2464,6 +2464,9 @@ static esp_err_t handle_cloud_power(httpd_req_t *req)
 /** How much of a form body this will read: two tokens, a host, and room. */
 #define WEB_WORKBUDDY_BODY_MAX (HAL_WORKBUDDY_CONF_MAX + 128)
 
+/** DeepSeek 那段：一枚最长两 KB 的 userToken，percent 编码会让它涨一截，再加一枚 Key。 */
+#define WEB_DEEPSEEK_BODY_MAX (2 * 2048 + 512)
+
 /** How long `/api/workbuddy/start` waits for the account before giving up on it. */
 #define WEB_WORKBUDDY_WAIT_MS 20000
 
@@ -2919,6 +2922,197 @@ static esp_err_t handle_workbuddy_start(httpd_req_t *req)
 }
 
 /* ---------------------------------------------------------------------------
+ * DeepSeek
+ * ------------------------------------------------------------------------- */
+
+static esp_err_t handle_deepseek_status(httpd_req_t *req)
+{
+    char masked[20];
+    bool has_user = false;
+
+    hal_deepseek_credentials(masked, sizeof masked, &has_user);
+
+    /* userToken 也给一个掩码：网页上要说得清「存的是哪一枚」，而完整的那段永远不出设备。 */
+    char user_mask[16];
+    hal_deepseek_user_mask(user_mask, sizeof user_mask);
+
+    web_buf_t buf;
+    buf_init(&buf, 320);
+    buf_printf(&buf,
+               "{\"saved\":%s,\"key\":\"%s\",\"user\":%s,\"user_mask\":\"%s\","
+               "\"state\":%d,\"fault\":%d}",
+               masked[0] != '\0' ? "true" : "false", masked, has_user ? "true" : "false",
+               user_mask, (int)hal_deepseek_state(), (int)hal_deepseek_fault());
+
+    if (buf.full) {
+        buf_free(&buf);
+        return send_busy(req);
+    }
+
+    const esp_err_t ret = send_json(req, buf.data);
+    buf_free(&buf);
+
+    return ret;
+}
+
+/* 存凭据。两枚都是长字符串，键盘敲不出来 —— 只能从网页贴进来。 */
+static esp_err_t handle_deepseek_token(httpd_req_t *req)
+{
+    char *body = read_form_body(req, WEB_DEEPSEEK_BODY_MAX);
+    if (body == NULL) {
+        return send_blocked(req, "the credentials have to arrive in the body");
+    }
+
+    char *key = NULL;
+    char *user = NULL;
+
+    /* 两格各管各的：只换 userToken 的人把 Key 那格留空，那次保存不该被拒。
+     *
+     * 先取 `user` 再取 `key`，顺序是有讲究的：`form_field` 找到值之后会把后面那个 `&` 改成 `\0`，
+     * 于是 `key=`（空值）会把紧跟其后的 `user=…` 一节切断 —— 先取 user，它已经把值攥在手里了。 */
+    const bool have_user = form_field(body, "user", &user) && user[0] != '\0';
+    const bool have_key = form_field(body, "key", &key) && key[0] != '\0';
+
+    /* 这里必须解码，和 WorkBuddy 那条路不一样。
+     *
+     * `form_field` 不解码，因为 WorkBuddy 的令牌是 JWT —— base64url，没有 `+`、`/`、`=`，碰不到
+     * 需要转义的字符。DeepSeek 这枚是**标准 base64**：`+` 会被 `URLSearchParams` 编码成 `%2B`，
+     * 不解码就存成字面的 `%2B`，于是每一次都 401 —— 「填进去却说 userToken 过期了」就是这个。 */
+    char *key_decoded = NULL;
+    char *user_decoded = NULL;
+
+    if (have_key) {
+        const size_t size = strlen(key) + 1;
+        key_decoded = (char *)malloc(size);
+
+        if (key_decoded == NULL) {
+            free(body);
+            return send_busy(req);
+        }
+
+        url_decode(key, key_decoded, size);
+        key = key_decoded;
+    }
+
+    if (have_user) {
+        const size_t size = strlen(user) + 1;
+        user_decoded = (char *)malloc(size);
+
+        if (user_decoded == NULL) {
+            free(key_decoded);
+            free(body);
+            return send_busy(req);
+        }
+
+        url_decode(user, user_decoded, size);
+        user = user_decoded;
+    }
+
+    if (!have_key && !have_user) {
+        free(body);
+        return send_blocked(req, "fill one of the two");
+    }
+
+    /* 两个指针都指向 `body`，它活到这次调用把它们抄走为止。 */
+    const esp_err_t err =
+        hal_deepseek_credentials_set(have_key ? key : NULL, have_user ? user : NULL);
+
+    free(user_decoded);
+    free(key_decoded);
+    free(body);
+
+    if (err == ESP_ERR_INVALID_ARG) {
+        return send_blocked(req, "the key must be printable ASCII with no quotes or spaces");
+    }
+    if (err == ESP_ERR_INVALID_STATE) {
+        return send_error(req, "409 Conflict", "deepseek_busy",
+                          "a request is in flight; try again in a moment");
+    }
+    if (err != ESP_OK) {
+        return send_error(req, "500 Internal Server Error", "deepseek_storage",
+                          "the credentials could not be written to the card");
+    }
+
+    return handle_deepseek_status(req);
+}
+
+static esp_err_t handle_deepseek_forget(httpd_req_t *req)
+{
+    /* `?which=key` / `?which=user`：网页上每一枚各有自己的「删除」。不带就是两枚都清。 */
+    char query[64] = "";
+    char which[16] = "";
+
+    if (httpd_req_get_url_query_str(req, query, sizeof query) == ESP_OK) {
+        httpd_query_key_value(query, "which", which, sizeof which);
+    }
+
+    int32_t scope = HAL_DEEPSEEK_CRED_ALL;
+
+    if (which[0] != '\0') {
+        if (strcmp(which, "key") == 0) {
+            scope = HAL_DEEPSEEK_CRED_KEY;
+        } else if (strcmp(which, "user") == 0) {
+            scope = HAL_DEEPSEEK_CRED_USER;
+        } else if (strcmp(which, "all") != 0) {
+            return send_error(req, "400 Bad Request", "deepseek_args",
+                              "which is one of key, user, all");
+        }
+    }
+
+    if (hal_deepseek_forget(scope) != ESP_OK) {
+        return send_error(req, "500 Internal Server Error", "deepseek_storage",
+                          "the credentials file could not be removed");
+    }
+
+    return handle_deepseek_status(req);
+}
+
+/* 把答案原样交出去。它要么是一份账目，要么是一句拒绝，网页两边都画得出来。 */
+static esp_err_t handle_deepseek_answer(httpd_req_t *req)
+{
+    static char answer[1024];
+
+    if (hal_deepseek_take_answer(answer, sizeof answer) != ESP_OK) {
+        return send_error(req, "404 Not Found", "deepseek_no_answer",
+                          "nothing has been read yet");
+    }
+
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+
+    return httpd_resp_send(req, answer, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t handle_deepseek_start(httpd_req_t *req)
+{
+    const esp_err_t started = hal_deepseek_start();
+
+    if (started == ESP_ERR_INVALID_STATE) {
+        return send_error(req, "409 Conflict", "deepseek_busy",
+                          "another DeepSeek request is already in flight");
+    }
+    if (started != ESP_OK) {
+        char said[64];
+        snprintf(said, sizeof said, "the request could not start (0x%x)", (unsigned)started);
+        return send_error(req, "400 Bad Request", "deepseek_args", said);
+    }
+
+    /* 网页等在这里，应用不等：它每三十秒问一次状态。 */
+    const int64_t deadline = esp_timer_get_time() + (int64_t)WEB_WORKBUDDY_WAIT_MS * 1000;
+
+    while (hal_deepseek_state() == HAL_DEEPSEEK_RUNNING && esp_timer_get_time() < deadline) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    if (hal_deepseek_state() == HAL_DEEPSEEK_RUNNING) {
+        hal_deepseek_cancel();
+        return send_error(req, "504 Gateway Timeout", "deepseek_timeout",
+                          "the account did not answer in time");
+    }
+
+    return handle_deepseek_answer(req);
+}
+
+/* ---------------------------------------------------------------------------
  * The server itself
  * ------------------------------------------------------------------------- */
 
@@ -2982,6 +3176,11 @@ static const web_route_t s_routes[] = {
     { "/api/workbuddy/login",  HTTP_POST, handle_workbuddy_login },
     { "/api/workbuddy/raw",    HTTP_GET,  handle_workbuddy_raw },
     { "/api/workbuddy/answer", HTTP_GET,  handle_workbuddy_answer },
+    { "/api/deepseek/status",  HTTP_GET,  handle_deepseek_status },
+    { "/api/deepseek/token",   HTTP_POST, handle_deepseek_token },
+    { "/api/deepseek/forget",  HTTP_POST, handle_deepseek_forget },
+    { "/api/deepseek/start",   HTTP_POST, handle_deepseek_start },
+    { "/api/deepseek/answer",  HTTP_GET,  handle_deepseek_answer },
     { "/api/wifi/disconnect", HTTP_POST, handle_wifi_disconnect },
     { "/api/wifi/forget",     HTTP_POST, handle_wifi_forget },
     { "/api/restart",         HTTP_POST, handle_restart },

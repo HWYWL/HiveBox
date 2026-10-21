@@ -1851,3 +1851,158 @@ pub enum WorkBuddyAnswer {
         message: String,
     },
 }
+
+// =============================================================================
+// DeepSeek
+// =============================================================================
+
+/// 一枚 DeepSeek 账号的凭据，好到能让一页说清楚它有没有。
+///
+/// 两枚是不同的东西：`key` 是官方接口认的 API Key，`user_token` 是开放平台控制台的登录态。
+/// 前者只够读余额，后者才读得到用量 —— 所以这里分开说，不让一页把「只有 Key」误当成「全都有」。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeepSeekAccount {
+    /// 存下来的 API Key 的掩码，`sk-…ab8` 这样；空字符串表示没存。
+    pub masked_key: String,
+    /// 有没有存控制台的 `userToken`。它本身不给页面看，所以只有一个布尔。
+    pub has_user_token: bool,
+}
+
+impl DeepSeekAccount {
+    /// 有没有一枚能用的 Key —— 有它才有余额可读。
+    pub fn configured(&self) -> bool {
+        !self.masked_key.is_empty()
+    }
+}
+
+/// Where a DeepSeek request is.
+///
+/// 和别的网络后端同样的四个状态：答案在另一条线程上到，页面画的是上一次看到的样子。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DeepSeekState {
+    /// Nothing has been asked for, or the answer has been taken.
+    #[default]
+    Idle,
+    /// A request is in flight.
+    Running,
+    /// An answer is waiting for `take_answer`.
+    Done,
+    /// The request failed, and why is in the fault.
+    Failed(DeepSeekFault),
+}
+
+/// Why a DeepSeek request did not produce a report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeepSeekFault {
+    /// 失败，没有更具体的说法。
+    Failed,
+    /// 没有 API Key。
+    NoKey,
+    /// 板子没联网。
+    NoNetwork,
+    /// DNS / 连接 / 读失败。
+    Unreachable,
+    /// TLS 握手失败。
+    Tls,
+    /// 状态码用不了，正文里也没有理由。
+    Http,
+    /// 凭据被拒：Key 不对，或者 userToken 过期。
+    Auth,
+    /// 账号答了，但拒绝了这次调用。
+    Api,
+    /// 答案放不下 / 凭据文件读写失败。
+    Storage,
+}
+
+impl DeepSeekFault {
+    /// All nine, in the C side's order.
+    pub const ALL: [DeepSeekFault; 9] = [
+        DeepSeekFault::Failed,
+        DeepSeekFault::NoKey,
+        DeepSeekFault::NoNetwork,
+        DeepSeekFault::Unreachable,
+        DeepSeekFault::Tls,
+        DeepSeekFault::Http,
+        DeepSeekFault::Auth,
+        DeepSeekFault::Api,
+        DeepSeekFault::Storage,
+    ];
+
+    /// 这个故障在网上走的名字 —— `error=deepseek_auth` 那一套。
+    pub fn code(self) -> &'static str {
+        match self {
+            DeepSeekFault::Failed => "deepseek_failed",
+            DeepSeekFault::NoKey => "deepseek_creds",
+            DeepSeekFault::NoNetwork => "deepseek_network",
+            DeepSeekFault::Unreachable => "deepseek_unreachable",
+            DeepSeekFault::Tls => "deepseek_tls",
+            DeepSeekFault::Http => "deepseek_http",
+            DeepSeekFault::Auth => "deepseek_auth",
+            DeepSeekFault::Api => "deepseek_api",
+            DeepSeekFault::Storage => "deepseek_storage",
+        }
+    }
+}
+
+/// 那枚控制台的 `userToken` 现在是什么状况。
+///
+/// 三种「读不到用量」要分开说：没填、填了但过期了、填了但这次没读上来。前两种人要做的事不同 ——
+/// 一种去拿一枚，一种去重新拿一枚。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UserTokenState {
+    /// 没有填。
+    #[default]
+    None,
+    /// 能读。
+    Ok,
+    /// 账号说这枚不作数了（401/403），或者它压根不是一枚。
+    Bad,
+    /// 这次没读上来：网络、超时、别的原因。
+    Fail,
+}
+
+/// 一次读到的 DeepSeek 账目。
+///
+/// 金额都用 `f32`：接口给的是 `"109.02"` 这样的字符串，而这一页只画到分，`f32` 足够。
+/// 用量那三个是 `None` 而不是 0 —— 没有 userToken 就是「不知道」，画成破折号。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DeepSeekReport {
+    /// 余额够不够调用。官方接口的 `is_available`。
+    pub available: bool,
+    /// 币种，`CNY` 或 `USD`。
+    pub currency: String,
+    /// 总余额（充值 + 未过期的赠送）。
+    pub total: Option<f32>,
+    /// 赠送余额。
+    pub granted: Option<f32>,
+    /// 充值余额。
+    pub topped: Option<f32>,
+    /// 累计消费，全部历史。只有 userToken 读得到。
+    pub total_cost: Option<f32>,
+    /// 今天花了多少。
+    pub today_cost: Option<f32>,
+    /// 今天请求了几次。
+    pub today_requests: Option<u32>,
+    /// 今天用了多少 token（响应 + 缓存命中 + 缓存未命中）。
+    pub today_tokens: Option<u64>,
+    /// 控制台的 `userToken` 这一趟是什么状况。
+    pub user_token: UserTokenState,
+    /// 今天每个小时的请求数，下标就是钟点。空表示这次没有按小时的数据。
+    ///
+    /// 接口本来是按小时分桶的，所以这条曲线不是额外一次请求 —— 是同一份文档里已经在的东西。
+    pub hours: Vec<u32>,
+}
+
+/// 后端交回来的一样东西：一份账目，或者一句拒绝。
+#[derive(Debug, Clone)]
+pub enum DeepSeekAnswer {
+    /// 读到了。
+    Report(DeepSeekReport),
+    /// 没读到，原因在这句话里。
+    Refused {
+        /// 哪一类。
+        fault: DeepSeekFault,
+        /// 账号自己说的话，可能为空。
+        message: String,
+    },
+}
