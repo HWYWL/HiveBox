@@ -352,6 +352,13 @@ struct Shared {
 struct Inner {
     /// The machine the worker is watching, or `None` if it is watching nothing.
     config: Option<NasCredentials>,
+    /// Bumped every time the machine under the look changes — every [`EspNas::select`] and
+    /// [`EspNas::unselect`]. A look takes seconds, and whoever asked for it may have picked another
+    /// machine before it came back: the worker compares this number across its look and throws the
+    /// whole answer away when it moved, because a packet from the *old* machine is a packet about
+    /// somebody else — its numbers drawn under the new name are worse than no numbers at all, and so
+    /// is its failure.
+    generation: u64,
     /// A look has been asked for and not yet taken.
     requested: bool,
     /// The worker should stop. Never set in practice; the thread lives as long as the board.
@@ -533,6 +540,7 @@ impl EspNas {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             inner.config = Some(credentials.clone());
+            inner.generation = inner.generation.wrapping_add(1);
             inner.requested = true;
             inner.pending.clear();
             inner.fault = FAULT_NONE;
@@ -571,6 +579,7 @@ impl EspNas {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             inner.config = None;
+            inner.generation = inner.generation.wrapping_add(1);
             inner.requested = false;
             inner.pending.clear();
             inner.fault = FAULT_NONE;
@@ -818,7 +827,7 @@ fn run_worker(shared: Arc<Shared>) {
 
             inner.requested = false;
             inner.busy = true;
-            (config, twice)
+            (config, twice, inner.generation)
         };
 
         let outcome = look(&config, &mut inbuf, &mut outbuf, &shared, twice);
@@ -826,6 +835,15 @@ fn run_worker(shared: Arc<Shared>) {
 
         let mut inner = shared.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         inner.busy = false;
+
+        // The machine moved while this look was in the air — somebody picked another row. Nothing
+        // about the answer is about the machine being watched now: not its numbers and not its
+        // failure. Drop the lot and let the request that is already waiting for this thread have the
+        // next look.
+        if inner.generation != generation {
+            continue;
+        }
+
         match outcome {
             Ok(samples) => {
                 inner.fault = FAULT_NONE;

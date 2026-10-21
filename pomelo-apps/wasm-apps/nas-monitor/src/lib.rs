@@ -1006,14 +1006,18 @@ impl Monitor {
                 (icons::MEMORY, "内存", value)
             }
             2 => {
-                let whole = self.temperature / 100;
-                let frac = (self.temperature % 100).abs();
-                let value = if self.temperature == 0 {
+                // `i32::MIN` 是快照里「这一台答不出温度」的占位 —— 无特权的登录看不见传感器，
+                // 这是常事，不是零下两千万度。
+                let value = if self.temperature == i32::MIN {
                     "—"
-                } else if frac < 10 {
-                    format_into!(buffer, "{whole}.0{frac} C")
                 } else {
-                    format_into!(buffer, "{whole}.{frac} C")
+                    let whole = self.temperature / 100;
+                    let frac = (self.temperature % 100).abs();
+                    if frac < 10 {
+                        format_into!(buffer, "{whole}.0{frac} C")
+                    } else {
+                        format_into!(buffer, "{whole}.{frac} C")
+                    }
                 };
 
                 (icons::THERMOSTAT, "温度", value)
