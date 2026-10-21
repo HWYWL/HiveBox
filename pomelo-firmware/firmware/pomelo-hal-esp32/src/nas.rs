@@ -799,7 +799,7 @@ fn run_worker(shared: Arc<Shared>) {
         // A look is due if something asked for one, there is a machine to watch, and the clock since the
         // last look at *that* machine has run out. `twice` is whether this look is a machine's *first* one,
         // which is the one that asks the machine for two samples on one connection. See [`COMMAND_TWICE`].
-        let (config, twice) = {
+        let (config, twice, generation) = {
             let mut inner = shared.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
             let Some(config) = inner.config.clone() else {

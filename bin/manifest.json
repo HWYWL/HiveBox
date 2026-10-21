@@ -1,8 +1,8 @@
 {
-  "generated": "2026-10-21T02:43:02Z",
+  "generated": "2026-10-21T03:20:29Z",
   "firmware": {
-    "version": "v0.11.6-20261021",
-    "file": "hivebox-ota-v0.11.6-20261021.bin",
+    "version": "v0.11.7-20261021",
+    "file": "hivebox-ota-v0.11.7-20261021.bin",
     "size": 5790864,
     "sha256": "e0c978b3ba63941d40e520fb7e0a602d2ad4e9e89b79e3a79e47ba8cc438aad6"
   },
@@ -106,10 +106,10 @@
       "id": "nas-monitor",
       "name": "Server",
       "name_zh": "服务器",
-      "version": "v0.2.7",
-      "file": "hivebox-app-nas-monitor-v0.2.7.app",
-      "size": 39433,
-      "sha256": "3c076700572d71ae207af2451f3989f9d250eed93134ff307aacda4b659ede1f",
+      "version": "v0.2.8",
+      "file": "hivebox-app-nas-monitor-v0.2.8.app",
+      "size": 39421,
+      "sha256": "6aa3c669b5833551b13f060b41f10dba54f20a93b34779b85211bd1233017044",
       "abi": 1,
       "accent": "#705CF0",
       "description": "CPU、温度、内存、网络与磁盘，读数来自固件",
