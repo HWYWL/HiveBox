@@ -1,6 +1,6 @@
 # 纯 Rust 开发的 UI 框架和 UI 系统（ESP32-S3）
 
-> 当前版本：[`v0.7.0-20261014`](https://github.com/HWYWL/HiveBox/releases/latest) —— 版本号怎么读见下方「版本号规则」
+> 当前版本：[`v0.11.8-20261021`](https://github.com/HWYWL/HiveBox/releases/latest) —— 版本号怎么读见下方「版本号规则」
 
 ## 📖 项目简介
 
