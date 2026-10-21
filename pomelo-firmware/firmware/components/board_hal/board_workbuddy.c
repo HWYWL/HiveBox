@@ -78,6 +78,7 @@
 #include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
+#include "esp_timer.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -112,8 +113,11 @@ static const char *WB_USAGE_PATH   = "/billing/meter/get-user-resource";
 /** The socket's read buffer, and the one headers and the request body are written through. */
 #define WB_IO_CHUNK 2048
 
-/** What one answer may be. The activity document is a few hundred bytes; the rest is headroom. */
-#define WB_RESPONSE_MAX 8192
+/* 一份答案能有多长：签到的几百字节，用量的四十多 KB —— 那份文档每个资源一个对象，而一个用了
+ * 一年的账号有二十九个，每个对象都带着自己的字段名。它落在 PSRAM 上，那里有三兆空闲，所以给足
+ * 比「读到一半就算故障」便宜。 */
+/** What one answer may be. See the note above: the usage document is the long one. */
+#define WB_RESPONSE_MAX 98304
 
 /** The rendered answer: ten short lines. */
 #define WB_ANSWER_MAX 1024
@@ -942,7 +946,7 @@ static int32_t connection_fault(esp_err_t err)
  * decision.
  */
 static int32_t wb_session_call(wb_session_t *session, const char *path, const char *token,
-                               esp_http_client_method_t method, int *out_status)
+                               esp_http_client_method_t method, const char *body, int *out_status)
 {
     session->used = 0;
     session->out[0] = '\0';
@@ -972,14 +976,15 @@ static int32_t wb_session_call(wb_session_t *session, const char *path, const ch
     esp_http_client_set_method(session->client, method);
 
     if (method == HTTP_METHOD_POST) {
-        esp_http_client_set_post_field(session->client, "{}", 2);
+        const char *payload = (body != NULL) ? body : "{}";
+        esp_http_client_set_post_field(session->client, payload, (int)strlen(payload));
     }
 
     char url[160];
     snprintf(url, sizeof url, "%s%s", session->base, path);
     esp_http_client_set_url(session->client, url);
 
-    ESP_LOGI(TAG, "POST %s", path);
+    ESP_LOGI(TAG, "%s %s", method == HTTP_METHOD_GET ? "GET" : "POST", path);
 
     const esp_err_t err = esp_http_client_perform(session->client);
 
@@ -1024,6 +1029,27 @@ static int32_t wb_session_call(wb_session_t *session, const char *path, const ch
     return HAL_WORKBUDDY_FAULT_NONE;
 }
 
+/**
+ * One call with a body of its own, no retrying.
+ *
+ * `get-user-request-usage` is the only call here that takes a document rather than `{}`: a range of
+ * time and a page. It is asked from the probe below, because a page of it is tens of kilobytes and
+ * this board has no room to want many.
+ */
+static int32_t wb_fetch_body(const char *path, const char *token, const char *body, int *out_status)
+{
+    wb_session_t session;
+
+    if (!wb_session_open(&session, s_account.host)) {
+        return HAL_WORKBUDDY_FAULT_STORAGE;
+    }
+
+    const int32_t fault = wb_session_call(&session, path, token, HTTP_METHOD_POST, body, out_status);
+    wb_session_close(&session);
+
+    return fault;
+}
+
 static int32_t wb_fetch_retrying(const char *path, const char *token, int *out_status)
 {
     wb_session_t session;
@@ -1035,7 +1061,7 @@ static int32_t wb_fetch_retrying(const char *path, const char *token, int *out_s
     int32_t fault = HAL_WORKBUDDY_FAULT_NONE;
 
     for (int attempt = 1; attempt <= WB_TRIES; attempt++) {
-        fault = wb_session_call(&session, path, token, HTTP_METHOD_POST, out_status);
+        fault = wb_session_call(&session, path, token, HTTP_METHOD_POST, NULL, out_status);
 
         if (fault == HAL_WORKBUDDY_FAULT_NONE) {
             break;
@@ -1214,7 +1240,15 @@ static bool fetch_credits(double *out_remaining, double *out_total)
  * "uses", and it lags by two or three hours on the API's own side -- which is why the tile says
  * 「本月」 and not 「今天」.
  */
-static bool fetch_usage(long long *out_kinds, long long *out_uses)
+typedef struct {
+    long long kinds;   /** 有几种资源 */
+    long long uses;    /** 这个月用了多少次 */
+    long long live;    /** 还有余额的积分包有几个 */
+    char expire[16];   /** 最近一份到期日，`MM-DD` */
+    double expire_credit; /** 那一天到期多少分 */
+} wb_usage_t;
+
+static bool fetch_usage(wb_usage_t *out)
 {
     int status = 0;
     const int32_t fault = wb_fetch_retrying(WB_USAGE_PATH, s_account.token, &status);
@@ -1242,8 +1276,273 @@ static bool fetch_usage(long long *out_kinds, long long *out_uses)
         return false;
     }
 
-    *out_kinds = kinds;
-    *out_uses = uses;
+    out->kinds = kinds;
+    out->uses = uses;
+
+    /* 同一份文档里带着每个积分包的到期时间，顺手把「最近到期」挑出来：这是整页唯一一个会让人
+     * 动手的数字（分要过期了，今天该多用一点），而它不需要第三个请求。 */
+    const char *accounts = json_value(data, "Accounts");
+    const char *end = array_end(accounts);
+
+    /* 文档被截断时 `array_end` 找不到那个 `]`。截断不等于空：读到的那些对象照样算数，
+     * 所以尽头是缓冲区的尽头。 */
+    if (end == NULL && accounts != NULL) {
+        end = s_response + strlen(s_response);
+    }
+
+    out->live = 0;
+    out->expire[0] = '\0';
+    out->expire_credit = 0.0;
+
+    const char *at = accounts;
+
+    while (at != NULL && end != NULL && at < end) {
+        const char *remain_at = json_value(at, "CycleCapacityRemain");
+
+        if (remain_at == NULL || remain_at >= end) {
+            break;
+        }
+
+        double remain = 0.0;
+        json_decimal(remain_at, &remain);
+
+        if (remain > 0.0) {
+            out->live++;
+
+            const char *end_at = json_value(at, "CycleEndTime");
+            char stamp[32];
+
+            if (end_at != NULL && end_at < end && json_string(end_at, stamp, sizeof stamp) &&
+                strlen(stamp) >= 10) {
+                /* `2026-10-22 15:42:52` 这种串按字典序比就是按时间比。 */
+                if (out->expire[0] == '\0' || strcmp(stamp, out->expire) < 0) {
+                    snprintf(out->expire, sizeof out->expire, "%.5s", stamp + 5);
+                    out->expire_credit = remain;
+                }
+            }
+        }
+
+        at = remain_at + 1;
+    }
+
+    return true;
+}
+
+/**
+ * What today has cost so far, and how many requests it took.
+ *
+ * The billing document says one thing per request -- `credit`, `model`, `requestTime` -- and there is
+ * no total anywhere: the number a person wants has to be summed here. Two consequences worth
+ * knowing before reading the code:
+ *
+ *  - a page of this document is large, because each row also carries the prompt that produced it
+ *    (which this file never copies anywhere: only the three fields above are read);
+ *  - so it is asked in pages of `WB_TODAY_PAGE_SIZE`, at most `WB_TODAY_PAGES` of them, and it is
+ *    cached for `WB_TODAY_FRESH_MS`. A refresh every thirty seconds must not re-download a day's
+ *    worth of prompts every thirty seconds.
+ */
+typedef struct {
+    long long requests;
+    double credit;
+    char top_model[28];
+    double top_credit;
+} wb_today_t;
+
+/** How many request rows come back in one page. See the note above: they are big. */
+#define WB_TODAY_PAGE_SIZE 50
+
+/** How many pages a day is worth reading. Beyond this the number is a floor, not a total. */
+#define WB_TODAY_PAGES 4
+
+/** How long a day's total stays good enough to draw. */
+#define WB_TODAY_FRESH_MS (5 * 60 * 1000)
+
+static struct {
+    bool valid;
+    char day[12];
+    int64_t at_ms;
+    wb_today_t value;
+} s_today;
+
+/**
+ * The day the account bills in, as `YYYY-MM-DD`.
+ *
+ * Beijing +08:00, and not the board's own timezone: the request times come back as
+ * `2026-10-21 15:20:00` in the account's zone, so "today" has to be measured in that same one or the
+ * window is eight hours off.
+ */
+static void today_text(char *out, size_t capacity)
+{
+    const time_t now = time(NULL) + 8 * 3600;
+    struct tm tm;
+    char stamp[32];
+
+    if (capacity == 0) {
+        return;
+    }
+
+    if (gmtime_r(&now, &tm) == NULL) {
+        snprintf(stamp, sizeof stamp, "1970-01-01");
+    } else {
+        snprintf(stamp, sizeof stamp, "%04d-%02d-%02d", tm.tm_year + 1900, tm.tm_mon + 1,
+                 tm.tm_mday);
+    }
+
+    /* 手抄而不是再 snprintf 一次：一个 `%s` 往运行时长度的缓冲里写，编译器的
+     * -Wformat-truncation 会当成可能的截断而拒绝编译，而这里截断是有意的。 */
+    const size_t length = strlen(stamp);
+    const size_t take = (length < capacity - 1) ? length : capacity - 1;
+
+    memcpy(out, stamp, take);
+    out[take] = '\0';
+}
+
+/** Whether a model's name is one this file is willing to remember: ASCII, and short. */
+static void keep_model_name(const char *from, char *out, size_t capacity)
+{
+    out[0] = '\0';
+
+    if (from == NULL) {
+        return;
+    }
+
+    size_t used = 0;
+
+    for (const char *at = from; *at != '\0' && used + 1 < capacity; at++) {
+        if (*at < 0x20 || (unsigned char)*at > 0x7E) {
+            continue;
+        }
+        out[used++] = *at;
+    }
+
+    out[used] = '\0';
+}
+
+static bool fetch_today_usage(wb_today_t *out)
+{
+    char day[12];
+    today_text(day, sizeof day);
+
+    const int64_t now_ms = esp_timer_get_time() / 1000;
+
+    lock();
+    const bool fresh = s_today.valid && strcmp(s_today.day, day) == 0 &&
+                       (now_ms - s_today.at_ms) < WB_TODAY_FRESH_MS;
+    const wb_today_t cached = s_today.value;
+    unlock();
+
+    if (fresh) {
+        *out = cached;
+        return true;
+    }
+
+    long long requests = 0;
+    double credit = 0.0;
+    char top_model[28] = "";
+    double top_credit = 0.0;
+    long long total = -1;
+    bool answered = false;
+
+    for (int page = 1; page <= WB_TODAY_PAGES; page++) {
+        char body[224];
+        snprintf(body, sizeof body,
+                 "{\"startTime\":\"%s 00:00:00\",\"endTime\":\"%s 23:59:59\","
+                 "\"pageNum\":%d,\"pageSize\":%d}",
+                 day, day, page, WB_TODAY_PAGE_SIZE);
+
+        int status = 0;
+        const int32_t fault =
+            wb_fetch_body("/billing/meter/get-user-request-usage", s_account.token, body, &status);
+
+        if (fault != HAL_WORKBUDDY_FAULT_NONE || status < 200 || status >= 300) {
+            ESP_LOGW(TAG, "today's usage did not answer (%d)", status);
+            break;
+        }
+
+        const char *scope = account_scope(s_response);
+        long long rows_total = 0;
+
+        if (total < 0) {
+            json_number(json_value(scope, "total"), &total);
+        }
+
+        const char *rows = json_value(scope, "data");
+        const char *end = array_end(rows);
+
+        if (end == NULL && rows != NULL) {
+            end = s_response + strlen(s_response);
+        }
+
+        if (rows == NULL || end == NULL) {
+            break;
+        }
+
+        const char *at = rows;
+        long long in_page = 0;
+
+        while (at < end) {
+            const char *credit_at = json_value(at, "credit");
+            const char *model_at = json_value(at, "model");
+
+            if (credit_at == NULL || credit_at >= end) {
+                break;
+            }
+
+            double value = 0.0;
+            char model[28] = "";
+            char unquoted[48];
+
+            json_decimal(credit_at, &value);
+
+            if (json_string(model_at, unquoted, sizeof unquoted)) {
+                keep_model_name(unquoted, model, sizeof model);
+            }
+
+            credit += value;
+            requests++;
+            in_page++;
+
+            if (model[0] != '\0') {
+                /* 一个模型一行不出怪事就够了：这不是排行榜，是「今天主要花在哪个模型上」。 */
+                if (top_model[0] == '\0') {
+                    snprintf(top_model, sizeof top_model, "%s", model);
+                    top_credit = value;
+                } else if (strcmp(model, top_model) == 0) {
+                    top_credit += value;
+                }
+            }
+
+            at = credit_at + 1;
+        }
+
+        answered = true;
+
+        ESP_LOGI(TAG, "today page %d: %lld rows, %lld of %lld in total", page, in_page, requests,
+                 rows_total);
+
+        if (rows_total >= 0 && requests >= rows_total) {
+            break;
+        }
+        if (in_page < WB_TODAY_PAGE_SIZE) {
+            break;
+        }
+    }
+
+    if (!answered) {
+        return false;
+    }
+
+    out->requests = requests;
+    out->credit = credit;
+    snprintf(out->top_model, sizeof out->top_model, "%s", top_model);
+    out->top_credit = top_credit;
+
+    lock();
+    s_today.valid = true;
+    s_today.at_ms = now_ms;
+    snprintf(s_today.day, sizeof s_today.day, "%s", day);
+    s_today.value = *out;
+    unlock();
 
     return true;
 }
@@ -1294,8 +1593,6 @@ static void render_status(void)
     /* 两张表各一次请求，各自一格缓冲：拼答案的 `snprintf` 只认活得比它久的字符串。 */
     char remaining_text[16] = "";
     char total_text[16] = "";
-    char kinds_text[16] = "";
-    char uses_text[16] = "";
 
     double remaining = 0.0;
     double credit_total = 0.0;
@@ -1305,12 +1602,37 @@ static void render_status(void)
         snprintf(total_text, sizeof total_text, "%.1f", credit_total);
     }
 
-    long long kinds = 0;
-    long long uses = 0;
+    wb_usage_t usage = { 0 };
+    const bool have_usage = fetch_usage(&usage);
 
-    if (fetch_usage(&kinds, &uses)) {
-        snprintf(kinds_text, sizeof kinds_text, "%lld", kinds);
-        snprintf(uses_text, sizeof uses_text, "%lld", uses);
+    wb_today_t today = { 0 };
+    const bool have_today = fetch_today_usage(&today);
+
+    char today_requests_text[16] = "";
+    char today_credit_text[16] = "";
+    char today_model_text[40] = "";
+
+    if (have_today) {
+        snprintf(today_requests_text, sizeof today_requests_text, "%lld", today.requests);
+        snprintf(today_credit_text, sizeof today_credit_text, "%.1f", today.credit);
+        snprintf(today_model_text, sizeof today_model_text, "%s", today.top_model);
+    }
+
+    char kinds_text[16] = "";
+    char uses_text[16] = "";
+    char live_text[16] = "";
+    char expire_text[16] = "";
+    char expire_credit_text[16] = "";
+
+    if (have_usage) {
+        snprintf(kinds_text, sizeof kinds_text, "%lld", usage.kinds);
+        snprintf(uses_text, sizeof uses_text, "%lld", usage.uses);
+        snprintf(live_text, sizeof live_text, "%lld", usage.live);
+        snprintf(expire_text, sizeof expire_text, "%s", usage.expire);
+
+        if (usage.expire[0] != '\0') {
+            snprintf(expire_credit_text, sizeof expire_credit_text, "%.1f", usage.expire_credit);
+        }
     }
 
     const int made = snprintf(s_answer, WB_ANSWER_MAX,
@@ -1325,9 +1647,17 @@ static void render_status(void)
                               "credit_remaining=%s\n"
                               "credit_total=%s\n"
                               "usage_kinds=%s\n"
-                              "usage_calls=%s\n",
+                              "usage_calls=%s\n"
+                              "packages=%s\n"
+                              "expire=%s\n"
+                              "expire_credit=%s\n"
+                              "today_requests=%s\n"
+                              "today_credit=%s\n"
+                              "today_model=%s\n",
                               flag(checked_in), streak, daily, total, activity, access_days,
-                              refresh_days, remaining_text, total_text, kinds_text, uses_text);
+                              refresh_days, remaining_text, total_text, kinds_text, uses_text,
+                              live_text, expire_text, expire_credit_text, today_requests_text,
+                              today_credit_text, today_model_text);
 
     if (made < 0 || (size_t)made >= WB_ANSWER_MAX) {
         answer_fault(HAL_WORKBUDDY_FAULT_STORAGE);
@@ -1582,7 +1912,7 @@ esp_err_t hal_workbuddy_login_start(void)
         snprintf(path, sizeof path, "/v2/plugin/auth/state?platform=%s", WB_LOGIN_PLATFORMS[i]);
 
         int status = 0;
-        const int32_t fault = wb_session_call(&session, path, NULL, HTTP_METHOD_POST, &status);
+        const int32_t fault = wb_session_call(&session, path, NULL, HTTP_METHOD_POST, NULL, &status);
         wb_session_close(&session);
 
         last_status = status;
@@ -1660,7 +1990,7 @@ esp_err_t hal_workbuddy_login_poll(void)
     snprintf(path, sizeof path, "/v2/plugin/auth/token?state=%s", ticket);
 
     int status = 0;
-    const int32_t fault = wb_session_call(&session, path, NULL, HTTP_METHOD_GET, &status);
+    const int32_t fault = wb_session_call(&session, path, NULL, HTTP_METHOD_GET, NULL, &status);
     wb_session_close(&session);
 
     if (fault != HAL_WORKBUDDY_FAULT_NONE) {
@@ -1782,6 +2112,117 @@ void hal_workbuddy_login_cancel(void)
 // looks exactly like an account with nothing in it. `hal_workbuddy_probe` answers the raw body so
 // the guess can be checked instead of believed.
 // =============================================================================
+
+/**
+ * 删掉一个字符串字段和它的值。
+ *
+ * 逐请求流水里每条都带着整段提示词（`input` 是全文，`inputTrunc` 是前几百字）。那是用户自己的
+ * 东西，而这个页面在局域网上没有口令 —— 探针要的是形状，不是别人的对话。
+ */
+static void drop_field(char *text, const char *key)
+{
+    const size_t key_len = strlen(key);
+    char *at = text;
+
+    while ((at = strstr(at, key)) != NULL) {
+        char *colon = strchr(at + key_len, ':');
+
+        if (colon == NULL) {
+            return;
+        }
+
+        char *value = colon + 1;
+        while (*value == ' ' || *value == '\t') {
+            value++;
+        }
+
+        if (*value != '"') {
+            at += key_len;
+            continue;
+        }
+
+        char *end = value + 1;
+        while (*end != '\0' && *end != '"') {
+            if (*end == '\\' && end[1] != '\0') {
+                end++;
+            }
+            end++;
+        }
+
+        if (*end == '"') {
+            end++;
+        }
+        if (*end == ',') {
+            end++;
+        }
+
+        memmove(at, end, strlen(end) + 1);
+    }
+}
+
+esp_err_t hal_workbuddy_probe_requests(const char *day, int32_t page_size, int32_t page,
+                                       char *out, size_t capacity, size_t *out_length)
+{
+    if (out == NULL || capacity == 0 || day == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    out[0] = '\0';
+
+    if (out_length != NULL) {
+        *out_length = 0;
+    }
+
+    if (hal_workbuddy_init() != ESP_OK) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    lock();
+    const bool have_token = s_account.used && s_account.token[0] != '\0';
+    unlock();
+
+    if (!have_token) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    if (page_size <= 0) {
+        page_size = 3;
+    }
+    if (page <= 0) {
+        page = 1;
+    }
+
+    char body[192];
+    snprintf(body, sizeof body,
+             "{\"startTime\":\"%s 00:00:00\",\"endTime\":\"%s 23:59:59\","
+             "\"pageNum\":%d,\"pageSize\":%d}",
+             day, day, (int)page, (int)page_size);
+
+    int status = 0;
+    const int32_t fault =
+        wb_fetch_body("/billing/meter/get-user-request-usage", s_account.token, body, &status);
+
+    if (fault != HAL_WORKBUDDY_FAULT_NONE) {
+        return ESP_FAIL;
+    }
+
+    const size_t length = strlen(s_response);
+    const size_t take = (length < capacity - 1) ? length : capacity - 1;
+
+    memcpy(out, s_response, take);
+    out[take] = '\0';
+
+    /* 提示词不属于这条流水该被看见的部分。 */
+    drop_field(out, "\"inputTrunc\"");
+    drop_field(out, "\"input\"");
+    drop_field(out, "\"agentPurpose\"");
+
+    if (out_length != NULL) {
+        *out_length = strlen(out);
+    }
+
+    return ESP_OK;
+}
 
 esp_err_t hal_workbuddy_probe(int32_t which, char *out, size_t capacity, size_t *out_length)
 {

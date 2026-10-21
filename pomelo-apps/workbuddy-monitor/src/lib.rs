@@ -23,10 +23,11 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use iced::widget::{button, column, container, row, text, Space};
-use iced::{Border, Color, Element, Length, Subscription, Task, Theme};
+use iced::widget::{button, column, container, row, scrollable, text, Space};
+use iced::{Alignment, Border, Color, Element, Length, Subscription, Task, Theme};
 use pomelo_hal::types::{WorkBuddyAccount, WorkBuddyAnswer, WorkBuddyFault, WorkBuddyReport, WorkBuddyState};
 use pomelo_hal::Board;
+use pomelo_material_symbols::{self as icons, Icon};
 use pomelo_widgets::{Language, SystemPreferences, ThemeMode, FONT_BASE};
 
 /// 一次「今天签过了没」的问。
@@ -248,6 +249,9 @@ impl WorkBuddy {
     }
 
     /// 画出来。
+    ///
+    /// 一屏放得下就不再滚，放不下就滚 —— 这一页的内容从四行长到了三张卡，而面板的高度是别人
+    /// 定的。滚动条只在内容真的更长时出现，所以放得下的时候它和没有一样。
     pub fn view(&self) -> Element<'_, Message> {
         let theme = self.preferences.theme;
 
@@ -255,7 +259,8 @@ impl WorkBuddy {
 
         body = body.push(self.header(theme));
         body = body.push(self.checkin_card(theme));
-        body = body.push(self.panel_card(theme));
+        body = body.push(self.credits_card(theme));
+        body = body.push(self.facts_card(theme));
 
         if let Some(notice) = &self.notice {
             body = body.push(text(notice.text.as_str()).size(FONT_BASE * 0.82).style(
@@ -267,10 +272,9 @@ impl WorkBuddy {
 
         body = body.push(self.actions());
 
-        container(body)
+        scrollable(container(body).width(Length::Fill).padding(10))
             .width(Length::Fill)
             .height(Length::Fill)
-            .padding(14)
             .into()
     }
 
@@ -282,7 +286,7 @@ impl WorkBuddy {
             String::from("没有令牌 · 在网页上填 /api/workbuddy/token")
         };
 
-        let title = text("WorkBuddy").size(FONT_BASE * 1.3);
+        let title = text("WorkBuddy").size(FONT_BASE * 1.15);
 
         let mut head = row![title].spacing(8).align_y(iced::Alignment::Center);
         head = head.push(Space::new().width(Length::Fill));
@@ -313,69 +317,140 @@ impl WorkBuddy {
             None => (String::from("—"), String::from("还没读到")),
             Some(report) if report.checked_in_today => (
                 String::from("今天已签"),
-                format!("连续 {} 天 · 每天 {} 积分", report.streak_days, report.daily_credit),
+                format!(
+                    "连续 {} 天 · 每天 {} 积分 · 累计 {}",
+                    report.streak_days, report.daily_credit, report.activity_credits
+                ),
             ),
             Some(report) => (
                 String::from("今天还没签"),
-                format!("连续 {} 天 · 签到得 {} 积分", report.streak_days, report.daily_credit),
+                format!(
+                    "连续 {} 天 · 签到得 {} · 累计 {}",
+                    report.streak_days, report.daily_credit, report.activity_credits
+                ),
             ),
         };
 
-        let activity = self
-            .report
-            .as_ref()
-            .map(|report| report.activity.clone())
-            .filter(|name| !name.is_empty());
+        /* 签过的用一枚打勾，没签的用一份待办：这是整页唯一一个「今天做没做」的问题，图标先回答
+         * 一半，字再回答另一半。 */
+        let mark = if self.report.as_ref().is_some_and(|report| report.checked_in_today) {
+            Icon::CHECK_CIRCLE
+        } else {
+            Icon::EVENT_AVAILABLE
+        };
 
         let mut body = column![
-            text(value).size(FONT_BASE * 1.2),
-            text(detail)
-                .size(FONT_BASE * 0.85)
-                .style(move |theme: &Theme| iced::widget::text::Style {
-                    color: Some(muted(theme)),
-                }),
+            row![
+                icon(mark, FONT_BASE * 1.35, brand),
+                text(value).size(FONT_BASE * 1.2),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+            text(detail).size(FONT_BASE * 0.85).style(dim),
         ]
         .spacing(4);
-
-        if let Some(activity) = activity {
-            body = body.push(
-                text(activity)
-                    .size(FONT_BASE * 0.85)
-                    .style(move |theme: &Theme| iced::widget::text::Style {
-                        color: Some(muted(theme)),
-                    }),
-            );
-        }
 
         card(body.into(), theme)
     }
 
-    /// 积分与令牌：四行，一行一件事。
+    /// 积分：一个大的剩余数，一条剩余率，一句总额。
     ///
-    /// 合成一张卡而不是两张，是这块屏幕的高度决定的：四百三十点里挤着页头、两张卡和两个按钮，
-    /// 一张只有两行的卡就是给按钮挤出去的二十个像素。
-    fn panel_card(&self, theme: ThemeMode) -> Element<'_, Message> {
+    /// 原来这里是一行「剩余 / 总额」。两个数并排说的是同一件事的两头，却让人自己去做那道除法 ——
+    /// 一条按比例画出来的带子把这道除法做掉，剩下的是「还剩多少」这一个判断。
+    fn credits_card(&self, theme: ThemeMode) -> Element<'_, Message> {
         let report = self.report.as_ref();
 
-        let activity = report.map_or(0, |report| report.activity_credits);
+        let remaining = report.and_then(|report| report.credit_remaining);
+        let total = report.and_then(|report| report.credit_total);
 
-        /* 剩余与总额写一行：两个数说的是同一件事的两头，分两行占的是这块屏幕没有的高度。
-         *
-         * 一位小数，和一个破折号：接口给的是小数（2425.4 分），而没答上来的一格不能写成 0 ——
-         * 「没取到」和「用光了」是两句不同的话。 */
-        let credit = |whole: Option<f32>| match whole {
+        let one_decimal = |value: Option<f32>| match value {
             Some(value) => format!("{value:.1}"),
             None => String::from("—"),
         };
 
-        let balance = format!(
-            "{} / {}",
-            credit(report.and_then(|report| report.credit_remaining)),
-            credit(report.and_then(|report| report.credit_total))
-        );
+        let ratio = match (remaining, total) {
+            (Some(remaining), Some(total)) if total > 0.0 => (remaining / total).clamp(0.0, 1.0),
+            _ => 0.0,
+        };
 
-        let usage = match (report.and_then(|report| report.usage_kinds), report.and_then(|report| report.usage_calls)) {
-            (Some(kinds), Some(calls)) => format!("{kinds} 类 · {calls} 次"),
+        let percent = match (remaining, total) {
+            (Some(_), Some(total)) if total > 0.0 => format!("{:.0}%", ratio * 100.0),
+            _ => String::from("—"),
+        };
+
+        /* 一条带子的颜色是这三档里唯一一个会变的东西：用光了是红的，快用光了是黄的，其余是那个
+         * 绿。它变的不是数字，是让人抬眼就看见的那一下。 */
+        /* 本月那一行是 API 的 `TotalDosage`：它自己会滞后两三个小时，所以说的是「本月」，
+         * 不能冒充「今天」——今天的数在下一张卡里，是逐条数出来的。 */
+        let month = match (
+            report.and_then(|report| report.usage_kinds),
+            report.and_then(|report| report.usage_calls),
+        ) {
+            (Some(kinds), Some(calls)) => format!("本月 {kinds} 类 · {calls} 次"),
+            _ => String::new(),
+        };
+
+        let pigment: fn(&Theme) -> Color = if ratio < 0.08 {
+            danger
+        } else if ratio < 0.25 {
+            warn
+        } else {
+            brand
+        };
+
+        let body = column![
+            row![
+                icon(Icon::SAVINGS, FONT_BASE * 1.1, brand),
+                text(String::from("剩余积分"))
+                    .size(FONT_BASE * 0.9)
+                    .style(dim),
+                Space::new().width(Length::Fill),
+                text(percent).size(FONT_BASE * 0.85).style(dim),
+            ]
+            .align_y(Alignment::Center)
+            .spacing(6),
+            row![
+                text(one_decimal(remaining)).size(FONT_BASE * 1.75),
+                Space::new().width(Length::Fill),
+                text(format!("共 {}", one_decimal(total)))
+                    .size(FONT_BASE * 0.85)
+                    .style(dim),
+            ]
+            .align_y(Alignment::End),
+            bar(ratio, pigment),
+            text(month)
+                .size(FONT_BASE * 0.78)
+                .style(dim)
+                .width(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Right),
+        ]
+        .spacing(6);
+
+        card(body.into(), theme)
+    }
+
+    /// 三件事各一行：这个月用了多少、最近哪天到期、令牌还剩几天。
+    ///
+    /// 一行一件，且每行都有一个图标 —— 三行的名字都是四个字，没有图标的行读起来是一列等长的
+    /// 汉字，有图标的那一列一眼就能扫过去。
+    fn facts_card(&self, theme: ThemeMode) -> Element<'_, Message> {
+        let report = self.report.as_ref();
+
+        /* 今日是这一页唯一会变的数：请求数一次一次数出来，消耗是一个一个 credit 加出来的。
+         * 它的单位是「分」而不是 token —— 账号接口里只有 credit，没有 token。 */
+        let today = match (
+            report.and_then(|report| report.today_requests),
+            report.and_then(|report| report.today_credit),
+        ) {
+            (Some(requests), Some(credit)) => format!("{requests} 次 · {credit:.1} 分"),
+            (Some(requests), None) => format!("{requests} 次"),
+            (None, Some(credit)) => format!("{credit:.1} 分"),
+            _ => String::from("—"),
+        };
+
+        let expiry = match (report.map(|report| report.soonest_expiry.as_str()), report.and_then(|report| report.soonest_credit)) {
+            (Some(date), Some(credit)) if !date.is_empty() => format!("{date} · {credit:.0} 分"),
+            (Some(date), None) if !date.is_empty() => String::from(date),
             _ => String::from("—"),
         };
 
@@ -387,16 +462,16 @@ impl WorkBuddy {
         let access = days(report.and_then(|report| report.access_days_left));
         let refresh = days(report.and_then(|report| report.refresh_days_left));
 
-        /* 行名要活得比这一行久：`line` 借的是它，而临时值的借用活不到 `column!` 结束。 */
-        let token_label = format!("令牌 · 刷新 {refresh}");
-
         let body = column![
-            line(String::from("剩余 / 总额"), balance, theme),
-            line(String::from("活动累计"), activity.to_string(), theme),
-            line(String::from("本月用量"), usage, theme),
-            line(token_label, access, theme),
+            fact(Icon::INSIGHTS, String::from("今日消耗"), today),
+            fact(
+                Icon::CALENDAR_MONTH,
+                String::from("最近到期"),
+                expiry
+            ),
+            fact(Icon::KEY, format!("令牌 · 刷新 {refresh}"), access),
         ]
-        .spacing(5);
+        .spacing(7);
 
         card(body.into(), theme)
     }
@@ -408,15 +483,26 @@ impl WorkBuddy {
             .as_ref()
             .is_some_and(|report| report.checked_in_today);
 
+        let label = |glyph: Icon, name: &'static str| {
+            row![
+                icon(glyph, FONT_BASE * 0.95, brand),
+                text(name).size(FONT_BASE * 0.95),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center)
+        };
+
         let checkin = if signed {
-            button(text("已签到").size(FONT_BASE * 0.95)).padding([9, 16]).style(button::secondary)
+            button(label(Icon::CHECK, "已签到"))
+                .padding([9, 16])
+                .style(button::secondary)
         } else {
-            button(text("签到").size(FONT_BASE * 0.95))
+            button(label(Icon::REDEEM, "签到"))
                 .padding([9, 16])
                 .on_press(Message::Checkin)
         };
 
-        let refresh = button(text("重读").size(FONT_BASE * 0.95))
+        let refresh = button(label(Icon::REFRESH, "重读"))
             .padding([9, 16])
             .style(button::secondary)
             .on_press(Message::Refresh);
@@ -437,30 +523,95 @@ impl Default for WorkBuddy {
     }
 }
 
-/// 一行「名字 …… 值」。
+/// 一行「图标 名字 …… 值」。
 ///
 /// 名字是 `String` 而不是 `&str`：其中一行是拼出来的（「令牌 · 刷新 29 天」），而一个借来的名字
 /// 活不过这一行自己的作用域。
-fn line<'a>(label: String, value: String, _theme: ThemeMode) -> Element<'a, Message> {
+fn fact<'a>(glyph: Icon, label: String, value: String) -> Element<'a, Message> {
     row![
-        text(label)
-            .size(FONT_BASE * 0.95)
-            .style(|theme: &Theme| iced::widget::text::Style {
-                color: Some(muted(theme)),
-            }),
+        icon(glyph, FONT_BASE * 0.95, dim_pigment),
+        text(label).size(FONT_BASE * 0.9).style(dim),
         Space::new().width(Length::Fill),
-        text(value).size(FONT_BASE * 1.05),
+        text(value).size(FONT_BASE * 1.0),
     ]
     .width(Length::Fill)
-    .align_y(iced::Alignment::Center)
+    .align_y(Alignment::Center)
+    .spacing(6)
     .into()
+}
+
+/// 一个 Material 符号，按给定颜色画。
+fn icon<'a>(glyph: Icon, size: f32, pigment: fn(&Theme) -> Color) -> Element<'a, Message> {
+    text(glyph.glyph())
+        .font(icons::font())
+        .size(size)
+        .style(move |theme: &Theme| iced::widget::text::Style {
+            color: Some(pigment(theme)),
+        })
+        .into()
+}
+
+/// 一条剩余率的带子：左边是还在的，右边是已经用掉的。
+///
+/// 两段宽度按 `FillPortion` 分，所以它自己会跟着面板的宽度伸缩 —— 这一页没有一处写死了像素宽。
+fn bar<'a>(ratio: f32, pigment: fn(&Theme) -> Color) -> Element<'a, Message> {
+    let filled = ((ratio.clamp(0.0, 1.0)) * 100.0).round().clamp(1.0, 100.0) as u16;
+    let rest = 100u16.saturating_sub(filled).max(1);
+
+    fn end(color: Color) -> container::Style {
+        container::Style {
+            background: Some(color.into()),
+            border: Border {
+                radius: 3.0.into(),
+                ..Border::default()
+            },
+            ..container::Style::default()
+        }
+    }
+
+    row![
+        container(Space::new())
+            .width(Length::FillPortion(filled))
+            .height(6)
+            .style(move |theme: &Theme| end(pigment(theme))),
+        container(Space::new())
+            .width(Length::FillPortion(rest))
+            .height(6)
+            .style(|theme: &Theme| end(theme.extended_palette().background.strong.color)),
+    ]
+    .spacing(0)
+    .height(6)
+    .width(Length::Fill)
+    .into()
+}
+
+/// 次要文字用的一套样式，省得每一行都写一遍闭包。
+fn dim(theme: &Theme) -> iced::widget::text::Style {
+    iced::widget::text::Style {
+        color: Some(muted(theme)),
+    }
+}
+
+/// 次要图标的颜色。
+fn dim_pigment(theme: &Theme) -> Color {
+    muted(theme)
+}
+
+/// WorkBuddy 那个标志的绿：磁贴的底色是它，这一页的高亮也是它。
+fn brand(_theme: &Theme) -> Color {
+    Color::from_rgb8(36, 190, 143)
+}
+
+/// 「快用完了」。
+fn warn(_theme: &Theme) -> Color {
+    Color::from_rgb8(230, 160, 40)
 }
 
 /// 一张卡片：一块底色，一道细边。
 fn card<'a>(body: Element<'a, Message>, _theme: ThemeMode) -> Element<'a, Message> {
     container(body)
         .width(Length::Fill)
-        .padding(9)
+        .padding(8)
         .style(|theme: &Theme| {
             let palette = theme.extended_palette();
 

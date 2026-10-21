@@ -2711,17 +2711,28 @@ static esp_err_t run_login_job(int32_t kind)
 
 /* 一句「接口到底说了什么」，原样。两个文档的字段名是照着别人的客户端抄的，抄错一个字母看起来
  * 就像「这个账号什么都没有」，所以这里留一个能看见原话的口子。一样走 worker：TLS 握手。 */
+/* 这个缓冲是 static，就是内部 RAM —— 它只能是几 KB，多了板子起不来（试过 96 KB）。
+ * 它只是把接口的开头给人看一眼形状用的，长的在 oard_workbuddy.c 的 PSRAM 缓冲里。 */
 #define WEB_WORKBUDDY_RAW_MAX 8192
 
 static char s_raw_body[WEB_WORKBUDDY_RAW_MAX];
 static volatile bool s_raw_done = false;
 static int32_t s_raw_which = 0;
+static char s_raw_day[24] = "";
+static int32_t s_raw_size = 3;
+static int32_t s_raw_page = 1;
 
 static void wb_raw_task(void *arg)
 {
     (void)arg;
 
-    hal_workbuddy_probe(s_raw_which, s_raw_body, sizeof s_raw_body, NULL);
+    if (s_raw_which == 3) {
+        hal_workbuddy_probe_requests(s_raw_day, s_raw_size, s_raw_page, s_raw_body,
+                                     sizeof s_raw_body, NULL);
+    } else {
+        hal_workbuddy_probe(s_raw_which, s_raw_body, sizeof s_raw_body, NULL);
+    }
+
     s_raw_done = true;
 
     vTaskDelete(NULL);
@@ -2738,6 +2749,26 @@ static esp_err_t handle_workbuddy_raw(httpd_req_t *req)
         s_raw_which = 1;
     } else if (strcmp(which, "usage") == 0) {
         s_raw_which = 2;
+    } else if (strcmp(which, "requests") == 0) {
+        s_raw_which = 3;
+
+        char day[24];
+        if (!query_string(req, "day", day, sizeof day)) {
+            snprintf(day, sizeof day, "1970-01-01");
+        }
+        snprintf(s_raw_day, sizeof s_raw_day, "%s", day);
+
+        char size[12];
+        s_raw_size = 3;
+        if (query_string(req, "size", size, sizeof size)) {
+            s_raw_size = atoi(size);
+        }
+
+        char page[12];
+        s_raw_page = 1;
+        if (query_string(req, "page", page, sizeof page)) {
+            s_raw_page = atoi(page);
+        }
     } else {
         s_raw_which = 0;
     }

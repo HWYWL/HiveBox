@@ -1290,6 +1290,18 @@ void hal_workbuddy_login_cancel(void);
  */
 esp_err_t hal_workbuddy_probe(int32_t which, char *out, size_t capacity, size_t *out_length);
 
+/** @brief One page of the account's per-request usage for a single day, unparsed.
+ *
+ * The document is tens of kilobytes per page (one object per request), which is why it is a probe
+ * and not something the page draws: it exists to answer whether the numbers a token statistic would
+ * need are in there at all.
+ *
+ * @param day       `YYYY-MM-DD`, the local day the account bills in.
+ * @param page_size how many requests to ask for; 3 is enough to read the shape.
+ */
+esp_err_t hal_workbuddy_probe_requests(const char *day, int32_t page_size, int32_t page,
+                                       char *out, size_t capacity, size_t *out_length);
+
 /* ---------------------------------------------------------------------------
  * Log ring.
  *

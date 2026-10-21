@@ -15,6 +15,12 @@
 //! credit_total=3000.0
 //! usage_kinds=4
 //! usage_calls=87
+//! packages=3
+//! expire=10-22
+//! expire_credit=2200.0
+//! today_requests=40
+//! today_credit=97.4
+//! today_model=deepseek-v4.1-flash
 //! ```
 //!
 //! and a failure as `error=workbuddy_auth`, with `message=` when the account wrote a sentence.
@@ -66,6 +72,18 @@ pub fn parse(document: &str) -> WorkBuddyAnswer {
             "credit_remaining" => report.credit_remaining = decimal(value),
             "credit_total" => report.credit_total = decimal(value),
             "usage_kinds" => report.usage_kinds = number(value),
+            "packages" => report.live_packages = number(value),
+            "expire" => {
+                report.soonest_expiry.clear();
+                report.soonest_expiry.push_str(value.trim());
+            }
+            "expire_credit" => report.soonest_credit = decimal(value),
+            "today_requests" => report.today_requests = number(value),
+            "today_credit" => report.today_credit = decimal(value),
+            "today_model" => {
+                report.today_model.clear();
+                report.today_model.push_str(value.trim());
+            }
             "usage_calls" => report.usage_calls = number(value),
             "credited" => report.credited = number(value),
             "already" => report.already_checked_in = value == "1",

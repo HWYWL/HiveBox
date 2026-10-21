@@ -1808,9 +1808,30 @@ pub struct WorkBuddyReport {
     pub credit_total: Option<f32>,
     /// How many kinds of resource the account has spent on (`get-user-resource`'s `TotalCount`).
     pub usage_kinds: Option<u32>,
+    /// How many of the account's credit packages still have something in them.
+    pub live_packages: Option<u32>,
+    /// The soonest date anything on this account expires, as the API wrote it -- `MM-DD`.
+    ///
+    /// Empty when no package said. It is a string and not a date because it is drawn as one, and
+    /// because turning `2026-10-22 15:42:52` into a number of days is a clock this page does not
+    /// have to keep.
+    pub soonest_expiry: String,
+    /// How much of the balance goes away on [`WorkBuddyReport::soonest_expiry`].
+    pub soonest_credit: Option<f32>,
     /// How many uses this month (`TotalDosage`). The API lags by two or three hours on its own side,
     /// which is why a page says 「本月」 and never 「今天」.
     pub usage_calls: Option<u32>,
+    /// How many requests the account has made today, counted one by one.
+    ///
+    /// `get-user-request-usage` says one row per request and never says a total, so the board sums
+    /// them itself -- which is why this is a floor on a very busy day: the board reads at most a
+    /// few pages of it.
+    pub today_requests: Option<u32>,
+    /// What those requests have cost, in credits. The same document, the same rows, the `credit`
+    /// field added up: it is the only place a *daily* figure exists, since `TotalDosage` is a month.
+    pub today_credit: Option<f32>,
+    /// The model most of today's credits went to, as the API names it.
+    pub today_model: String,
     /// What a check-in just gave, when the answer came from one.
     pub credited: Option<u32>,
     /// The check-in had already happened today — the API's `10001`, which is not a failure.
