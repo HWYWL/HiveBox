@@ -1235,6 +1235,51 @@ esp_err_t hal_workbuddy_credentials_set(const char *token, const char *refresh, 
 esp_err_t hal_workbuddy_credentials_forget(void);
 
 /* ---------------------------------------------------------------------------
+ * Signing in without typing anything
+ *
+ * The App's own sign-in, driven from here: ask for a `state`, hand the `authUrl` back
+ * so somebody can open it, and poll until the account answers with a token. A bearer
+ * token is two kilobytes -- this is the only way one arrives without a keyboard.
+ * ------------------------------------------------------------------------- */
+
+#define HAL_WORKBUDDY_LOGIN_IDLE    0
+#define HAL_WORKBUDDY_LOGIN_WAITING 1   /** 链接已经给出，等人在浏览器里授权 */
+#define HAL_WORKBUDDY_LOGIN_DONE    2   /** 令牌拿到了，也写进文件了 */
+#define HAL_WORKBUDDY_LOGIN_FAILED  (-1)
+
+/** @brief Ask the account for a sign-in link.
+ *
+ * Blocking, one round trip. The `authUrl` is then read with `hal_workbuddy_login_url` and
+ * shown; the account waits for a person, which is why this is not the same call as the poll.
+ *
+ * @return ESP_OK, ESP_ERR_INVALID_STATE (no network, or a request in flight),
+ *         ESP_ERR_NOT_FOUND (no platform answered), or ESP_ERR_NO_MEM.
+ */
+esp_err_t hal_workbuddy_login_start(void);
+
+/** @brief Ask once whether the person has authorised yet. Blocking, one round trip.
+ *
+ * @return ESP_OK when the token arrived and was saved, ESP_ERR_NOT_FINISHED while the
+ *         account is still waiting, ESP_ERR_INVALID_STATE when no sign-in is in flight,
+ *         ESP_ERR_TIMEOUT when the wire did not answer (ask again), or
+ *         ESP_ERR_INVALID_RESPONSE when the account refused -- the reason is in
+ *         `hal_workbuddy_login_message`.
+ */
+esp_err_t hal_workbuddy_login_poll(void);
+
+/** @brief `HAL_WORKBUDDY_LOGIN_*`. */
+int32_t hal_workbuddy_login_state(void);
+
+/** @brief The sign-in link, copied out. Returns its length. */
+size_t hal_workbuddy_login_url(char *out, size_t capacity);
+
+/** @brief The account's own refusal, when there was one. Returns its length. */
+size_t hal_workbuddy_login_message(char *out, size_t capacity);
+
+/** @brief Abandon a sign-in that is waiting. */
+void hal_workbuddy_login_cancel(void);
+
+/* ---------------------------------------------------------------------------
  * Log ring.
  *
  * The last `HAL_LOG_LINES` lines every `ESP_LOGx` wrote, kept in a ring so the page can show them.

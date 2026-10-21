@@ -772,22 +772,38 @@ static int32_t connection_fault(esp_err_t err)
  * decision.
  */
 static int32_t wb_session_call(wb_session_t *session, const char *path, const char *token,
-                               int *out_status)
+                               esp_http_client_method_t method, int *out_status)
 {
-    char authorization[HAL_WORKBUDDY_TOKEN_MAX + 16];
-    snprintf(authorization, sizeof authorization, "Bearer %s", token);
-
     session->used = 0;
     session->out[0] = '\0';
     session->overflowed = false;
 
-    esp_http_client_set_header(session->client, "Authorization", authorization);
+    /* 授权之前没有令牌可带，带上空的那个反而被网关当成「有凭证但不合法」。 */
+    if (token != NULL && token[0] != '\0') {
+        char authorization[HAL_WORKBUDDY_TOKEN_MAX + 16];
+        snprintf(authorization, sizeof authorization, "Bearer %s", token);
+        esp_http_client_set_header(session->client, "Authorization", authorization);
+    } else {
+        esp_http_client_set_header(session->client, "Authorization", NULL);
+        esp_http_client_set_header(session->client, "X-No-Authorization", "true");
+        esp_http_client_set_header(session->client, "X-No-User-Id", "true");
+        esp_http_client_set_header(session->client, "X-No-Enterprise-Id", "true");
+        esp_http_client_set_header(session->client, "X-No-Department-Info", "true");
+    }
+
     esp_http_client_set_header(session->client, "Content-Type", "application/json; charset=utf-8");
     esp_http_client_set_header(session->client, "Accept", "application/json");
     /* The client's own agent: the account API is the one place that looks at it. */
-    esp_http_client_set_header(session->client, "User-Agent", "WorkBuddy/0.0.0");
+    esp_http_client_set_header(session->client, "User-Agent", "WorkBuddy/5.4.2");
     esp_http_client_set_header(session->client, "X-Product", "SaaS");
-    esp_http_client_set_post_field(session->client, "{}", 2);
+    esp_http_client_set_header(session->client, "X-Domain", s_account.host[0] != '\0'
+                                                            ? s_account.host
+                                                            : WB_DEFAULT_HOST);
+    esp_http_client_set_method(session->client, method);
+
+    if (method == HTTP_METHOD_POST) {
+        esp_http_client_set_post_field(session->client, "{}", 2);
+    }
 
     char url[160];
     snprintf(url, sizeof url, "%s%s", session->base, path);
@@ -849,7 +865,7 @@ static int32_t wb_fetch_retrying(const char *path, const char *token, int *out_s
     int32_t fault = HAL_WORKBUDDY_FAULT_NONE;
 
     for (int attempt = 1; attempt <= WB_TRIES; attempt++) {
-        fault = wb_session_call(&session, path, token, out_status);
+        fault = wb_session_call(&session, path, token, HTTP_METHOD_POST, out_status);
 
         if (fault == HAL_WORKBUDDY_FAULT_NONE) {
             break;
@@ -1285,6 +1301,284 @@ static void wb_task(void *arg)
     wb_request();
 
     vTaskDelete(NULL);
+}
+
+// =============================================================================
+// Signing in: the device-authorisation flow
+// -----------------------------------------------------------------------------
+// This is the answer to "nobody is going to type two kilobytes on that panel", and it is the
+// App's own sign-in, watched from the outside:
+//
+//     POST /v2/plugin/auth/state?platform=workbuddy-ai  ->  {data:{state, authUrl}}
+//     (a person opens authUrl and authorises -- the QR the App draws is that URL)
+//     GET  /v2/plugin/auth/token?state=<state>          ->  11217 while waiting,
+//                                                          {data:{accessToken, refreshToken}} after
+//
+// The URL is carried back to whoever asked, so it can be shown as a link or as a QR; the polling is
+// a separate call because a person takes ten seconds or a minute, and no HTTP handler here is going
+// to sit on that.
+// =============================================================================
+
+/** How long the URL may be. `authUrl` is a sign-in redirect with a state in it: a few hundred. */
+#define WB_LOGIN_URL_MAX 768
+
+/** The `state` that ties the two calls together. */
+#define WB_LOGIN_STATE_MAX 128
+
+/** The API's "still waiting for the person" code. */
+#define WB_CODE_WAITING 11217
+
+static struct {
+    int32_t state;
+    char state_token[WB_LOGIN_STATE_MAX];
+    char url[WB_LOGIN_URL_MAX];
+    char message[192];
+} s_login = { .state = HAL_WORKBUDDY_LOGIN_IDLE };
+
+/** The platforms this API has answered on, in the order they are tried. */
+static const char *const WB_LOGIN_PLATFORMS[] = { "workbuddy-ai", "workbuddy", "codebuddy" };
+
+/** The host a token is being asked for. The account's own, or the default. */
+static const char *login_host(void)
+{
+    return (s_account.host[0] != '\0') ? s_account.host : WB_DEFAULT_HOST;
+}
+
+static void login_reset(int32_t state, const char *message)
+{
+    lock();
+    s_login.state = state;
+    snprintf(s_login.message, sizeof s_login.message, "%s", message != NULL ? message : "");
+    if (state != HAL_WORKBUDDY_LOGIN_DONE) {
+        s_login.url[0] = '\0';
+    }
+    unlock();
+}
+
+esp_err_t hal_workbuddy_login_start(void)
+{
+    if (hal_workbuddy_init() != ESP_OK) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    if (!network_is_up()) {
+        login_reset(HAL_WORKBUDDY_LOGIN_FAILED, "network");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    lock();
+    if (s_snap.busy) {
+        unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_snap.busy = true;
+    unlock();
+
+    esp_err_t result = ESP_ERR_NOT_FOUND;
+    int last_status = 0;
+
+    for (size_t i = 0; i < sizeof WB_LOGIN_PLATFORMS / sizeof WB_LOGIN_PLATFORMS[0]; i++) {
+        wb_session_t session;
+
+        if (!wb_session_open(&session, login_host())) {
+            result = ESP_ERR_NO_MEM;
+            break;
+        }
+
+        char path[96];
+        snprintf(path, sizeof path, "/v2/plugin/auth/state?platform=%s", WB_LOGIN_PLATFORMS[i]);
+
+        int status = 0;
+        const int32_t fault = wb_session_call(&session, path, NULL, HTTP_METHOD_POST, &status);
+        wb_session_close(&session);
+
+        last_status = status;
+
+        if (fault != HAL_WORKBUDDY_FAULT_NONE) {
+            continue;
+        }
+
+        const char *data = account_scope(s_response);
+        char state[WB_LOGIN_STATE_MAX];
+        char url[WB_LOGIN_URL_MAX];
+
+        if (!json_string(json_value(data, "state"), state, sizeof state) ||
+            !json_string(json_value(data, "authUrl"), url, sizeof url)) {
+            continue;
+        }
+
+        lock();
+        snprintf(s_login.state_token, sizeof s_login.state_token, "%s", state);
+        snprintf(s_login.url, sizeof s_login.url, "%s", url);
+        s_login.state = HAL_WORKBUDDY_LOGIN_WAITING;
+        s_login.message[0] = '\0';
+        unlock();
+
+        result = ESP_OK;
+        break;
+    }
+
+    if (result != ESP_OK) {
+        char message[64];
+        snprintf(message, sizeof message, "auth/state answered %d", last_status);
+        login_reset(HAL_WORKBUDDY_LOGIN_FAILED, message);
+    }
+
+    lock();
+    s_snap.busy = false;
+    unlock();
+
+    return result;
+}
+
+esp_err_t hal_workbuddy_login_poll(void)
+{
+    if (hal_workbuddy_init() != ESP_OK) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    lock();
+    const int32_t state = s_login.state;
+    char ticket[WB_LOGIN_STATE_MAX];
+    snprintf(ticket, sizeof ticket, "%s", s_login.state_token);
+
+    if (state != HAL_WORKBUDDY_LOGIN_WAITING) {
+        unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_snap.busy) {
+        unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_snap.busy = true;
+    unlock();
+
+    esp_err_t result = ESP_OK;
+    wb_session_t session;
+
+    if (!wb_session_open(&session, login_host())) {
+        lock();
+        s_snap.busy = false;
+        unlock();
+        return ESP_ERR_NO_MEM;
+    }
+
+    char path[WB_LOGIN_STATE_MAX + 32];
+    snprintf(path, sizeof path, "/v2/plugin/auth/token?state=%s", ticket);
+
+    int status = 0;
+    const int32_t fault = wb_session_call(&session, path, NULL, HTTP_METHOD_GET, &status);
+    wb_session_close(&session);
+
+    if (fault != HAL_WORKBUDDY_FAULT_NONE) {
+        /* 「没答上来」不是「登录失败」：人可能还在扫码，网也可能刚断了一下。下一次再问。 */
+        lock();
+        s_snap.busy = false;
+        unlock();
+        return ESP_ERR_TIMEOUT;
+    }
+
+    const char *data = account_scope(s_response);
+
+    /* Static, because two kilobytes twice over is the whole of a worker's stack and the handshake
+     * that happens above has to stand somewhere. Only one sign-in runs at a time -- `s_login_job_live`
+     * in `board_web.c` is what makes that true -- so there is nobody to race with. */
+    static char token[HAL_WORKBUDDY_TOKEN_MAX];
+    static char refresh[HAL_WORKBUDDY_REFRESH_MAX];
+
+    if (!json_string(json_value(data, "accessToken"), token, sizeof token)) {
+        long long code = -1;
+        json_number(json_value(s_response, "code"), &code);
+
+        if (code == WB_CODE_WAITING || code == WB_CODE_OK || code == -1) {
+            lock();
+            s_snap.busy = false;
+            unlock();
+            return ESP_ERR_NOT_FINISHED;
+        }
+
+        char message[160];
+        if (!json_string(json_value(s_response, "msg"), message, sizeof message)) {
+            snprintf(message, sizeof message, "code %lld", code);
+        }
+
+        login_reset(HAL_WORKBUDDY_LOGIN_FAILED, message);
+        result = ESP_ERR_INVALID_RESPONSE;
+    } else {
+        if (!json_string(json_value(data, "refreshToken"), refresh, sizeof refresh)) {
+            refresh[0] = '\0';
+        }
+
+        lock();
+        memset(&s_account, 0, sizeof s_account);
+        s_account.used = true;
+        snprintf(s_account.token, sizeof s_account.token, "%s", token);
+        snprintf(s_account.refresh, sizeof s_account.refresh, "%s", refresh);
+        snprintf(s_account.host, sizeof s_account.host, "%s", login_host());
+        unlock();
+
+        const esp_err_t stored = wb_store();
+
+        login_reset(HAL_WORKBUDDY_LOGIN_DONE,
+                    stored == ESP_OK ? "" : esp_err_to_name(stored));
+        ESP_LOGI(TAG, "signed in; the token is %s", stored == ESP_OK ? "saved" : "not saved");
+
+        result = stored;
+    }
+
+    lock();
+    s_snap.busy = false;
+    unlock();
+
+    return result;
+}
+
+int32_t hal_workbuddy_login_state(void)
+{
+    lock();
+    const int32_t state = s_login.state;
+    unlock();
+
+    return state;
+}
+
+size_t hal_workbuddy_login_url(char *out, size_t capacity)
+{
+    if (out == NULL || capacity == 0) {
+        return 0;
+    }
+
+    lock();
+    const size_t length = strlen(s_login.url);
+    const size_t take = (length < capacity) ? length : capacity - 1;
+    memcpy(out, s_login.url, take);
+    unlock();
+
+    out[take] = '\0';
+
+    return take;
+}
+
+size_t hal_workbuddy_login_message(char *out, size_t capacity)
+{
+    if (out == NULL || capacity == 0) {
+        return 0;
+    }
+
+    lock();
+    const size_t length = strlen(s_login.message);
+    const size_t take = (length < capacity) ? length : capacity - 1;
+    memcpy(out, s_login.message, take);
+    unlock();
+
+    out[take] = '\0';
+
+    return take;
+}
+
+void hal_workbuddy_login_cancel(void)
+{
+    login_reset(HAL_WORKBUDDY_LOGIN_IDLE, "");
 }
 
 // =============================================================================

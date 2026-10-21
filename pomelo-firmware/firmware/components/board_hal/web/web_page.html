@@ -791,6 +791,27 @@ textarea.code.wrap { white-space: pre-wrap; word-break: break-word; }
 
   <section id="view-workbuddy" hidden>
     <div class="group">
+      <div class="group-title">登录</div>
+      <div class="card" style="padding:14px">
+        <div id="wbLoginIdle">
+          <div class="row-meta" style="text-align:left">
+            用你自己的账号授权一次，令牌就写进板子里了 —— 不用去翻那串两 KB 的字符。
+          </div>
+          <div class="bar-actions" style="padding:12px 0 0;margin:0">
+            <button class="btn primary" id="wbLogin">授权登录</button>
+          </div>
+        </div>
+        <div id="wbLoginWait" hidden>
+          <div class="row-meta" style="text-align:left">
+            在手机上打开这个链接（或把它做成二维码扫），用你的 WorkBuddy 账号确认授权：
+          </div>
+          <a id="wbLoginUrl" href="#" target="_blank" rel="noopener"
+             style="display:block;margin-top:8px;word-break:break-all;color:var(--blue)"></a>
+          <div class="row-meta" id="wbLoginState" style="margin-top:10px;text-align:left">等待授权…</div>
+        </div>
+      </div>
+    </div>
+    <div class="group">
       <div class="group-title">令牌</div>
       <div class="card" style="padding:14px">
         <div id="wbSavedView" hidden>
@@ -3999,6 +4020,46 @@ async function loadWorkbuddy() {
     $("wbOut").textContent = error.message;
   }
 }
+
+/* The sign-in: one link, then a poll every two seconds. The person on the other end is reading a
+   login screen, and that takes as long as it takes -- nothing here blocks on it. */
+let wbLoginTimer = null;
+
+async function wbPollLogin() {
+  clearTimeout(wbLoginTimer);
+  try {
+    const data = await api("/api/workbuddy/login", { action: "poll" }, "POST");
+    if (data.done) {
+      $("wbLoginState").textContent = "已登录，令牌写进设备了";
+      toast("已登录", "ok");
+      $("wbLoginWait").hidden = true;
+      $("wbLoginIdle").hidden = false;
+      loadWorkbuddy();
+      return;
+    }
+    $("wbLoginState").textContent = data.message || "等待授权…";
+  } catch (error) {
+    $("wbLoginState").textContent = error.message;
+  }
+  wbLoginTimer = setTimeout(wbPollLogin, 2000);
+}
+
+$("wbLogin").onclick = async () => {
+  $("wbLoginState").textContent = "正在申请授权链接…";
+  $("wbLoginIdle").hidden = true;
+  $("wbLoginWait").hidden = false;
+  try {
+    const data = await api("/api/workbuddy/login", { action: "start" }, "POST");
+    const link = $("wbLoginUrl");
+    link.textContent = data.url;
+    link.href = data.url;
+    $("wbLoginState").textContent = "等待授权…";
+    wbPollLogin();
+  } catch (error) {
+    $("wbLoginState").textContent = error.message;
+    $("wbLoginIdle").hidden = false;
+  }
+};
 
 $("wbSave").onclick = async () => {
   const token = $("wbToken").value.trim();

@@ -2654,6 +2654,127 @@ static esp_err_t handle_workbuddy_answer(httpd_req_t *req)
     return ret;
 }
 
+/* 两半登录各要一次 TLS 握手，而握手要的栈比一个 HTTP 处理线程多：交给和数据请求同一个
+ * 8 KB 的 worker，在这里等它 —— 等的是一次往返，从来不是「人在扫码」的那几十秒。 */
+typedef struct {
+    int32_t kind;          /* 0 = start, 1 = poll */
+    esp_err_t result;
+    volatile bool done;
+} wb_login_job_t;
+
+static wb_login_job_t s_login_job;
+static volatile bool s_login_job_live = false;
+
+static void wb_login_job_run(void *arg)
+{
+    wb_login_job_t *job = (wb_login_job_t *)arg;
+
+    job->result = (job->kind == 0) ? hal_workbuddy_login_start() : hal_workbuddy_login_poll();
+    job->done = true;
+    s_login_job_live = false;
+
+    vTaskDelete(NULL);
+}
+
+/** Runs one half of the sign-in on a worker and waits for it. One at a time. */
+static esp_err_t run_login_job(int32_t kind)
+{
+    if (s_login_job_live) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    s_login_job.kind = kind;
+    s_login_job.result = ESP_FAIL;
+    s_login_job.done = false;
+    s_login_job_live = true;
+
+    if (xTaskCreate(wb_login_job_run, "wb_login", 8192, &s_login_job, 5, NULL) != pdPASS) {
+        s_login_job_live = false;
+        return ESP_ERR_NO_MEM;
+    }
+
+    const int64_t deadline = esp_timer_get_time() + 25000 * 1000;
+    while (!s_login_job.done && esp_timer_get_time() < deadline) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    return s_login_job.done ? s_login_job.result : ESP_ERR_TIMEOUT;
+}
+
+/**
+ * The two halves of a sign-in, in one route: `action=start` hands back the link, `action=poll`
+ * asks whether it has been authorised yet. A page does start, then polls once a second or two --
+ * the person on the other end is reading a login screen, and no request here waits for that.
+ */
+static esp_err_t handle_workbuddy_login(httpd_req_t *req)
+{
+    char action[16];
+    if (!query_string(req, "action", action, sizeof action)) {
+        snprintf(action, sizeof action, "start");
+    }
+
+    if (strcmp(action, "cancel") == 0) {
+        hal_workbuddy_login_cancel();
+        return send_json(req, "{\"ok\":true}");
+    }
+
+    if (strcmp(action, "start") == 0) {
+        const esp_err_t started = run_login_job(0);
+
+        if (started == ESP_ERR_INVALID_STATE) {
+            return send_error(req, "409 Conflict", "workbuddy_busy",
+                              "a request is already in flight, or the board is offline");
+        }
+        if (started != ESP_OK) {
+            return send_error(req, "502 Bad Gateway", "workbuddy_login",
+                              "the account did not hand out a sign-in link");
+        }
+
+        char url[768];
+        const size_t length = hal_workbuddy_login_url(url, sizeof url);
+        (void)length;
+
+        web_buf_t buf;
+        buf_init(&buf, 900);
+        buf_printf(&buf, "{\"state\":%d,\"url\":\"%s\"}", (int)hal_workbuddy_login_state(), url);
+
+        if (buf.full) {
+            buf_free(&buf);
+            return send_busy(req);
+        }
+
+        const esp_err_t ret = send_json(req, buf.data);
+        buf_free(&buf);
+
+        return ret;
+    }
+
+    /* poll */
+    const esp_err_t polled = run_login_job(1);
+
+    char message[192];
+    hal_workbuddy_login_message(message, sizeof message);
+
+    web_buf_t buf;
+    buf_init(&buf, 320);
+    buf_printf(&buf, "{\"state\":%d,\"done\":%s,\"message\":\"%s\"}",
+               (int)hal_workbuddy_login_state(),
+               hal_workbuddy_login_state() == HAL_WORKBUDDY_LOGIN_DONE ? "true" : "false", message);
+
+    if (buf.full) {
+        buf_free(&buf);
+        return send_busy(req);
+    }
+
+    const esp_err_t ret = send_json(req, buf.data);
+    buf_free(&buf);
+
+    /* 还在等：200 带 done=false，页面照旧每秒一问。令牌到了同样是 200，带上 done=true。 */
+    (void)polled;
+
+    return ret;
+}
+
 /* Asks the account something and waits for it, because a page that shows the answer has
  * nowhere to put a request still in flight. The wait is bounded, and letting go of a
  * request that outlived it is `hal_workbuddy_cancel`. */
@@ -2760,6 +2881,7 @@ static const web_route_t s_routes[] = {
     { "/api/workbuddy/token",  HTTP_POST, handle_workbuddy_token },
     { "/api/workbuddy/forget", HTTP_POST, handle_workbuddy_forget },
     { "/api/workbuddy/start",  HTTP_POST, handle_workbuddy_start },
+    { "/api/workbuddy/login",  HTTP_POST, handle_workbuddy_login },
     { "/api/workbuddy/answer", HTTP_GET,  handle_workbuddy_answer },
     { "/api/wifi/disconnect", HTTP_POST, handle_wifi_disconnect },
     { "/api/wifi/forget",     HTTP_POST, handle_wifi_forget },
