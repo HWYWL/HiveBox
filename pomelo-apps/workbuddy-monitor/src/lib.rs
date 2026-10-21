@@ -251,21 +251,20 @@ impl WorkBuddy {
     pub fn view(&self) -> Element<'_, Message> {
         let theme = self.preferences.theme;
 
-        let mut body = column![].spacing(8).width(Length::Fill);
+        let mut body = column![].spacing(6).width(Length::Fill);
 
         body = body.push(self.header(theme));
         body = body.push(self.checkin_card(theme));
         body = body.push(self.panel_card(theme));
 
         if let Some(notice) = &self.notice {
-            body = body.push(text(notice.text.as_str()).size(FONT_BASE * 0.95).style(
+            body = body.push(text(notice.text.as_str()).size(FONT_BASE * 0.82).style(
                 move |theme: &Theme| iced::widget::text::Style {
                     color: Some(if notice.failed { danger(theme) } else { muted(theme) }),
                 },
             ));
         }
 
-        body = body.push(Space::new().height(Length::Fixed(6.0)));
         body = body.push(self.actions());
 
         container(body)
@@ -283,7 +282,7 @@ impl WorkBuddy {
             String::from("没有令牌 · 在网页上填 /api/workbuddy/token")
         };
 
-        let title = text("WorkBuddy").size(FONT_BASE * 1.5);
+        let title = text("WorkBuddy").size(FONT_BASE * 1.3);
 
         let mut head = row![title].spacing(8).align_y(iced::Alignment::Center);
         head = head.push(Space::new().width(Length::Fill));
@@ -298,7 +297,7 @@ impl WorkBuddy {
         column![
             head,
             text(who)
-                .size(FONT_BASE * 0.85)
+                .size(FONT_BASE * 0.78)
                 .style(move |theme: &Theme| iced::widget::text::Style {
                     color: Some(muted(theme)),
                 }),
@@ -329,9 +328,9 @@ impl WorkBuddy {
             .filter(|name| !name.is_empty());
 
         let mut body = column![
-            text(value).size(FONT_BASE * 1.35),
+            text(value).size(FONT_BASE * 1.2),
             text(detail)
-                .size(FONT_BASE * 0.9)
+                .size(FONT_BASE * 0.85)
                 .style(move |theme: &Theme| iced::widget::text::Style {
                     color: Some(muted(theme)),
                 }),
@@ -396,15 +395,15 @@ impl WorkBuddy {
             .is_some_and(|report| report.checked_in_today);
 
         let checkin = if signed {
-            button(text("已签到").size(FONT_BASE * 1.0)).padding([12, 18]).style(button::secondary)
+            button(text("已签到").size(FONT_BASE * 0.95)).padding([9, 16]).style(button::secondary)
         } else {
-            button(text("签到").size(FONT_BASE * 1.0))
-                .padding([12, 18])
+            button(text("签到").size(FONT_BASE * 0.95))
+                .padding([9, 16])
                 .on_press(Message::Checkin)
         };
 
-        let refresh = button(text("重读").size(FONT_BASE * 1.0))
-            .padding([12, 18])
+        let refresh = button(text("重读").size(FONT_BASE * 0.95))
+            .padding([9, 16])
             .style(button::secondary)
             .on_press(Message::Refresh);
 
@@ -447,7 +446,7 @@ fn line<'a>(label: String, value: String, _theme: ThemeMode) -> Element<'a, Mess
 fn card<'a>(body: Element<'a, Message>, _theme: ThemeMode) -> Element<'a, Message> {
     container(body)
         .width(Length::Fill)
-        .padding(11)
+        .padding(9)
         .style(|theme: &Theme| {
             let palette = theme.extended_palette();
 
