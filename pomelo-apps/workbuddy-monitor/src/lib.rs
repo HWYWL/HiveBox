@@ -358,12 +358,26 @@ impl WorkBuddy {
         let report = self.report.as_ref();
 
         let activity = report.map_or(0, |report| report.activity_credits);
-        let remaining = report
-            .and_then(|report| report.credit_remaining)
-            .map_or_else(|| String::from("—"), |credit| credit.to_string());
-        let total = report
-            .and_then(|report| report.credit_total)
-            .map_or_else(|| String::from("—"), |credit| credit.to_string());
+
+        /* 剩余与总额写一行：两个数说的是同一件事的两头，分两行占的是这块屏幕没有的高度。
+         *
+         * 一位小数，和一个破折号：接口给的是小数（2425.4 分），而没答上来的一格不能写成 0 ——
+         * 「没取到」和「用光了」是两句不同的话。 */
+        let credit = |whole: Option<f32>| match whole {
+            Some(value) => format!("{value:.1}"),
+            None => String::from("—"),
+        };
+
+        let balance = format!(
+            "{} / {}",
+            credit(report.and_then(|report| report.credit_remaining)),
+            credit(report.and_then(|report| report.credit_total))
+        );
+
+        let usage = match (report.and_then(|report| report.usage_kinds), report.and_then(|report| report.usage_calls)) {
+            (Some(kinds), Some(calls)) => format!("{kinds} 类 · {calls} 次"),
+            _ => String::from("—"),
+        };
 
         let days = |value: Option<i64>| match value {
             Some(days) => format!("{days} 天"),
@@ -377,9 +391,9 @@ impl WorkBuddy {
         let token_label = format!("令牌 · 刷新 {refresh}");
 
         let body = column![
+            line(String::from("剩余 / 总额"), balance, theme),
             line(String::from("活动累计"), activity.to_string(), theme),
-            line(String::from("剩余"), remaining, theme),
-            line(String::from("总额"), total, theme),
+            line(String::from("本月用量"), usage, theme),
             line(token_label, access, theme),
         ]
         .spacing(5);

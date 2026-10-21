@@ -47,9 +47,12 @@ fn a_round_trip_lands_in_the_page() {
     assert_eq!(report.daily_credit, 10);
     assert_eq!(report.access_days_left, Some(27));
     assert_eq!(
-        report.credit_remaining, None,
-        "余额接口还不知道，页面画破折号而不是零"
+        report.credit_remaining,
+        Some(2425.4),
+        "余额是接口给的数，一位小数"
     );
+    assert_eq!(report.credit_total, Some(3000.0));
+    assert_eq!(report.usage_calls, Some(87), "本月用量");
 }
 
 #[test]

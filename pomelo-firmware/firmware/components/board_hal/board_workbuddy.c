@@ -93,9 +93,15 @@ static const char *WB_CONF_PATH = "/internal/AppData/WORKBUDDY/workbuddy.conf";
 /** The host the token was issued for. `www.workbuddy.cn` is the auth file's own `domain`. */
 static const char *WB_DEFAULT_HOST = "www.workbuddy.cn";
 
-/** The two calls this file knows. Both are POSTs with an empty object for a body. */
+/** The two calls this file knows. Both are POSTs with an empty object for a body.
+ *
+ * The check-in pair live under `/v2`; the credit pair do not -- that is the API's own inconsistency,
+ * read off a working client, and it is written down here so that nobody "tidies" one to match the
+ * other. */
 static const char *WB_STATUS_PATH  = "/v2/billing/meter/checkin-activity-status";
 static const char *WB_CHECKIN_PATH = "/v2/billing/meter/daily-checkin";
+static const char *WB_SUMMARY_PATH = "/billing/meter/get-user-resource-summary";
+static const char *WB_USAGE_PATH   = "/billing/meter/get-user-resource";
 
 /** How long the whole call may take: resolve, connect, handshake, POST, answer. */
 #define WB_TIMEOUT_MS 15000
@@ -284,6 +290,35 @@ static bool json_string(const char *value, char *out, size_t capacity)
                     }
                     code = (code << 4) | nibble;
                 }
+
+                /* A surrogate pair is one character written as two escapes, and it is what an emoji
+                 * in an activity's name arrives as. Taking the halves one at a time writes two
+                 * three-byte sequences that are not valid UTF-8 -- which is the "garbled name" the
+                 * page showed, not a font problem. Combined here, it is one four-byte character. */
+                if (code >= 0xD800 && code <= 0xDBFF && value[0] == '\\' && value[1] == 'u') {
+                    unsigned long low = 0;
+                    const char *after = value + 2;
+
+                    for (int i = 0; i < 4 && *after != '\0'; i++, after++) {
+                        const char digit = *after;
+                        unsigned long nibble;
+                        if (digit >= '0' && digit <= '9') {
+                            nibble = (unsigned long)(digit - '0');
+                        } else if (digit >= 'a' && digit <= 'f') {
+                            nibble = (unsigned long)(digit - 'a' + 10);
+                        } else if (digit >= 'A' && digit <= 'F') {
+                            nibble = (unsigned long)(digit - 'A' + 10);
+                        } else {
+                            nibble = 0;
+                        }
+                        low = (low << 4) | nibble;
+                    }
+
+                    if (low >= 0xDC00 && low <= 0xDFFF) {
+                        code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+                        value = after;
+                    }
+                }
                 break;
             default:
                 code = (unsigned char)*value;
@@ -305,11 +340,17 @@ static bool json_string(const char *value, char *out, size_t capacity)
             utf8[0] = (char)(0xC0 | (code >> 6));
             utf8[1] = (char)(0x80 | (code & 0x3F));
             width = 2;
-        } else {
+        } else if (code < 0x10000) {
             utf8[0] = (char)(0xE0 | (code >> 12));
             utf8[1] = (char)(0x80 | ((code >> 6) & 0x3F));
             utf8[2] = (char)(0x80 | (code & 0x3F));
             width = 3;
+        } else {
+            utf8[0] = (char)(0xF0 | (code >> 18));
+            utf8[1] = (char)(0x80 | ((code >> 12) & 0x3F));
+            utf8[2] = (char)(0x80 | ((code >> 6) & 0x3F));
+            utf8[3] = (char)(0x80 | (code & 0x3F));
+            width = 4;
         }
 
         if (used + width >= capacity) {
@@ -324,6 +365,57 @@ static bool json_string(const char *value, char *out, size_t capacity)
     out[used] = '\0';
 
     return used > 0;
+}
+
+/**
+ * Whether a run of bytes is UTF-8 this panel can draw.
+ *
+ * The check is the shape of the encoding and not a table of characters: overlong forms, a lead byte
+ * with no continuation after it and a code point past `U+10FFFF` are refused, and everything else
+ * passes. A name that fails is a name the account gave in some other encoding, and a tile can do
+ * without it -- what it cannot do is draw it.
+ */
+static bool utf8_ok(const char *text)
+{
+    const unsigned char *at = (const unsigned char *)text;
+
+    while (*at != 0) {
+        unsigned int need;
+        unsigned int code;
+
+        if (*at < 0x80) {
+            at++;
+            continue;
+        }
+
+        if ((*at & 0xE0) == 0xC0) {
+            need = 1;
+            code = (unsigned int)(*at & 0x1F);
+        } else if ((*at & 0xF0) == 0xE0) {
+            need = 2;
+            code = (unsigned int)(*at & 0x0F);
+        } else if ((*at & 0xF8) == 0xF0) {
+            need = 3;
+            code = (unsigned int)(*at & 0x07);
+        } else {
+            return false;
+        }
+
+        at++;
+
+        for (unsigned int i = 0; i < need; i++, at++) {
+            if ((*at & 0xC0) != 0x80) {
+                return false;
+            }
+            code = (code << 6) | (unsigned int)(*at & 0x3F);
+        }
+
+        if (code > 0x10FFFF) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 /** Whether `value` starts an object, i.e. the `data` of an answer. */
@@ -859,6 +951,98 @@ static const char *account_scope(const char *body)
 }
 
 /**
+ * What is left of the account's credits, and what it was given.
+ *
+ * `get-user-resource-summary` answers one entry per package -- the monthly plan and anything bought
+ * on top of it -- and the App's own "剩余积分" is the sum of `CycleRemainCapacity` across them. So is
+ * this: one number for "剩余" and one for "总额", which is what a tile has room for.
+ *
+ * Returns false when the call did not answer; the fields are then drawn as dashes rather than as
+ * a zero, because "no answer" and "nothing left" are different sentences.
+ */
+static bool fetch_credits(double *out_remaining, double *out_total)
+{
+    int status = 0;
+    const int32_t fault = wb_fetch_retrying(WB_SUMMARY_PATH, s_account.token, &status);
+
+    if (fault != HAL_WORKBUDDY_FAULT_NONE || status < 200 || status >= 300) {
+        ESP_LOGW(TAG, "the credit summary did not answer (%d)", status);
+        return false;
+    }
+
+    const char *scope = account_scope(s_response);
+    const char *packages = json_value(scope, "Packages");
+
+    if (packages == NULL || *packages != '[') {
+        return false;
+    }
+
+    double remaining = 0.0;
+    double total = 0.0;
+    const char *at = packages;
+
+    /* Every `CycleRemainCapacity` in the array, added up. The array is walked rather than the object
+     * parsed: this is one array of flat objects, and a parser for it would be a second JSON reader
+     * in a file that already has one that is a few hundred lines shorter. */
+    while ((at = json_value(at, "CycleRemainCapacity")) != NULL) {
+        remaining += strtod(at, NULL);
+
+        const char *whole = json_value(at, "CycleTotalCapacity");
+        if (whole != NULL) {
+            total += strtod(whole, NULL);
+        }
+
+        at++;
+    }
+
+    *out_remaining = remaining;
+    *out_total = total;
+
+    return true;
+}
+
+/**
+ * How much the account has spent: how many kinds of resource it has, and how many uses this month.
+ *
+ * `get-user-resource` is the same document the App's usage page is drawn from. `TotalDosage` is
+ * "uses", and it lags by two or three hours on the API's own side -- which is why the tile says
+ * 「本月」 and not 「今天」.
+ */
+static bool fetch_usage(long long *out_kinds, long long *out_uses)
+{
+    int status = 0;
+    const int32_t fault = wb_fetch_retrying(WB_USAGE_PATH, s_account.token, &status);
+
+    if (fault != HAL_WORKBUDDY_FAULT_NONE || status < 200 || status >= 300) {
+        ESP_LOGW(TAG, "the usage summary did not answer (%d)", status);
+        return false;
+    }
+
+    const char *data = account_scope(s_response);
+    const char *inner = json_object(json_value(data, "Response"));
+
+    if (inner != NULL) {
+        data = json_object(json_value(inner, "Data"));
+        if (data == NULL) {
+            return false;
+        }
+    }
+
+    long long kinds = 0;
+    long long uses = 0;
+
+    if (!json_number(json_value(data, "TotalCount"), &kinds) ||
+        !json_number(json_value(data, "TotalDosage"), &uses)) {
+        return false;
+    }
+
+    *out_kinds = kinds;
+    *out_uses = uses;
+
+    return true;
+}
+
+/**
  * The status call's answer: the activity, the streak, and how long the token lasts.
  *
  * `credit_remaining` and `credit_total` are empty: the balance is a third endpoint
@@ -886,10 +1070,39 @@ static void render_status(void)
         }
     }
 
+    /* 名字要是坏字节就一个字也不发：应用画它自己的「今日签到」，网页少一行，两边都还是能看的
+     * 东西 —— 一串问号不是。 */
+    if (activity[0] != '\0' && !utf8_ok(activity)) {
+        ESP_LOGW(TAG, "the activity's name is not UTF-8 and is dropped");
+        activity[0] = '\0';
+    }
+
     const long long access_days  = days_until(jwt_expires_at(s_account.token));
     const long long refresh_days = s_account.refresh[0] != '\0'
                                        ? days_until(jwt_expires_at(s_account.refresh))
                                        : -1;
+
+    /* 两张表各一次请求，各自一格缓冲：拼答案的 `snprintf` 只认活得比它久的字符串。 */
+    char remaining_text[16] = "";
+    char total_text[16] = "";
+    char kinds_text[16] = "";
+    char uses_text[16] = "";
+
+    double remaining = 0.0;
+    double credit_total = 0.0;
+
+    if (fetch_credits(&remaining, &credit_total)) {
+        snprintf(remaining_text, sizeof remaining_text, "%.1f", remaining);
+        snprintf(total_text, sizeof total_text, "%.1f", credit_total);
+    }
+
+    long long kinds = 0;
+    long long uses = 0;
+
+    if (fetch_usage(&kinds, &uses)) {
+        snprintf(kinds_text, sizeof kinds_text, "%lld", kinds);
+        snprintf(uses_text, sizeof uses_text, "%lld", uses);
+    }
 
     const int made = snprintf(s_answer, WB_ANSWER_MAX,
                               "ok=1\n"
@@ -900,10 +1113,12 @@ static void render_status(void)
                               "activity=%s\n"
                               "access_days=%lld\n"
                               "refresh_days=%lld\n"
-                              "credit_remaining=\n"
-                              "credit_total=\n",
+                              "credit_remaining=%s\n"
+                              "credit_total=%s\n"
+                              "usage_kinds=%s\n"
+                              "usage_calls=%s\n",
                               flag(checked_in), streak, daily, total, activity, access_days,
-                              refresh_days);
+                              refresh_days, remaining_text, total_text, kinds_text, uses_text);
 
     if (made < 0 || (size_t)made >= WB_ANSWER_MAX) {
         answer_fault(HAL_WORKBUDDY_FAULT_STORAGE);

@@ -11,17 +11,20 @@
 //! activity=签到有礼
 //! access_days=27
 //! refresh_days=29
-//! credit_remaining=
-//! credit_total=
+//! credit_remaining=2425.4
+//! credit_total=3000.0
+//! usage_kinds=4
+//! usage_calls=87
 //! ```
 //!
 //! and a failure as `error=workbuddy_auth`, with `message=` when the account wrote a sentence.
 //! Line-based rather than JSON because both ends are ours: the writer never has to escape an
 //! activity's name, and the reader is [`str::split_once`] ten times instead of a parser.
 //!
-//! Two fields are *empty* rather than zero: `credit_remaining` and `credit_total` are the account's
-//! balance, which is a third endpoint nobody has read yet. An empty field is a dash on the panel, a
-//! zero would be a number somebody believes — see
+//! `credit_remaining` and `credit_total` come from a second call (`get-user-resource-summary`) and
+//! `usage_kinds`/`usage_calls` from a third (`get-user-resource`); when either call does not answer
+//! its fields are *empty* rather than zero. An empty field is a dash on the panel, a zero would be a
+//! number somebody believes — see
 //! [`WorkBuddyReport::credit_remaining`][crate::types::WorkBuddyReport::credit_remaining].
 //!
 //! The one asymmetry is `access_days`/`refresh_days`: `-1` means *unknown* — a token that is not a
@@ -60,8 +63,10 @@ pub fn parse(document: &str) -> WorkBuddyAnswer {
             }
             "access_days" => report.access_days_left = days(value),
             "refresh_days" => report.refresh_days_left = days(value),
-            "credit_remaining" => report.credit_remaining = number(value),
-            "credit_total" => report.credit_total = number(value),
+            "credit_remaining" => report.credit_remaining = decimal(value),
+            "credit_total" => report.credit_total = decimal(value),
+            "usage_kinds" => report.usage_kinds = number(value),
+            "usage_calls" => report.usage_calls = number(value),
             "credited" => report.credited = number(value),
             "already" => report.already_checked_in = value == "1",
             _ => {}
@@ -76,6 +81,18 @@ pub fn parse(document: &str) -> WorkBuddyAnswer {
 
 /// A count, or `None` when the field is empty or is not one.
 fn number(value: &str) -> Option<u32> {
+    let value = value.trim();
+
+    if value.is_empty() {
+        return None;
+    }
+
+    value.parse().ok()
+}
+
+/// A credit, which is a decimal on this API — `2425.4` and not `2425` — or `None` when the field is
+/// empty or is not a number.
+fn decimal(value: &str) -> Option<f32> {
     let value = value.trim();
 
     if value.is_empty() {
@@ -132,6 +149,20 @@ mod tests {
     }
 
     #[test]
+    fn a_balance_keeps_its_tenths_and_a_missing_one_is_a_dash() {
+        let WorkBuddyAnswer::Report(report) =
+            parse("credit_remaining=2425.4\ncredit_total=3000.0\nusage_kinds=4\nusage_calls=87\n")
+        else {
+            panic!("no error in this document");
+        };
+
+        assert_eq!(report.credit_remaining, Some(2425.4));
+        assert_eq!(report.credit_total, Some(3000.0));
+        assert_eq!(report.usage_kinds, Some(4));
+        assert_eq!(report.usage_calls, Some(87));
+    }
+
+    #[test]
     fn an_empty_balance_is_unknown_and_not_zero() {
         let WorkBuddyAnswer::Report(report) = parse(ANSWER) else {
             panic!("a document with no error in it is a report");
@@ -139,7 +170,7 @@ mod tests {
 
         assert_eq!(
             report.credit_remaining, None,
-            "the balance endpoint is not known yet, and a zero would be a number somebody believes"
+            "a call that did not answer is a dash, and a zero would be a number somebody believes"
         );
         assert_eq!(report.credit_total, None);
     }

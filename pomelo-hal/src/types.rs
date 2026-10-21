@@ -1779,7 +1779,7 @@ impl WorkBuddyAccount {
 }
 
 /// What one look at the account found.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct WorkBuddyReport {
     /// Whether today's check-in has happened already.
     pub checked_in_today: bool,
@@ -1797,13 +1797,20 @@ pub struct WorkBuddyReport {
     pub access_days_left: Option<i64>,
     /// The same for the token that renews it, when one is saved.
     pub refresh_days_left: Option<i64>,
-    /// What is left of the account's credits.
+    /// What is left of the account's credits, summed over its packages.
     ///
-    /// `None` until the balance endpoint is known: the activity's *running total* is not it, and a
-    /// number invented from it would be worse than a dash.
-    pub credit_remaining: Option<u32>,
-    /// The account's own total for the same period. See [`WorkBuddyReport::credit_remaining`].
-    pub credit_total: Option<u32>,
+    /// This is the number the App shows at the top of its own screen: `get-user-resource-summary`
+    /// answers one entry per package -- the monthly plan and anything bought on top of it -- and the
+    /// balance is their sum. `None` when that call did not answer, which is a dash and not a zero:
+    /// "no answer" and "nothing left" are different sentences.
+    pub credit_remaining: Option<f32>,
+    /// What the account was given for the same period. See [`WorkBuddyReport::credit_remaining`].
+    pub credit_total: Option<f32>,
+    /// How many kinds of resource the account has spent on (`get-user-resource`'s `TotalCount`).
+    pub usage_kinds: Option<u32>,
+    /// How many uses this month (`TotalDosage`). The API lags by two or three hours on its own side,
+    /// which is why a page says 「本月」 and never 「今天」.
+    pub usage_calls: Option<u32>,
     /// What a check-in just gave, when the answer came from one.
     pub credited: Option<u32>,
     /// The check-in had already happened today — the API's `10001`, which is not a failure.
@@ -1811,7 +1818,7 @@ pub struct WorkBuddyReport {
 }
 
 /// What a WorkBuddy request came to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum WorkBuddyAnswer {
     /// The account answered, and this is what it said.
     Report(WorkBuddyReport),
