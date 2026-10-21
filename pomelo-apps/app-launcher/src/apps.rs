@@ -207,15 +207,17 @@ pub const CATALOGUE: &[Entry] = &[
     },
     // Page 2, after the cloud: the same kind of page about something that is not the box.
     Entry {
+        // A product's own name, in both languages -- the one entry here that is not translated:
+        // 「工作助手」 was a name nobody says. The label is one line of a tile and truncates what does
+        // not fit ("Web Manager" beside it is cut the same way), so a person reads "WorkBu...",
+        // which is the product, and not a translation of it.
         name: "WorkBuddy",
-        // Four characters, because the label is one line of a tile and the product's own name is
-        // two characters too long for it: what the tile says in Chinese is what the page is about.
-        name_zh: "工作助手",
-        // A circle with a tick in it: what the page is about is whether today has been checked in.
-        // The page's own header wears it too, so the tile and the page are one subject.
-        icon: AppIcon::glyph(Icon::CHECK_CIRCLE),
-        // A green of its own, and the only green on the grid: the check-in is the one tile here
-        // that is about a thing going *well*.
-        accent: (66, 165, 110),
+        name_zh: "WorkBuddy",
+        // The product's own mark, baked from its SVG: a green squircle with the buddy in it. No
+        // Material glyph can stand in for a logo, and this is the one tile on the grid that has one.
+        // See `assets/app-icons/` and this crate's `build.rs`.
+        icon: AppIcon::Bitmap(baked::WORKBUDDY_ICON),
+        // The green of the mark itself, so the tile and the picture are the same colour.
+        accent: (36, 190, 143),
     },
 ];

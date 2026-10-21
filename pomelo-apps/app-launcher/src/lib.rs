@@ -1247,8 +1247,20 @@ impl Launcher {
             .style(move |_theme, status| icon_style(entry, status));
 
         let label_raw = entry.localized_name(self.preferences.language);
-        let label_display = style::truncate_label(label_raw, style::LABEL_MAX_WIDTH, style::LABEL);
-        let label_size = style::LABEL;
+
+        /* A Latin name gets one step smaller before it is cut. The budget is a quarter of the panel,
+         * and at the label size that is seven and a half characters: "WorkBuddy" is nine, and a
+         * product's own name drawn as "WorkBu..." is a name nobody recognises. A step down fits it;
+         * what still does not fit -- "Web Manager", eleven -- is truncated the way it always was,
+         * because a label that keeps shrinking is a grid that stops looking like one grid. */
+        let mut label_size = style::LABEL;
+        let mut label_display = style::truncate_label(label_raw, style::LABEL_MAX_WIDTH, label_size);
+
+        if label_display != label_raw && label_raw.chars().all(|c| c.is_ascii()) {
+            label_size = style::LABEL * 0.82;
+            label_display = style::truncate_label(label_raw, style::LABEL_MAX_WIDTH, label_size);
+        }
+
         let label_color = if self.preferences.theme.is_light() {
             Color::from_rgb8(17, 24, 39)
         } else {
@@ -2591,9 +2603,22 @@ mod tests {
         assert_eq!(launcher.preferences().font_size(), FONT_BASE);
     }
 
+    /// A product's own name -- "WorkBuddy" -- is the same string in both languages on purpose: it is
+    /// not a word this catalogue translates, and a translation of it is a name nobody says.
+    const UNTRANSLATED: &[&str] = &["WorkBuddy"];
+
     #[test]
     fn catalogue_entries_are_localized_in_both_languages() {
         for entry in CATALOGUE {
+            if UNTRANSLATED.contains(&entry.name) {
+                assert_eq!(
+                    entry.localized_name(Language::Chinese),
+                    entry.localized_name(Language::English),
+                    "a brand name is not translated"
+                );
+                continue;
+            }
+
             assert_ne!(
                 entry.localized_name(Language::Chinese),
                 entry.localized_name(Language::English)
@@ -2764,6 +2789,16 @@ mod tests {
     #[test]
     fn every_chinese_name_fits_a_tile_label() {
         for entry in CATALOGUE {
+            /* 只查中文名：这条的来由是汉字比拉丁字母宽，五个汉字就撑破一格；拉丁名字本来就会被
+             * 截断（"Web Manager" 就是），那是设计，不是缺陷。 */
+            if entry
+                .localized_name(Language::Chinese)
+                .chars()
+                .all(|c| c.is_ascii())
+            {
+                continue;
+            }
+
             let name = entry.localized_name(Language::Chinese);
             assert_eq!(
                 style::truncate_label(name, style::LABEL_MAX_WIDTH, style::LABEL),

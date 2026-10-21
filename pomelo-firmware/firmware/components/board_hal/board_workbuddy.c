@@ -585,10 +585,52 @@ static long long days_until(long long exp)
 // The file
 // =============================================================================
 
-/** The value of `key = "..."` in the file, with escapes resolved. */
+/**
+ * The value of `key = "..."` in the file, with escapes resolved.
+ *
+ * The file is written as `host = "..."` and not as JSON, so the JSON scanner beside this one finds
+ * nothing in it: it looks for the quoted key. Reading it back was the bug that lost a sign-in on
+ * every reboot -- the token was stored, and then the next boot could not find it. Both shapes are
+ * accepted here, because a file written by an older build is still a file this build must read.
+ */
 static bool conf_string(const char *from, const char *key, char *out, size_t capacity)
 {
-    return json_string(json_value(from, key), out, capacity);
+    const char *value = json_value(from, key);
+
+    if (json_string(value, out, capacity)) {
+        return true;
+    }
+
+    /* `key = "value"`: find the key, skip to the `=`, then hand the quoted string to the same reader
+     * the JSON path uses, so escapes are resolved one way in both. */
+    const char *at = from;
+
+    while ((at = strstr(at, key)) != NULL) {
+        /* The bare word must not be the tail of a longer one: `token` inside `refresh_token`. */
+        const bool starts_word = (at == from) || (at[-1] != '_' && at[-1] != '"' && at[-1] != '\'');
+
+        const char *after = at + strlen(key);
+        while (*after == ' ' || *after == '\t') {
+            after++;
+        }
+
+        if (starts_word && *after == '=') {
+            after++;
+            while (*after == ' ' || *after == '\t') {
+                after++;
+            }
+
+            if (*after == '"' && json_string(after, out, capacity)) {
+                return true;
+            }
+        }
+
+        at += strlen(key);
+    }
+
+    out[0] = '\0';
+
+    return false;
 }
 
 static esp_err_t wb_load(void)
