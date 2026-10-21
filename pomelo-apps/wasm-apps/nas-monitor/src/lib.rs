@@ -268,6 +268,9 @@ struct Monitor {
     disk_text: [u8; 1024],
     disk_len: usize,
 
+    /// 下一回向板子要读数的时刻（`now_ms` 的刻度）。详情页靠它活着：不点什么都五秒一换新。
+    next_ask: i64,
+
     /// 正在填的那一条，或者没有表格。
     form: Option<Form>,
 
@@ -367,6 +370,17 @@ impl Monitor {
             if let Some(len) = host::nas_disks(&mut self.disk_text) {
                 self.disk_len = len.min(self.disk_text.len());
             }
+        }
+
+        // 详情页自己活着：到点就要一次新读数。要是一次看失败了 —— 板子刚醒、Wi-Fi 还没就绪、
+        // 那台机器睡着了 —— 板子会照它自己的钟点再敲，这一页只要一直要，就一直有得画；不点的
+        // 话，六宫格上的数要等下一次手指头才换新。
+        //
+        // 五秒一拍，与板子认的那台机器的间隔是同一个量级；板子那边把凑太近的请求并成一次看。
+        let now = host::now_ms();
+        if self.screen == Screen::Detail && now >= self.next_ask {
+            host::nas_refresh();
+            self.next_ask = now + 5_000;
         }
     }
 
@@ -635,6 +649,7 @@ impl App for Monitor {
             disks: 0,
             disk_text: [0; 1024],
             disk_len: 0,
+            next_ask: 0,
             form: None,
             notice: None,
             pressed: None,
@@ -713,6 +728,9 @@ impl App for Monitor {
 
                         if watched {
                             host::nas_refresh();
+                            // 刚换的机器第一眼只有事实没有速率，速率来自一秒后的第二眼 —— 到点
+                            // 这一页自己会再要，不用手指头催。
+                            self.next_ask = host::now_ms() + 2_000;
                         } else {
                             self.notice = Some("这台机器已经不在清单里了");
                         }

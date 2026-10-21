@@ -833,7 +833,16 @@ fn run_worker(shared: Arc<Shared>) {
             }
             // A failed look keeps no output: whatever the last good look said is still the least
             // wrong thing the panel can draw, and `reading` reports the fault beside it.
-            Err(fault) => inner.fault = fault,
+            //
+            // And a failed look is not the *end* of the looking: the ask that produced it is kept, so
+            // the next pass takes another one at the clock's spacing. A board that has just come up
+            // looks before its Wi-Fi has finished finding the network, and a NAS that is asleep
+            // answers no socket — both are "again, shortly" and not "never": without this, the first
+            // failed look of a boot would sit on the panel until somebody tapped 重读 by hand.
+            Err(fault) => {
+                inner.fault = fault;
+                inner.requested = true;
+            }
         }
     }
 }
