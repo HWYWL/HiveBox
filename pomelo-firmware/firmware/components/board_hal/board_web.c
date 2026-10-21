@@ -2679,6 +2679,14 @@ static void wb_login_job_run(void *arg)
 /** Runs one half of the sign-in on a worker and waits for it. One at a time. */
 static esp_err_t run_login_job(int32_t kind)
 {
+    /* One at a time, and the one in front of it is usually the panel: the page on the board asks
+     * the account for a status every thirty seconds, and a person pressing 登录 can land inside
+     * one. Three hundred milliseconds of patience is the whole fix, and it is invisible when there
+     * was nothing to wait for. */
+    for (int attempt = 0; s_login_job_live && attempt < 8; attempt++) {
+        vTaskDelay(pdMS_TO_TICKS(300));
+    }
+
     if (s_login_job_live) {
         return ESP_ERR_INVALID_STATE;
     }
