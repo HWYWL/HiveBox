@@ -111,4 +111,6 @@ CONFIG_ESP_WIFI_ENABLED=y
 # because of it. The 8 MB of PSRAM have room to spare, and IDF's AES/PSA layers fall back to
 # their non-DMA paths for buffers that live there.
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
-CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
+
+# 任务栈允许落在 PSRAM：这块板的内部 RAM 只剩三十来 KB，一个 8 KB 的 worker 栈就能把它卡死。
+CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y

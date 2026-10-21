@@ -343,7 +343,7 @@ impl WorkBuddy {
             Icon::EVENT_AVAILABLE
         };
 
-        let mut body = column![
+        let body = column![
             row![
                 icon(mark, FONT_BASE * 1.35, brand),
                 text(value).size(FONT_BASE * 1.2),

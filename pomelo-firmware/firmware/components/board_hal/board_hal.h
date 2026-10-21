@@ -1466,6 +1466,9 @@ esp_err_t hal_deepseek_forget(int32_t which);
  */
 void hal_deepseek_user_mask(char *masked, size_t capacity);
 
+/** @brief 那块几十 KB 的响应缓冲落在 PSRAM 里吗。诊断用：落在内部 RAM 时这块板子会喘不过气。 */
+bool hal_deepseek_buffer_is_external(void);
+
 /** @brief 现在存的是什么：Key 的掩码，和有没有 userToken。 */
 void hal_deepseek_credentials(char *masked, size_t capacity, bool *has_user_token);
 

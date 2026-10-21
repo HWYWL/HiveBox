@@ -19,9 +19,19 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
-static hal_log_entry_t s_lines[HAL_LOG_LINES];
+#include "esp_heap_caps.h"
+
+/* The ring lives in PSRAM, not in `.bss`.
+ *
+ * It used to be a static array, and that was twenty-two kilobytes of the scarcest memory on this
+ * board. Internal RAM here is measured in single-digit kilobytes free with a largest block of about
+ * seven — which is less than the stack of one worker task, so the update page could not even start
+ * its HTTP worker and said "not connected to the server", and the DeepSeek worker could not be
+ * created either. Log lines are cold, read-only data; they belong where the room is. */
+static hal_log_entry_t *s_lines;
 
 /* Where the next line goes, and the number it gets. Empty slots keep `seq == 0`, which is what
  * `hal_log_read` reads to mean "nothing has been written here yet". */
@@ -33,7 +43,7 @@ static vprintf_like_t    s_console = vprintf;
 
 static void log_push(const char *text, int length)
 {
-    if (s_lock == NULL || length <= 0) {
+    if (s_lock == NULL || s_lines == NULL || length <= 0) {
         return;
     }
 
@@ -95,7 +105,18 @@ esp_err_t hal_log_init(void)
         }
     }
 
-    memset(s_lines, 0, sizeof s_lines);
+    if (s_lines == NULL) {
+        s_lines = (hal_log_entry_t *)heap_caps_malloc(
+            sizeof(hal_log_entry_t) * HAL_LOG_LINES, MALLOC_CAP_SPIRAM);
+
+        if (s_lines == NULL) {
+            /* PSRAM at boot is a given on this board, but a ring that is missing is a page that
+             * shows no lines — not a reason for the box to fail to come up. */
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
+    memset(s_lines, 0, sizeof(hal_log_entry_t) * HAL_LOG_LINES);
     s_next     = 0;
     s_sequence = 1;
 
@@ -113,7 +134,7 @@ size_t hal_log_read(hal_log_entry_t *out, size_t max, uint32_t *in_out_since)
     uint32_t since = in_out_since != NULL ? *in_out_since : 0;
     size_t   count = 0;
 
-    if (s_lock != NULL && xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) == pdTRUE) {
+    if (s_lines != NULL && s_lock != NULL && xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) == pdTRUE) {
         /* Forwards from the oldest line, so what comes back is in the order it was written. */
         for (size_t i = 0; i < HAL_LOG_LINES && count < max; i++) {
             const hal_log_entry_t *line = &s_lines[(s_next + i) % HAL_LOG_LINES];

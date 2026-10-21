@@ -592,6 +592,15 @@ static esp_err_t handle_system(httpd_req_t *req)
     }
 
     buf_printf(&buf, ",\"uptime\":%lld", esp_timer_get_time() / 1000000);
+    /* 内部 RAM 与 PSRAM 分开报：`esp_get_free_heap_size()` 把两块加在一起，一块还剩三兆的
+     * 时候另一块可能已经见底了 —— 而 HTTPS 握手恰恰只要内部那点。 */
+    buf_printf(&buf, ",\"ds_buffer_external\":%s",
+               hal_deepseek_buffer_is_external() ? "true" : "false");
+    buf_printf(&buf,
+               ",\"heap_internal\":%u,\"heap_internal_block\":%u,\"heap_psram\":%u",
+               (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+               (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+               (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     buf_printf(&buf, ",\"heap_free\":%u", (unsigned)esp_get_free_heap_size());
     buf_printf(&buf, ",\"heap_min\":%u", (unsigned)esp_get_minimum_free_heap_size());
     buf_printf(&buf, ",\"psram_free\":%u",

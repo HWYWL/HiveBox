@@ -105,14 +105,16 @@ static bool s_inited;
 
 /* 一个常驻的 worker，栈在 PSRAM 上。
  *
- * 每次请求新建一个任务在这里是不行的：这块板子的**内部** RAM 已经很紧（那份几十 KB 的响应缓冲
- * 在 PSRAM 上，但任务栈默认也在内部），`xTaskCreate` 直接返回失败 —— 表现就是「读一次」回 400。
- * 所以：栈从 PSRAM 里要（`CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY`），任务建一次，之后靠
- * 一个信号量叫醒它。 */
+ * 每次请求新建一个任务在这里是不行的：这块板子的内部 RAM 只有十几 KB 富余，`xTaskCreate` 会
+ * 返回失败 —— 表现就是「读一次」回 400。所以任务建一次，之后靠一个信号量叫醒它，栈从 PSRAM 里
+ * 要（`CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM`，IDF 6 里那个选项是这个名字）。 */
 static TaskHandle_t s_worker;
 static StackType_t *s_stack;
 static StaticTask_t *s_task_buffer;
 static SemaphoreHandle_t s_wake;
+
+/** 那块几十 KB 的响应缓冲：第一次真正去读的时候才要（见下面它的定义）。 */
+static bool ensure_buffer(void);
 
 static void lock(void)
 {
@@ -601,6 +603,11 @@ static void read_all(void)
     s_have_hours = false;
     memset(s_hours, 0, sizeof s_hours);
 
+    if (!ensure_buffer()) {
+        set_fault(HAL_DEEPSEEK_FAULT_STORAGE, "no buffer");
+        return;
+    }
+
     lock();
     const bool have_key = s_account.used && s_account.key[0] != '\0';
     const bool have_token = s_account.token[0] != '\0';
@@ -662,6 +669,32 @@ static void ds_task(void *arg)
 
         read_all();
     }
+}
+
+/** 响应缓冲，第一次真正去读的时候才要。
+ *
+ * 以前在 `hal_deepseek_init()` 里就要，而且要不到 PSRAM 就退回 `malloc()` —— **那一步是致命的**：
+ * 九十六 KB 落进内部 RAM 之后，这块板子的内部只剩十几 KB，于是
+ *   · 这个 worker 自己的栈（8 KB）都建不出来；
+ *   · 更新页的一次 TLS 握手也做不了，只说「没有连上服务器」。
+ * 而且它在开机时就发生，整个生命周期都缓不过来。
+ *
+ * 现在：晚点要、只要 PSRAM、要不到就明说这一页读不了（不会连累别人）。 */
+static bool ensure_buffer(void)
+{
+    if (s_response != NULL) {
+        return true;
+    }
+
+    s_response = (char *)heap_caps_malloc(DS_RESPONSE_MAX, MALLOC_CAP_SPIRAM);
+
+    if (s_response == NULL) {
+        return false;
+    }
+
+    s_response[0] = '\0';
+
+    return true;
 }
 
 /** 把 worker 建起来（只建一次）。 */
@@ -805,17 +838,7 @@ esp_err_t hal_deepseek_init(void)
         return ESP_ERR_NO_MEM;
     }
 
-    s_response = (char *)heap_caps_malloc(DS_RESPONSE_MAX, MALLOC_CAP_SPIRAM);
-
-    if (s_response == NULL) {
-        s_response = (char *)malloc(DS_RESPONSE_MAX);
-    }
-
-    if (s_response == NULL) {
-        return ESP_ERR_NO_MEM;
-    }
-
-    s_response[0] = '\0';
+    /* 那 96 KB 不在这一刻要：见 `ensure_buffer()`。 */
     s_answer[0] = '\0';
 
     load();
@@ -899,6 +922,11 @@ esp_err_t hal_deepseek_forget(int32_t which)
 esp_err_t hal_deepseek_credentials_forget(void)
 {
     return hal_deepseek_forget(HAL_DEEPSEEK_CRED_ALL);
+}
+
+bool hal_deepseek_buffer_is_external(void)
+{
+    return s_response != NULL && esp_ptr_external_ram(s_response);
 }
 
 void hal_deepseek_user_mask(char *masked, size_t capacity)
