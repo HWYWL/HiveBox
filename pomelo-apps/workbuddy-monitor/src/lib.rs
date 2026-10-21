@@ -251,12 +251,11 @@ impl WorkBuddy {
     pub fn view(&self) -> Element<'_, Message> {
         let theme = self.preferences.theme;
 
-        let mut body = column![].spacing(10).width(Length::Fill);
+        let mut body = column![].spacing(8).width(Length::Fill);
 
         body = body.push(self.header(theme));
         body = body.push(self.checkin_card(theme));
-        body = body.push(self.credits_card(theme));
-        body = body.push(self.token_card(theme));
+        body = body.push(self.panel_card(theme));
 
         if let Some(notice) = &self.notice {
             body = body.push(text(notice.text.as_str()).size(FONT_BASE * 0.95).style(
@@ -272,7 +271,7 @@ impl WorkBuddy {
         container(body)
             .width(Length::Fill)
             .height(Length::Fill)
-            .padding(16)
+            .padding(14)
             .into()
     }
 
@@ -352,8 +351,11 @@ impl WorkBuddy {
         card(body.into(), theme)
     }
 
-    /// 活动累计、剩余、总额。
-    fn credits_card(&self, theme: ThemeMode) -> Element<'_, Message> {
+    /// 积分与令牌：四行，一行一件事。
+    ///
+    /// 合成一张卡而不是两张，是这块屏幕的高度决定的：四百三十点里挤着页头、两张卡和两个按钮，
+    /// 一张只有两行的卡就是给按钮挤出去的二十个像素。
+    fn panel_card(&self, theme: ThemeMode) -> Element<'_, Message> {
         let report = self.report.as_ref();
 
         let activity = report.map_or(0, |report| report.activity_credits);
@@ -364,35 +366,24 @@ impl WorkBuddy {
             .and_then(|report| report.credit_total)
             .map_or_else(|| String::from("—"), |credit| credit.to_string());
 
-        let body = column![
-            line("活动累计", activity.to_string(), theme),
-            line("剩余", remaining, theme),
-            line("总额", total, theme),
-        ]
-        .spacing(6);
-
-        card(body.into(), theme)
-    }
-
-    /// 两个令牌各还剩多久。
-    fn token_card(&self, theme: ThemeMode) -> Element<'_, Message> {
-        let report = self.report.as_ref();
-
-        let access = match report.and_then(|report| report.access_days_left) {
+        let days = |value: Option<i64>| match value {
             Some(days) => format!("{days} 天"),
             None => String::from("—"),
         };
 
-        let refresh = match report.and_then(|report| report.refresh_days_left) {
-            Some(days) => format!("{days} 天"),
-            None => String::from("—"),
-        };
+        let access = days(report.and_then(|report| report.access_days_left));
+        let refresh = days(report.and_then(|report| report.refresh_days_left));
+
+        /* 行名要活得比这一行久：`line` 借的是它，而临时值的借用活不到 `column!` 结束。 */
+        let token_label = format!("令牌 · 刷新 {refresh}");
 
         let body = column![
-            line("访问令牌", access, theme),
-            line("刷新令牌", refresh, theme),
+            line(String::from("活动累计"), activity.to_string(), theme),
+            line(String::from("剩余"), remaining, theme),
+            line(String::from("总额"), total, theme),
+            line(token_label, access, theme),
         ]
-        .spacing(6);
+        .spacing(5);
 
         card(body.into(), theme)
     }
@@ -434,7 +425,10 @@ impl Default for WorkBuddy {
 }
 
 /// 一行「名字 …… 值」。
-fn line<'a>(label: &'a str, value: String, _theme: ThemeMode) -> Element<'a, Message> {
+///
+/// 名字是 `String` 而不是 `&str`：其中一行是拼出来的（「令牌 · 刷新 29 天」），而一个借来的名字
+/// 活不过这一行自己的作用域。
+fn line<'a>(label: String, value: String, _theme: ThemeMode) -> Element<'a, Message> {
     row![
         text(label)
             .size(FONT_BASE * 0.95)
@@ -453,7 +447,7 @@ fn line<'a>(label: &'a str, value: String, _theme: ThemeMode) -> Element<'a, Mes
 fn card<'a>(body: Element<'a, Message>, _theme: ThemeMode) -> Element<'a, Message> {
     container(body)
         .width(Length::Fill)
-        .padding(14)
+        .padding(11)
         .style(|theme: &Theme| {
             let palette = theme.extended_palette();
 
