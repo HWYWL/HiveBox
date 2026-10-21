@@ -704,11 +704,29 @@ static int32_t wb_session_call(wb_session_t *session, const char *path, const ch
     ESP_LOGI(TAG, "POST %s", path);
 
     const esp_err_t err = esp_http_client_perform(session->client);
-    const int status = (err == ESP_OK) ? esp_http_client_get_status_code(session->client) : 0;
+
+    /* The status is read even when `perform` failed, because a 401 is not a failed call: the
+     * account answered, and its answer is "that token is not one of mine". `esp_http_client` calls
+     * it `ESP_ERR_NOT_SUPPORTED` and throws the body away when the 401 carries a
+     * `WWW-Authenticate: Bearer ...` header -- which is exactly the shape this API answers with --
+     * so a status read here is the only thing that tells a refused token apart from a dead wire. */
+    const int status = esp_http_client_get_status_code(session->client);
 
     *out_status = status;
 
     if (err != ESP_OK) {
+        if (status == 401 || status == 403) {
+            ESP_LOGW(TAG, "the account refused the token (%d)", status);
+            esp_http_client_close(session->client);
+            return HAL_WORKBUDDY_FAULT_AUTH;
+        }
+
+        if (status >= 400) {
+            ESP_LOGW(TAG, "the account answered %d: %s", status, esp_err_to_name(err));
+            esp_http_client_close(session->client);
+            return HAL_WORKBUDDY_FAULT_HTTP;
+        }
+
         ESP_LOGW(TAG, "the call failed: %s", esp_err_to_name(err));
         esp_http_client_close(session->client);
         return connection_fault(err);
