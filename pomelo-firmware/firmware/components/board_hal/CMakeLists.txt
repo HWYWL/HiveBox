@@ -16,6 +16,7 @@ idf_component_register(
     SRCS
         "board_hal.c"
         "board_log.c"
+        "board_serial.c"
         "board_event.c"
         "board_display.c"
         "board_touch.c"
@@ -80,6 +81,9 @@ idf_component_register(
     # both the Rust side and the C side can read.
     PRIV_REQUIRES
         spi_flash
+        # 串口回声（oard_serial.c）：芯片自带的 USB Serial/JTAG。IDF 6 把它从 driver
+        # 里拆成了独立组件，driver 不会再顺带把它带进来。
+        esp_driver_usb_serial_jtag
         esp_partition
         # The other app slot, and the calls that make one bootable: `esp_ota_get_next_update_partition`,
         # `esp_ota_begin/write/end` and `esp_ota_set_boot_partition` in `board_http.c`, and the one that

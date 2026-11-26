@@ -17,6 +17,10 @@ esp_err_t board_hal_init(void)
     // 0. Install the log ring before anything else says anything, so the boot sequence is in it
     hal_log_init();
 
+    // 0.2. The serial echo. Before the display on purpose: a board whose panel failed to
+    // come up is exactly the board where one line back over the cable is worth the most.
+    hal_serial_init();
+
     // 0.5. Initialize unified hardware event queue
     hal_event_init();
 

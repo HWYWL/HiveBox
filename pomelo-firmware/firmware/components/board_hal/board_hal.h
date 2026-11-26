@@ -1303,6 +1303,15 @@ esp_err_t hal_workbuddy_probe_requests(const char *day, int32_t page_size, int32
                                        char *out, size_t capacity, size_t *out_length);
 
 /* ---------------------------------------------------------------------------
+ * Serial echo.
+ *
+ * 从 USB 串口收到的一行，回一行「收到数据 ===> …」。装上任务就一直在听，没有别的入口 ——
+ * 这块板子黑屏的时候，它是「应用到底跑没跑」最便宜的那个判据。
+ * ------------------------------------------------------------------------- */
+
+esp_err_t hal_serial_init(void);
+
+/* ---------------------------------------------------------------------------
  * Log ring.
  *
  * The last `HAL_LOG_LINES` lines every `ESP_LOGx` wrote, kept in a ring so the page can show them.
