@@ -88,6 +88,18 @@ pub extern "C" fn rust_main_entry() {
         Err(error) => eprintln!("[web] management server did not start: {error:?}"),
     }
 
+    // The panel's terminal, on port 23, and the same shell the screen runs: a session here is a
+    // `TerminalModel` fed `KeyAction`s, so `ls`/`cd`/`cat`/`rm`/`wifi` are not reimplemented for
+    // telnet — they *are* the same commands. One session per connection, so two people do not `cd`
+    // each other around.
+    //
+    // Plaintext and no password, like the page above: whoever can reach port 23 can run `rm`. Said
+    // here for the same reason — it is a choice, not an oversight.
+    match terminal::telnet::start(terminal::telnet::PORT) {
+        Ok(()) => println!("[telnet] panel terminal on port {}", terminal::telnet::PORT),
+        Err(error) => eprintln!("[telnet] did not start: {error:?}"),
+    }
+
     println!("[iced] starting app-launcher on AMOLED panel (480x480)");
 
     if let Err(error) = app_launcher::program(Arc::clone(&board)).run() {

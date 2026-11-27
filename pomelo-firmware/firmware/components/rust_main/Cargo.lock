@@ -2017,6 +2017,7 @@ dependencies = [
  "pomelo-gfx",
  "pomelo-hal",
  "pomelo-hal-esp32",
+ "terminal",
  "updater",
 ]
 

@@ -29,6 +29,7 @@
 
 mod commands;
 mod remote;
+pub mod telnet;
 mod screen;
 mod shell;
 
